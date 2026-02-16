@@ -1,0 +1,16 @@
+{
+  "name": "pocket-code",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Mobile AI coding agent - Claude Code for your phone",
+  "scripts": {
+    "dev:server": "pnpm --filter @pocket-code/server dev",
+    "build:server": "pnpm --filter @pocket-code/server build",
+    "dev:app": "pnpm --filter @pocket-code/app start"
+  },
+  "pnpm": {
+    "onlyBuiltDependencies": [
+      "esbuild"
+    ]
+  }
+}
