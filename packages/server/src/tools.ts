@@ -4,15 +4,18 @@ import { readFile, writeFile, readdir, stat, mkdir } from "fs/promises";
 import { exec } from "child_process";
 import { promisify } from "util";
 import { join, resolve } from "path";
+import { homedir } from "os";
 
 const execAsync = promisify(exec);
 
 /**
  * Get the workspace root for a session.
- * In production this would be per-user, for MVP we use a shared workspace.
+ * Defaults to ~/.pocket-code/workspaces for persistence across restarts.
  */
 export function getWorkspaceRoot(sessionId: string): string {
-  const base = process.env.WORKSPACE_ROOT || "/tmp/pocket-code-workspaces";
+  const base =
+    process.env.WORKSPACE_ROOT ||
+    resolve(join(homedir(), ".pocket-code", "workspaces"));
   return resolve(join(base, sessionId));
 }
 

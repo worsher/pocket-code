@@ -1,5 +1,6 @@
 import { WebSocketServer, WebSocket } from "ws";
 import { createSession, runAgent, type AgentSession } from "./agent.js";
+import { createTools } from "./tools.js";
 
 const PORT = parseInt(process.env.PORT || "3100", 10);
 
@@ -49,6 +50,38 @@ wss.on("connection", (ws: WebSocket) => {
           await runAgent(session, msg.content, (event) => {
             send(ws, event);
           });
+          break;
+        }
+
+        // ── Geek mode: execute a single tool on demand ──
+        case "tool-exec": {
+          if (!session) {
+            send(ws, { type: "error", error: "No session. Send init first." });
+            return;
+          }
+          const { toolName, args, callId } = msg;
+          const tools = createTools(session.workspace);
+          const toolFn = (tools as Record<string, any>)[toolName];
+          if (!toolFn) {
+            send(ws, {
+              type: "tool-result",
+              callId,
+              toolName,
+              result: { success: false, error: `Unknown tool: ${toolName}` },
+            });
+            break;
+          }
+          try {
+            const result = await toolFn.execute(args);
+            send(ws, { type: "tool-result", callId, toolName, result });
+          } catch (err: any) {
+            send(ws, {
+              type: "tool-result",
+              callId,
+              toolName,
+              result: { success: false, error: err.message },
+            });
+          }
           break;
         }
 
