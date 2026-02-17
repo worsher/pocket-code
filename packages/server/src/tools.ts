@@ -103,7 +103,7 @@ export function createTools(workspace: string) {
             cwd: workspace,
             timeout: 30000,
             maxBuffer: 1024 * 1024,
-            env: { ...process.env, HOME: workspace },
+            env: { ...process.env, HOME: workspace, GIT_TERMINAL_PROMPT: "0" },
           });
           return {
             success: true,

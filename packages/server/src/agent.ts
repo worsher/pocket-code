@@ -101,7 +101,8 @@ export type StreamEvent =
 export async function runAgent(
   session: AgentSession,
   userMessage: string,
-  onEvent: (event: StreamEvent) => void
+  onEvent: (event: StreamEvent) => void,
+  signal?: AbortSignal
 ): Promise<void> {
   session.messages.push({ role: "user", content: userMessage });
 
@@ -117,6 +118,7 @@ export async function runAgent(
       messages: session.messages,
       tools,
       maxSteps: 10,
+      abortSignal: signal,
     });
 
     let fullText = "";

@@ -1,6 +1,7 @@
 import { WebSocketServer, WebSocket } from "ws";
 import { createSession, runAgent, type AgentSession } from "./agent.js";
 import { createTools } from "./tools.js";
+import { setupGitCredentials } from "./gitCredentials.js";
 
 const PORT = parseInt(process.env.PORT || "3100", 10);
 
@@ -11,6 +12,7 @@ console.log(`Pocket Code server listening on ws://localhost:${PORT}`);
 
 wss.on("connection", (ws: WebSocket) => {
   let session: AgentSession | null = null;
+  let currentAbort: AbortController | null = null;
   console.log("[WS] Client connected");
 
   ws.on("message", async (raw: Buffer) => {
@@ -30,6 +32,14 @@ wss.on("connection", (ws: WebSocket) => {
           if (msg.model) {
             session.modelKey = msg.model;
           }
+          // Setup git credentials if provided
+          if (msg.gitCredentials?.length > 0) {
+            try {
+              await setupGitCredentials(session.workspace, msg.gitCredentials);
+            } catch (err: any) {
+              console.error("[WS] Failed to setup git credentials:", err.message);
+            }
+          }
           send(ws, {
             type: "session",
             sessionId: session.sessionId,
@@ -47,9 +57,12 @@ wss.on("connection", (ws: WebSocket) => {
             session.modelKey = msg.model;
           }
 
+          const abort = new AbortController();
+          currentAbort = abort;
           await runAgent(session, msg.content, (event) => {
             send(ws, event);
-          });
+          }, abort.signal);
+          currentAbort = null;
           break;
         }
 
@@ -112,6 +125,14 @@ wss.on("connection", (ws: WebSocket) => {
             send(ws, { type: "file-content", path: msg.path, _reqId: msg._reqId, ...result });
           } catch (err: any) {
             send(ws, { type: "file-content", path: msg.path, _reqId: msg._reqId, success: false, error: err.message });
+          }
+          break;
+        }
+
+        case "abort": {
+          if (currentAbort) {
+            currentAbort.abort();
+            currentAbort = null;
           }
           break;
         }
