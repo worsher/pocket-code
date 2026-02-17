@@ -85,6 +85,37 @@ wss.on("connection", (ws: WebSocket) => {
           break;
         }
 
+        // ── File operations (both modes) ──
+        case "list-files": {
+          if (!session) {
+            send(ws, { type: "error", error: "No session. Send init first." });
+            return;
+          }
+          const listTools = createTools(session.workspace) as Record<string, any>;
+          try {
+            const result = await listTools.listFiles.execute({ path: msg.path || "." });
+            send(ws, { type: "file-list", path: msg.path || ".", _reqId: msg._reqId, ...result });
+          } catch (err: any) {
+            send(ws, { type: "file-list", path: msg.path || ".", _reqId: msg._reqId, success: false, error: err.message });
+          }
+          break;
+        }
+
+        case "read-file": {
+          if (!session) {
+            send(ws, { type: "error", error: "No session. Send init first." });
+            return;
+          }
+          const readTools = createTools(session.workspace) as Record<string, any>;
+          try {
+            const result = await readTools.readFile.execute({ path: msg.path });
+            send(ws, { type: "file-content", path: msg.path, _reqId: msg._reqId, ...result });
+          } catch (err: any) {
+            send(ws, { type: "file-content", path: msg.path, _reqId: msg._reqId, success: false, error: err.message });
+          }
+          break;
+        }
+
         default:
           send(ws, { type: "error", error: `Unknown message type: ${msg.type}` });
       }
