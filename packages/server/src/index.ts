@@ -2,17 +2,24 @@ import { WebSocketServer, WebSocket } from "ws";
 import { createSession, runAgent, type AgentSession } from "./agent.js";
 import { createTools } from "./tools.js";
 import { setupGitCredentials } from "./gitCredentials.js";
+import { verifyToken, registerAnonymous, type AuthPayload } from "./auth.js";
+import { isDockerEnabled, getContainer } from "./docker.js";
+import { initDb, listUserSessions, deleteSession } from "./db.js";
 
 const PORT = parseInt(process.env.PORT || "3100", 10);
 
-const wss = new WebSocketServer({ port: PORT });
 const sessions = new Map<string, AgentSession>();
 
+// Initialise DB before starting WebSocket server
+await initDb();
+
+const wss = new WebSocketServer({ port: PORT });
 console.log(`Pocket Code server listening on ws://localhost:${PORT}`);
 
 wss.on("connection", (ws: WebSocket) => {
   let session: AgentSession | null = null;
   let currentAbort: AbortController | null = null;
+  let auth: AuthPayload | null = null;
   console.log("[WS] Client connected");
 
   ws.on("message", async (raw: Buffer) => {
@@ -21,13 +28,55 @@ wss.on("connection", (ws: WebSocket) => {
       console.log("[WS] Received:", msg.type);
 
       switch (msg.type) {
+        // ── Anonymous registration ─────────────────────
+        case "register": {
+          const deviceId = msg.deviceId;
+          if (!deviceId) {
+            send(ws, { type: "error", error: "deviceId is required" });
+            return;
+          }
+          const result = registerAnonymous(deviceId);
+          send(ws, {
+            type: "auth",
+            token: result.token,
+            userId: result.userId,
+          });
+          break;
+        }
+
+        // ── Session init (requires auth) ───────────────
         case "init": {
+          // Verify token
+          if (msg.token) {
+            auth = verifyToken(msg.token);
+          }
+          if (!auth) {
+            send(ws, { type: "error", error: "Invalid or missing token. Send register first." });
+            return;
+          }
+
           const sessionId = msg.sessionId || crypto.randomUUID();
           if (sessions.has(sessionId)) {
             session = sessions.get(sessionId)!;
+            // Verify session belongs to this user
+            if (session.userId !== auth.userId) {
+              send(ws, { type: "error", error: "Session does not belong to this user." });
+              session = null;
+              return;
+            }
           } else {
-            session = await createSession(sessionId);
+            session = await createSession(sessionId, auth.userId);
             sessions.set(sessionId, session);
+          }
+          // Docker isolation: get or create container
+          if (isDockerEnabled() && !session.containerId) {
+            try {
+              session.containerId = await getContainer(auth.userId, session.workspace);
+              console.log(`[WS] Docker container: ${session.containerId.slice(0, 12)}`);
+            } catch (err: any) {
+              console.error("[WS] Failed to create Docker container:", err.message);
+              // Continue without Docker — falls back to host execution
+            }
           }
           if (msg.model) {
             session.modelKey = msg.model;
@@ -73,7 +122,7 @@ wss.on("connection", (ws: WebSocket) => {
             return;
           }
           const { toolName, args, callId } = msg;
-          const tools = createTools(session.workspace);
+          const tools = createTools(session.workspace, session.containerId);
           const toolFn = (tools as Record<string, any>)[toolName];
           if (!toolFn) {
             send(ws, {
@@ -104,7 +153,7 @@ wss.on("connection", (ws: WebSocket) => {
             send(ws, { type: "error", error: "No session. Send init first." });
             return;
           }
-          const listTools = createTools(session.workspace) as Record<string, any>;
+          const listTools = createTools(session.workspace, session.containerId) as Record<string, any>;
           try {
             const result = await listTools.listFiles.execute({ path: msg.path || "." });
             send(ws, { type: "file-list", path: msg.path || ".", _reqId: msg._reqId, ...result });
@@ -119,13 +168,34 @@ wss.on("connection", (ws: WebSocket) => {
             send(ws, { type: "error", error: "No session. Send init first." });
             return;
           }
-          const readTools = createTools(session.workspace) as Record<string, any>;
+          const readTools = createTools(session.workspace, session.containerId) as Record<string, any>;
           try {
             const result = await readTools.readFile.execute({ path: msg.path });
             send(ws, { type: "file-content", path: msg.path, _reqId: msg._reqId, ...result });
           } catch (err: any) {
             send(ws, { type: "file-content", path: msg.path, _reqId: msg._reqId, success: false, error: err.message });
           }
+          break;
+        }
+
+        // ── Session management ──
+        case "list-sessions": {
+          if (!auth) {
+            send(ws, { type: "error", error: "Not authenticated." });
+            return;
+          }
+          const userSessions = listUserSessions(auth.userId, msg.limit || 50);
+          send(ws, { type: "sessions-list", sessions: userSessions });
+          break;
+        }
+
+        case "delete-session": {
+          if (!auth) {
+            send(ws, { type: "error", error: "Not authenticated." });
+            return;
+          }
+          const deleted = deleteSession(msg.sessionId, auth.userId);
+          send(ws, { type: "session-deleted", sessionId: msg.sessionId, success: deleted });
           break;
         }
 

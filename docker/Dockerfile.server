@@ -1,0 +1,28 @@
+FROM node:20-alpine AS builder
+
+RUN corepack enable && corepack prepare pnpm@latest --activate
+
+WORKDIR /app
+COPY package.json pnpm-workspace.yaml pnpm-lock.yaml ./
+COPY packages/server/package.json packages/server/
+RUN pnpm install --frozen-lockfile --filter @pocket-code/server
+
+COPY packages/server/ packages/server/
+RUN pnpm --filter @pocket-code/server build
+
+# ── Production ───────────────────────────────────────────
+FROM node:20-alpine
+
+RUN corepack enable && corepack prepare pnpm@latest --activate
+# Install Docker CLI (needed to manage sandbox containers)
+RUN apk add --no-cache docker-cli
+
+WORKDIR /app
+COPY --from=builder /app/package.json /app/pnpm-workspace.yaml /app/pnpm-lock.yaml ./
+COPY --from=builder /app/packages/server/package.json packages/server/
+RUN pnpm install --frozen-lockfile --filter @pocket-code/server --prod
+
+COPY --from=builder /app/packages/server/dist packages/server/dist/
+
+EXPOSE 3100
+CMD ["node", "packages/server/dist/index.js"]

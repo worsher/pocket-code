@@ -5,6 +5,7 @@ import { createOpenAI } from "@ai-sdk/openai";
 import { google } from "@ai-sdk/google";
 import { createTools, getWorkspaceRoot } from "./tools.js";
 import { mkdir } from "fs/promises";
+import { saveSession, getSession } from "./db.js";
 
 export type ModelProvider = "anthropic" | "openai" | "google" | "siliconflow";
 
@@ -75,16 +76,33 @@ Guidelines:
 
 export interface AgentSession {
   sessionId: string;
+  userId: string;
   workspace: string;
   messages: CoreMessage[];
   modelKey: string;
+  /** Docker container ID (only set when Docker isolation is enabled) */
+  containerId?: string;
 }
 
-export async function createSession(sessionId: string): Promise<AgentSession> {
+export async function createSession(sessionId: string, userId: string): Promise<AgentSession> {
   const workspace = getWorkspaceRoot(sessionId);
   await mkdir(workspace, { recursive: true });
+
+  // Try to restore from database
+  const saved = getSession(sessionId);
+  if (saved && saved.userId === userId) {
+    return {
+      sessionId,
+      userId,
+      workspace,
+      messages: saved.messages,
+      modelKey: saved.modelKey,
+    };
+  }
+
   return {
     sessionId,
+    userId,
     workspace,
     messages: [],
     modelKey: "deepseek-v3",
@@ -106,7 +124,7 @@ export async function runAgent(
 ): Promise<void> {
   session.messages.push({ role: "user", content: userMessage });
 
-  const tools = createTools(session.workspace);
+  const tools = createTools(session.workspace, session.containerId);
   const model = getModel(session.modelKey);
 
   console.log(`[Agent] model=${session.modelKey}, message="${userMessage.slice(0, 80)}"`);
@@ -145,9 +163,15 @@ export async function runAgent(
     }
 
     session.messages.push({ role: "assistant", content: fullText });
+
+    // Persist to database
+    saveSession(session.sessionId, session.userId, session.messages, session.modelKey);
+
     onEvent({ type: "done" });
   } catch (err: any) {
     console.error("[Agent] Error:", err.message);
+    // Still persist what we have
+    saveSession(session.sessionId, session.userId, session.messages, session.modelKey);
     onEvent({ type: "error", error: err.message });
     onEvent({ type: "done" });
   }

@@ -33,15 +33,17 @@ export async function setupGitCredentials(
 
   if (lines.length === 0) return;
 
+  // Write to $HOME/.git-credentials (HOME=workspace on host, /workspace in container)
   const credPath = join(workspace, ".git-credentials");
   await writeFile(credPath, lines.join("\n") + "\n", "utf-8");
 
-  // Configure git to use the store credential helper
+  // Use 'store' without --file so git resolves $HOME/.git-credentials at runtime.
+  // This works both on host (HOME=workspace) and in Docker (HOME=/workspace, same file via mount).
   await execAsync(
-    `git config --global credential.helper 'store --file=${credPath}'`,
+    `git config --global credential.helper store`,
     {
       cwd: workspace,
-      env: { ...process.env, HOME: workspace },
+      env: { ...process.env, HOME: workspace, GIT_CONFIG_NOSYSTEM: "1" },
       timeout: 5000,
     }
   );

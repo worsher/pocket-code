@@ -5,6 +5,7 @@ import { exec } from "child_process";
 import { promisify } from "util";
 import { join, resolve } from "path";
 import { homedir } from "os";
+import { isDockerEnabled, execInContainer } from "./docker.js";
 
 const execAsync = promisify(exec);
 
@@ -28,7 +29,65 @@ function safePath(workspace: string, relativePath: string): string {
   return full;
 }
 
-export function createTools(workspace: string) {
+// ── Shell exec abstraction ──────────────────────────────
+
+interface ExecOptions {
+  workspace: string;
+  cwd?: string;
+  timeout?: number;
+  env?: Record<string, string>;
+  containerId?: string;
+}
+
+/**
+ * Execute a shell command. If containerId is provided and Docker is enabled,
+ * runs inside the container. Otherwise runs on the host.
+ */
+async function shellExec(
+  command: string,
+  opts: ExecOptions
+): Promise<{ stdout: string; stderr: string }> {
+  if (opts.containerId && isDockerEnabled()) {
+    // Docker mode: relative cwd inside container
+    const containerCwd = opts.cwd
+      ? `/workspace/${opts.cwd}`
+      : "/workspace";
+    const result = await execInContainer(opts.containerId, command, {
+      cwd: containerCwd,
+      timeout: opts.timeout || 30000,
+      env: opts.env,
+    });
+    if (result.exitCode !== 0) {
+      throw Object.assign(
+        new Error(result.stderr || `Command failed with exit code ${result.exitCode}`),
+        { stdout: result.stdout, stderr: result.stderr }
+      );
+    }
+    return { stdout: result.stdout, stderr: result.stderr };
+  }
+
+  // Host mode (dev / no Docker)
+  const { stdout, stderr } = await execAsync(command, {
+    cwd: opts.cwd ? safePath(opts.workspace, opts.cwd) : opts.workspace,
+    timeout: opts.timeout || 30000,
+    maxBuffer: 1024 * 1024,
+    env: { ...process.env, ...opts.env },
+  });
+  return { stdout, stderr };
+}
+
+// ── Tool factory ────────────────────────────────────────
+
+export function createTools(workspace: string, containerId?: string) {
+  /** Git env: isolated HOME, no interactive prompt, skip system config */
+  function gitEnv(): Record<string, string> {
+    const common = { GIT_TERMINAL_PROMPT: "0", GIT_CONFIG_NOSYSTEM: "1" };
+    if (containerId && isDockerEnabled()) {
+      return { HOME: "/workspace", ...common };
+    }
+    return { ...process.env as Record<string, string>, HOME: workspace, ...common };
+  }
+
   return {
     readFile: tool({
       description:
@@ -37,8 +96,15 @@ export function createTools(workspace: string) {
         path: z.string().describe("Relative file path"),
       }),
       execute: async ({ path }) => {
-        const fullPath = safePath(workspace, path);
         try {
+          if (containerId && isDockerEnabled()) {
+            const containerPath = `/workspace/${path}`;
+            const { stdout } = await shellExec(`cat ${JSON.stringify(containerPath)}`, {
+              workspace, containerId, timeout: 10000,
+            });
+            return { success: true, content: stdout };
+          }
+          const fullPath = safePath(workspace, path);
           const content = await readFile(fullPath, "utf-8");
           return { success: true, content };
         } catch (err: any) {
@@ -55,12 +121,60 @@ export function createTools(workspace: string) {
         content: z.string().describe("File content to write"),
       }),
       execute: async ({ path, content }) => {
-        const fullPath = safePath(workspace, path);
         try {
+          if (containerId && isDockerEnabled()) {
+            const containerPath = `/workspace/${path}`;
+            const containerDir = containerPath.substring(0, containerPath.lastIndexOf("/"));
+
+            // Read old content for diff display
+            let oldContent: string | null = null;
+            try {
+              const { stdout } = await shellExec(`cat ${JSON.stringify(containerPath)}`, {
+                workspace, containerId, timeout: 10000,
+              });
+              oldContent = stdout;
+            } catch {
+              // File doesn't exist yet
+            }
+
+            // Create parent directory and write via base64 to handle special characters
+            const b64 = Buffer.from(content, "utf-8").toString("base64");
+            await shellExec(
+              `mkdir -p ${JSON.stringify(containerDir)} && echo ${JSON.stringify(b64)} | base64 -d > ${JSON.stringify(containerPath)}`,
+              { workspace, containerId, timeout: 10000 }
+            );
+
+            const isNew = oldContent === null;
+            return {
+              success: true,
+              path,
+              isNew,
+              ...(isNew ? {} : { oldContent }),
+              newContent: content,
+            };
+          }
+
+          const fullPath = safePath(workspace, path);
+          // Read old content for diff display
+          let oldContent: string | null = null;
+          try {
+            oldContent = await readFile(fullPath, "utf-8");
+          } catch {
+            // File doesn't exist yet
+          }
+
           const dir = fullPath.substring(0, fullPath.lastIndexOf("/"));
           await mkdir(dir, { recursive: true });
           await writeFile(fullPath, content, "utf-8");
-          return { success: true, path };
+
+          const isNew = oldContent === null;
+          return {
+            success: true,
+            path,
+            isNew,
+            ...(isNew ? {} : { oldContent }),
+            newContent: content,
+          };
         } catch (err: any) {
           return { success: false, error: err.message };
         }
@@ -77,8 +191,24 @@ export function createTools(workspace: string) {
           .describe("Relative directory path, defaults to workspace root"),
       }),
       execute: async ({ path }) => {
-        const fullPath = safePath(workspace, path);
         try {
+          if (containerId && isDockerEnabled()) {
+            const containerPath = path === "." ? "/workspace" : `/workspace/${path}`;
+            // Use ls -1F: -1 one per line, -F append / to directories
+            const { stdout } = await shellExec(`ls -1F ${JSON.stringify(containerPath)}`, {
+              workspace, containerId, timeout: 10000,
+            });
+            const items = stdout.trim().split("\n").filter(Boolean).map((entry) => {
+              const isDir = entry.endsWith("/");
+              return {
+                name: isDir ? entry.slice(0, -1) : entry,
+                type: isDir ? "directory" : "file",
+              };
+            });
+            return { success: true, items };
+          }
+
+          const fullPath = safePath(workspace, path);
           const entries = await readdir(fullPath, { withFileTypes: true });
           const items = entries.map((e) => ({
             name: e.name,
@@ -99,11 +229,11 @@ export function createTools(workspace: string) {
       }),
       execute: async ({ command }) => {
         try {
-          const { stdout, stderr } = await execAsync(command, {
-            cwd: workspace,
+          const { stdout, stderr } = await shellExec(command, {
+            workspace,
+            containerId,
             timeout: 30000,
-            maxBuffer: 1024 * 1024,
-            env: { ...process.env, HOME: workspace, GIT_TERMINAL_PROMPT: "0" },
+            env: gitEnv(),
           });
           return {
             success: true,
@@ -121,7 +251,7 @@ export function createTools(workspace: string) {
       },
     }),
 
-    // ── Git tools (CLI wrappers for Termux mode) ──────
+    // ── Git tools (CLI wrappers) ──────────────────────
 
     gitClone: tool({
       description: "Clone a git repository into the workspace.",
@@ -132,14 +262,25 @@ export function createTools(workspace: string) {
       execute: async ({ url, dir }) => {
         try {
           const target = dir || url.split("/").pop()?.replace(/\.git$/, "") || "repo";
+          if (containerId && isDockerEnabled()) {
+            const { stdout, stderr } = await shellExec(
+              `git clone --depth 1 ${url} /workspace/${target}`,
+              { workspace, containerId, timeout: 60000, env: gitEnv() }
+            );
+            return { success: true, stdout: stdout.slice(0, 5000), stderr: stderr.slice(0, 2000) };
+          }
           const targetPath = safePath(workspace, target);
-          const { stdout, stderr } = await execAsync(
+          const { stdout, stderr } = await shellExec(
             `git clone --depth 1 ${url} ${targetPath}`,
-            { cwd: workspace, timeout: 60000, maxBuffer: 1024 * 1024, env: gitEnv() }
+            { workspace, timeout: 60000, env: gitEnv() }
           );
           return { success: true, stdout: stdout.slice(0, 5000), stderr: stderr.slice(0, 2000) };
         } catch (err: any) {
-          return { success: false, error: err.message };
+          return {
+            success: false,
+            error: err.message,
+            stderr: (err.stderr || "").slice(0, 2000),
+          };
         }
       },
     }),
@@ -151,9 +292,8 @@ export function createTools(workspace: string) {
       }),
       execute: async ({ path }) => {
         try {
-          const cwd = path ? safePath(workspace, path) : workspace;
-          const { stdout } = await execAsync("git status --porcelain", {
-            cwd, timeout: 10000, env: gitEnv(),
+          const { stdout } = await shellExec("git status --porcelain", {
+            workspace, containerId, cwd: path, timeout: 10000, env: gitEnv(),
           });
           const files = stdout.trim().split("\n").filter(Boolean).map((line) => ({
             status: line.slice(0, 2).trim(),
@@ -174,8 +314,9 @@ export function createTools(workspace: string) {
       }),
       execute: async ({ filepath, path }) => {
         try {
-          const cwd = path ? safePath(workspace, path) : workspace;
-          await execAsync(`git add ${filepath}`, { cwd, timeout: 10000, env: gitEnv() });
+          await shellExec(`git add ${filepath}`, {
+            workspace, containerId, cwd: path, timeout: 10000, env: gitEnv(),
+          });
           return { success: true };
         } catch (err: any) {
           return { success: false, error: err.message };
@@ -191,11 +332,10 @@ export function createTools(workspace: string) {
       }),
       execute: async ({ message, path }) => {
         try {
-          const cwd = path ? safePath(workspace, path) : workspace;
           const safeMsg = message.replace(/'/g, "'\\''");
-          const { stdout } = await execAsync(
+          const { stdout } = await shellExec(
             `git commit -m '${safeMsg}'`,
-            { cwd, timeout: 10000, env: gitEnv() }
+            { workspace, containerId, cwd: path, timeout: 10000, env: gitEnv() }
           );
           return { success: true, output: stdout.slice(0, 2000) };
         } catch (err: any) {
@@ -213,10 +353,9 @@ export function createTools(workspace: string) {
       }),
       execute: async ({ remote, branch, path }) => {
         try {
-          const cwd = path ? safePath(workspace, path) : workspace;
           const cmd = `git push ${remote || "origin"} ${branch || ""}`.trim();
-          const { stdout, stderr } = await execAsync(cmd, {
-            cwd, timeout: 30000, env: gitEnv(),
+          const { stdout, stderr } = await shellExec(cmd, {
+            workspace, containerId, cwd: path, timeout: 30000, env: gitEnv(),
           });
           return { success: true, stdout: stdout.slice(0, 2000), stderr: stderr.slice(0, 2000) };
         } catch (err: any) {
@@ -234,10 +373,9 @@ export function createTools(workspace: string) {
       }),
       execute: async ({ remote, branch, path }) => {
         try {
-          const cwd = path ? safePath(workspace, path) : workspace;
           const cmd = `git pull ${remote || "origin"} ${branch || ""}`.trim();
-          const { stdout, stderr } = await execAsync(cmd, {
-            cwd, timeout: 30000, env: gitEnv(),
+          const { stdout, stderr } = await shellExec(cmd, {
+            workspace, containerId, cwd: path, timeout: 30000, env: gitEnv(),
           });
           return { success: true, stdout: stdout.slice(0, 2000), stderr: stderr.slice(0, 2000) };
         } catch (err: any) {
@@ -254,11 +392,10 @@ export function createTools(workspace: string) {
       }),
       execute: async ({ depth, path }) => {
         try {
-          const cwd = path ? safePath(workspace, path) : workspace;
           const n = depth || 10;
-          const { stdout } = await execAsync(
+          const { stdout } = await shellExec(
             `git log -${n} --format='%h|%s|%an|%ai'`,
-            { cwd, timeout: 10000, env: gitEnv() }
+            { workspace, containerId, cwd: path, timeout: 10000, env: gitEnv() }
           );
           const commits = stdout.trim().split("\n").filter(Boolean).map((line) => {
             const [sha, message, author, date] = line.split("|");
@@ -279,12 +416,15 @@ export function createTools(workspace: string) {
       }),
       execute: async ({ name, path }) => {
         try {
-          const cwd = path ? safePath(workspace, path) : workspace;
           if (name) {
-            await execAsync(`git branch ${name}`, { cwd, timeout: 10000, env: gitEnv() });
+            await shellExec(`git branch ${name}`, {
+              workspace, containerId, cwd: path, timeout: 10000, env: gitEnv(),
+            });
             return { success: true };
           }
-          const { stdout } = await execAsync("git branch", { cwd, timeout: 10000, env: gitEnv() });
+          const { stdout } = await shellExec("git branch", {
+            workspace, containerId, cwd: path, timeout: 10000, env: gitEnv(),
+          });
           const branches = stdout.trim().split("\n").map((b) => b.trim());
           const current = branches.find((b) => b.startsWith("* "))?.slice(2);
           return {
@@ -306,8 +446,9 @@ export function createTools(workspace: string) {
       }),
       execute: async ({ ref, path }) => {
         try {
-          const cwd = path ? safePath(workspace, path) : workspace;
-          await execAsync(`git checkout ${ref}`, { cwd, timeout: 10000, env: gitEnv() });
+          await shellExec(`git checkout ${ref}`, {
+            workspace, containerId, cwd: path, timeout: 10000, env: gitEnv(),
+          });
           return { success: true };
         } catch (err: any) {
           return { success: false, error: err.message };
@@ -315,9 +456,4 @@ export function createTools(workspace: string) {
       },
     }),
   };
-
-  /** Git-specific env: HOME=workspace for isolated .gitconfig, no interactive prompt */
-  function gitEnv() {
-    return { ...process.env, HOME: workspace, GIT_TERMINAL_PROMPT: "0" };
-  }
 }

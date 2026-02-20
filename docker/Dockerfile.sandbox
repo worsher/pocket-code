@@ -1,0 +1,17 @@
+FROM node:20-alpine
+
+# Install common dev tools
+RUN apk add --no-cache \
+    git \
+    python3 \
+    make \
+    g++ \
+    bash \
+    curl \
+    openssh-client
+
+# Set workspace
+WORKDIR /workspace
+
+# Keep container alive (idle loop)
+CMD ["tail", "-f", "/dev/null"]

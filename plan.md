@@ -19,20 +19,23 @@
 │  ├── 模型选择器                  │
 │  └── 快捷操作栏                  │
 └──────────┬──────────────────────┘
-           │ WebSocket
+           │ WebSocket (JWT 认证)
 ┌──────────▼──────────────────────┐
 │  Server (Node.js)               │
-│  ├── WebSocket 服务              │
+│  ├── WebSocket 服务 + JWT 认证   │
 │  ├── Model Router (模型路由)     │
 │  │   ├── SiliconFlow → DeepSeek/Qwen │
 │  │   ├── Anthropic → Claude     │
 │  │   ├── OpenAI → GPT-4o       │
 │  │   └── Google → Gemini        │
 │  ├── Vercel AI SDK (统一接口)    │
+│  ├── Docker 容器隔离 (每用户)    │
+│  ├── SQLite Session 持久化       │
 │  └── Agent 工具层                │
 │      ├── readFile / writeFile    │
 │      ├── listFiles               │
-│      └── runCommand (bash)       │
+│      ├── runCommand (Docker exec)│
+│      └── Git 工具 (9 个)         │
 └─────────────────────────────────┘
 ```
 
@@ -46,6 +49,9 @@
 | 通信 | WebSocket | 流式输出 |
 | AI 框架 | Vercel AI SDK | 统一多模型接口 + 工具调用 |
 | 模型 API | SiliconFlow (硅基流动) | DeepSeek V3/R1, Qwen Coder |
+| 容器 | Docker (dockerode) | 每用户独立沙箱 |
+| 数据库 | SQLite (better-sqlite3) | Session 持久化 |
+| 认证 | JWT (jsonwebtoken) | 用户认证 |
 | 包管理 | pnpm workspace | monorepo |
 
 ## 项目结构
@@ -54,21 +60,49 @@
 pocket-code/
 ├── package.json              # monorepo root
 ├── pnpm-workspace.yaml
+├── docker/
+│   ├── docker-compose.yml    # 生产部署编排
+│   ├── Dockerfile.server     # Server 镜像
+│   ├── Dockerfile.sandbox    # 用户沙箱镜像
+│   └── nginx.conf            # Nginx 反代 + WSS
+├── scripts/
+│   └── deploy.sh             # VPS 部署脚本
 ├── packages/
 │   ├── server/               # WebSocket + Agent 服务
 │   │   ├── src/
-│   │   │   ├── index.ts      # WebSocket 服务端，处理 init/message
+│   │   │   ├── index.ts      # WebSocket 服务端 + JWT 认证
 │   │   │   ├── agent.ts      # 多模型路由 + streamText + 工具调用
-│   │   │   └── tools.ts      # readFile/writeFile/listFiles/runCommand
-│   │   └── .env              # API keys (SILICONFLOW_API_KEY 等)
+│   │   │   ├── tools.ts      # readFile/writeFile/listFiles/runCommand/Git
+│   │   │   ├── auth.ts       # JWT 签发/验证 + 匿名注册
+│   │   │   ├── db.ts         # SQLite Session 持久化
+│   │   │   ├── docker.ts     # Docker 容器生命周期管理
+│   │   │   └── gitCredentials.ts  # Git 凭证配置
+│   │   └── .env              # API keys + JWT_SECRET + DOCKER_ENABLED
 │   └── app/                  # React Native 移动端
-│       ├── App.tsx           # 主界面：Header + 消息列表 + 输入框 + 模型选择器
+│       ├── App.tsx           # 主界面 + QuickActions
 │       └── src/
 │           ├── hooks/
-│           │   └── useAgent.ts       # WebSocket 连接 + 消息状态管理
-│           └── components/
-│               ├── ChatMessage/      # 消息气泡 (Markdown 渲染 + 工具调用展示)
-│               └── ChatInput/        # 输入框
+│           │   └── useAgent.ts       # WebSocket + JWT + 消息状态管理
+│           ├── services/
+│           │   ├── aiClient.ts       # 直调 AI API (极客模式)
+│           │   ├── modelConfig.ts    # 模型配置
+│           │   ├── localFileSystem.ts # 本地文件系统
+│           │   ├── gitService.ts     # isomorphic-git 封装
+│           │   └── expoFsAdapter.ts  # expo-file-system 适配器
+│           ├── components/
+│           │   ├── ChatMessage/      # 消息气泡 (Markdown + Diff + Terminal)
+│           │   ├── ChatInput/        # 输入框
+│           │   ├── DiffPreview/      # 文件修改 Diff 预览
+│           │   ├── TerminalOutput/   # 命令输出展示
+│           │   ├── QuickActions/     # 快捷操作栏
+│           │   ├── TypingIndicator/  # 打字动画
+│           │   ├── Settings/         # 设置页面
+│           │   ├── SessionDrawer/    # 对话历史抽屉
+│           │   ├── FileExplorer/     # 文件浏览器
+│           │   └── FileViewer/       # 文件查看器
+│           └── store/
+│               ├── settings.ts       # 设置 + JWT token 持久化
+│               └── chatHistory.ts    # 对话历史持久化
 ```
 
 ## 当前进度
@@ -83,6 +117,7 @@ pocket-code/
   - GPT-4o/4o-mini (OpenAI)
   - Gemini Flash (Google)
 - [x] Agent 工具：readFile, writeFile, listFiles, runCommand
+- [x] Git 工具：clone, status, add, commit, push, pull, log, branch, checkout
 - [x] 路径安全：safePath 防目录穿越
 - [x] React Native 对话 UI (暗色主题)
 - [x] 流式输出 + 工具调用展示
@@ -94,61 +129,74 @@ pocket-code/
 - [x] 键盘弹出输入框跟随 (KeyboardAvoidingView behavior="padding")
 - [x] Expo Go 真机验证通过
 
-### 已知问题
+### 已完成 (阶段一 — 提前实现)
 
-- [ ] workspace 存储在 `/tmp`，服务器重启后丢失
-- [ ] 对话记录不持久化，关 App 后丢失
-- [ ] 无法查看 workspace 文件（只能通过对话让 AI 读）
-- [ ] SERVER_URL 硬编码为 LAN IP
+- [x] SERVER_URL 可配置 (设置页面)
+- [x] 对话历史本地缓存 (AsyncStorage)
+- [x] 流式输出取消请求 (abort)
+- [x] 长消息折叠/展开
+- [x] 代码块一键复制
+- [x] 云端/极客双模式切换
+- [x] Workspace 持久化 (~/.pocket-code/workspaces)
+- [x] 文件树浏览器 (FileExplorer)
+- [x] 代码查看器 (FileViewer)
+- [x] 极客模式直调 AI API (XHR SSE 流式解析)
+- [x] 极客模式本地文件系统 (expo-file-system)
+- [x] 极客模式本地 Git (isomorphic-git)
+- [x] Git 认证 (GitHub/Gitee/GitLab PAT)
+
+### 已完成 (阶段一.五 — 多用户基础设施)
+
+- [x] 用户认证系统 (JWT + 匿名注册)
+  - Server: auth.ts — 签发/验证/匿名注册
+  - App: WebSocket 连接时 register → auth → init 流程
+  - Token 持久化到 AsyncStorage
+- [x] Docker 容器隔离 (每用户独立 workspace + bash)
+  - Server: docker.ts — 容器创建/执行/销毁/休眠
+  - tools.ts: runCommand + Git 工具通过 Docker exec
+  - Dockerfile.sandbox: Node.js 20 + git/npm/python3
+  - 资源限制: 512MB 内存, 0.5 CPU
+  - 空闲管理: 5min 暂停, 30min 销毁
+- [x] VPS 部署配置
+  - docker-compose.yml: Server + Nginx + Certbot
+  - Dockerfile.server: 多阶段构建
+  - nginx.conf: WebSocket 反代 + SSL
+  - deploy.sh: 一键部署脚本
+- [x] Session 持久化 (服务端 SQLite)
+  - Server: db.ts — sessions 表 CRUD
+  - agent.ts: runAgent 结束后自动保存
+  - createSession 时从 DB 恢复历史
+  - list-sessions / delete-session WebSocket 消息
+- [x] Diff 预览 (writeFile 工具调用展示变更)
+  - Server: writeFile 返回 oldContent/newContent
+  - App: DiffPreview 组件 — 行级对比、新增/删除高亮
+- [x] 终端输出优化
+  - App: TerminalOutput 组件 — 命令输出专用展示
+  - 超过 20 行自动折叠、一键复制
+  - ChatMessage 中 runCommand 特殊渲染
+- [x] 快捷操作栏
+  - App: QuickActions 组件 — 输入框上方横向按钮
+  - 预设: Commit, Push, Pull, Status, Test, Build, Install
 
 ---
 
 ## 剩余工作
 
-### 阶段一：云端部署 + UI 增强 (2 周)
-
-#### 云端
-
-- [ ] VPS 部署 (2C4G)，安装 Docker + Node.js
-- [ ] Docker 容器隔离 (每用户独立 workspace + bash 环境)
-- [ ] Workspace 持久化 (挂载到持久磁盘，非 /tmp)
-- [ ] Session 持久化 (对话历史入库，关 App 后恢复)
-- [ ] 用户认证 (JWT)
-- [ ] 云端/本地双模式切换
-
-#### 移动端
-
-- [ ] SERVER_URL 可配置 (设置页面或首次启动输入)
-- [ ] 对话历史本地缓存 (AsyncStorage)
-- [ ] 流式输出优化：loading indicator、取消请求
-- [ ] 长消息折叠/展开
-- [ ] 代码块一键复制按钮
-
 ### 阶段二：核心功能完善 (4 周)
 
 #### 移动端
 
-- [ ] 文件树浏览器 (查看 workspace 文件结构)
-- [ ] 代码查看器 + 语法高亮
-- [ ] Diff 预览 (Agent 修改文件前用户确认)
-- [ ] 终端输出展示面板
-- [ ] 快捷操作栏 (git commit/push, npm test, npm run build)
 - [ ] Agent 思维链折叠展示
 - [ ] 项目管理 (多项目切换)
 - [ ] 离线消息缓存
+- [ ] 流式输出 loading indicator 优化
 
 #### 云端
 
 - [ ] 用户认证系统 (GitHub OAuth 登录)
-- [ ] Docker 容器池管理 (创建/销毁/休眠，5min 无操作暂停)
-- [ ] Git 集成 — OAuth + PAT 双轨制认证
-  - GitHub: OAuth App, scope `repo`
-  - Gitee: 第三方应用, scope `projects`
-  - GitLab: Application, scope `read_repository, write_repository`
-  - 容器内通过 `~/.git-credentials` 注入 token
-  - Token AES 加密存储，容器销毁时清除
+- [ ] Docker 容器池管理 (预热 + 负载均衡)
 - [ ] 文件上传/下载
-- [ ] 资源限制 (CPU/内存/磁盘配额)
+- [ ] 资源限制 (CPU/内存/磁盘配额，按用户)
 - [ ] 智能模型路由 (根据 prompt 复杂度自动选模型)
 
 ### 阶段三：产品化 + 增强 (6-8 周)
@@ -189,9 +237,10 @@ pocket-code/
 
 ## 验证清单
 
-阶段一完成后：
-1. 手机发送"创建一个 Express hello world 项目" → AI 自动创建文件
-2. 发送"运行这个项目" → 看到终端输出
-3. 发送"添加一个 /users 路由" → 看到 diff 预览 → 确认修改
-4. 发送"git commit 并 push" → 完成 Git 操作
-5. 网络断开后重连 → Session 恢复
+阶段一.五完成后：
+1. 手机访问公网地址 → 自动获取匿名账号 → 开始对话
+2. 用户 A 和用户 B 同时使用 → 容器隔离，互不干扰
+3. 关闭 App → 重新打开 → 对话从服务端恢复
+4. 发送"创建一个 Express hello world 项目" → AI 自动创建文件 → 看到 Diff 预览
+5. 发送"运行这个项目" → 看到终端输出（TerminalOutput 组件）
+6. 点击 [Git Push] 快捷按钮 → 一键推送
