@@ -6,6 +6,7 @@ import { google } from "@ai-sdk/google";
 import { createTools, getWorkspaceRoot } from "./tools.js";
 import { mkdir } from "fs/promises";
 import { saveSession, getSession } from "./db.js";
+import { analyzePrompt } from "./modelRouter.js";
 
 export type ModelProvider = "anthropic" | "openai" | "google" | "siliconflow";
 
@@ -82,6 +83,8 @@ export interface AgentSession {
   modelKey: string;
   /** Docker container ID (only set when Docker isolation is enabled) */
   containerId?: string;
+  /** Custom project instructions (appended to system prompt) */
+  customPrompt?: string;
 }
 
 export async function createSession(sessionId: string, userId: string): Promise<AgentSession> {
@@ -111,28 +114,66 @@ export async function createSession(sessionId: string, userId: string): Promise<
 
 export type StreamEvent =
   | { type: "text-delta"; text: string }
+  | { type: "reasoning-delta"; text: string }
+  | { type: "model-selected"; model: string; reason: string }
   | { type: "tool-call"; toolName: string; args: unknown }
   | { type: "tool-result"; toolName: string; result: unknown }
   | { type: "error"; error: string }
   | { type: "done" };
 
+export interface ImageData {
+  base64: string;
+  mimeType: string;
+}
+
 export async function runAgent(
   session: AgentSession,
   userMessage: string,
   onEvent: (event: StreamEvent) => void,
-  signal?: AbortSignal
+  signal?: AbortSignal,
+  images?: ImageData[]
 ): Promise<void> {
-  session.messages.push({ role: "user", content: userMessage });
+  // Build user message — multi-modal if images are present
+  if (images?.length) {
+    const content: Array<{ type: string; text?: string; image?: Uint8Array; mimeType?: string }> = [
+      { type: "text", text: userMessage },
+    ];
+    for (const img of images) {
+      content.push({
+        type: "image",
+        image: new Uint8Array(Buffer.from(img.base64, "base64")),
+        mimeType: img.mimeType,
+      });
+    }
+    session.messages.push({ role: "user", content: content as any });
+  } else {
+    session.messages.push({ role: "user", content: userMessage });
+  }
+
+  // Smart model routing: auto-select model based on prompt complexity
+  let effectiveModelKey = session.modelKey;
+  if (session.modelKey === "auto") {
+    const analysis = analyzePrompt(userMessage, session.messages, !!images?.length);
+    effectiveModelKey = analysis.suggestedModel;
+    onEvent({ type: "model-selected", model: effectiveModelKey, reason: analysis.reason });
+    console.log(`[Router] auto → ${effectiveModelKey} (${analysis.reason})`);
+  }
 
   const tools = createTools(session.workspace, session.containerId);
-  const model = getModel(session.modelKey);
+  const model = getModel(effectiveModelKey);
 
-  console.log(`[Agent] model=${session.modelKey}, message="${userMessage.slice(0, 80)}"`);
+  // Append custom project instructions if present
+  let systemPrompt = SYSTEM_PROMPT;
+  if (session.customPrompt?.trim()) {
+    systemPrompt += `\n\n## Project Instructions\n${session.customPrompt.trim()}`;
+  }
+
+  console.log(`[Agent] model=${effectiveModelKey}, message="${userMessage.slice(0, 80)}"`);
 
   try {
     const result = streamText({
       model,
-      system: SYSTEM_PROMPT,
+      system: systemPrompt,
       messages: session.messages,
       tools,
       maxSteps: 10,
@@ -146,6 +187,10 @@ export async function runAgent(
         case "text-delta":
           fullText += part.textDelta;
           onEvent({ type: "text-delta", text: part.textDelta });
+          break;
+
+        case "reasoning":
+          onEvent({ type: "reasoning-delta", text: (part as any).textDelta || "" });
           break;
 
         case "tool-call":
