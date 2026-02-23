@@ -1,0 +1,6 @@
+/Users/worsher/code/self/pocket-code/packages/app/modules/pocket-terminal-module/android/.cxx/Debug/631w101i/x86_64/CMakeFiles/pocket_terminal_module.dir
+/Users/worsher/code/self/pocket-code/packages/app/modules/pocket-terminal-module/android/.cxx/Debug/631w101i/x86_64/CMakeFiles/edit_cache.dir
+/Users/worsher/code/self/pocket-code/packages/app/modules/pocket-terminal-module/android/.cxx/Debug/631w101i/x86_64/CMakeFiles/rebuild_cache.dir
+/Users/worsher/code/self/pocket-code/packages/app/modules/pocket-terminal-module/android/.cxx/Debug/631w101i/x86_64/libpocket-core/CMakeFiles/pocket-core.dir
+/Users/worsher/code/self/pocket-code/packages/app/modules/pocket-terminal-module/android/.cxx/Debug/631w101i/x86_64/libpocket-core/CMakeFiles/edit_cache.dir
+/Users/worsher/code/self/pocket-code/packages/app/modules/pocket-terminal-module/android/.cxx/Debug/631w101i/x86_64/libpocket-core/CMakeFiles/rebuild_cache.dir

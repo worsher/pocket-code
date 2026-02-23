@@ -1,0 +1,9 @@
+{
+  "platforms": ["apple", "android", "web"],
+  "apple": {
+    "modules": ["DummyModule"]
+  },
+  "android": {
+    "modules": ["expo.modules.dummymodule.DummyModule"]
+  }
+}

@@ -1,0 +1,1 @@
+/Users/worsher/code/self/pocket-code/packages/app/modules/pocket-terminal-module/android/build/intermediates/cxx/Debug/631w101i/obj/arm64-v8a

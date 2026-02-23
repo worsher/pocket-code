@@ -1,0 +1,102 @@
+{
+	"configurations" : 
+	[
+		{
+			"directories" : 
+			[
+				{
+					"build" : ".",
+					"childIndexes" : 
+					[
+						1
+					],
+					"jsonFile" : "directory-.-Debug-f5ebdc15457944623624.json",
+					"minimumCMakeVersion" : 
+					{
+						"string" : "3.6.0"
+					},
+					"projectIndex" : 0,
+					"source" : ".",
+					"targetIndexes" : 
+					[
+						1
+					]
+				},
+				{
+					"build" : "libpocket-core",
+					"jsonFile" : "directory-libpocket-core-Debug-7ff37dce19dfbb0710d7.json",
+					"minimumCMakeVersion" : 
+					{
+						"string" : "3.10"
+					},
+					"parentIndex" : 0,
+					"projectIndex" : 1,
+					"source" : "/Users/worsher/code/self/pocket-code/packages/libpocket-core",
+					"targetIndexes" : 
+					[
+						0
+					]
+				}
+			],
+			"name" : "Debug",
+			"projects" : 
+			[
+				{
+					"childIndexes" : 
+					[
+						1
+					],
+					"directoryIndexes" : 
+					[
+						0
+					],
+					"name" : "pocket_terminal_module",
+					"targetIndexes" : 
+					[
+						1
+					]
+				},
+				{
+					"directoryIndexes" : 
+					[
+						1
+					],
+					"name" : "PocketCore",
+					"parentIndex" : 0,
+					"targetIndexes" : 
+					[
+						0
+					]
+				}
+			],
+			"targets" : 
+			[
+				{
+					"directoryIndex" : 1,
+					"id" : "pocket-core::@cad9b6f562984320a4a7",
+					"jsonFile" : "target-pocket-core-Debug-d4a4f80a5de669101288.json",
+					"name" : "pocket-core",
+					"projectIndex" : 1
+				},
+				{
+					"directoryIndex" : 0,
+					"id" : "pocket_terminal_module::@6890427a1f51a3e7e1df",
+					"jsonFile" : "target-pocket_terminal_module-Debug-4effff2ae8699b0be1d8.json",
+					"name" : "pocket_terminal_module",
+					"projectIndex" : 0
+				}
+			]
+		}
+	],
+	"kind" : "codemodel",
+	"paths" : 
+	{
+		"build" : "/Users/worsher/code/self/pocket-code/packages/app/modules/pocket-terminal-module/android/.cxx/Debug/631w101i/armeabi-v7a",
+		"source" : "/Users/worsher/code/self/pocket-code/packages/app/modules/pocket-terminal-module"
+	},
+	"version" : 
+	{
+		"major" : 2,
+		"minor" : 3
+	}
+}

@@ -1,0 +1,9 @@
+{
+  "platforms": ["apple", "android", "web"],
+  "apple": {
+    "modules": ["PocketTerminalModule"]
+  },
+  "android": {
+    "modules": ["expo.modules.pocketterminalmodule.PocketTerminalModule"]
+  }
+}

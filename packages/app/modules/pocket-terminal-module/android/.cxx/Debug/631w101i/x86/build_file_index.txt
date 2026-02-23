@@ -1,0 +1,6 @@
+/Users/worsher/code/self/pocket-code/packages/app/modules/pocket-terminal-module/CMakeLists.txt
+/Users/worsher/code/self/pocket-code/packages/app/modules/pocket-terminal-module/android/.cxx/Debug/631w101i/prefab/x86/prefab/lib/i686-linux-android/cmake/ReactAndroid/ReactAndroidConfig.cmake
+/Users/worsher/code/self/pocket-code/packages/app/modules/pocket-terminal-module/android/.cxx/Debug/631w101i/prefab/x86/prefab/lib/i686-linux-android/cmake/ReactAndroid/ReactAndroidConfigVersion.cmake
+/Users/worsher/code/self/pocket-code/packages/app/modules/pocket-terminal-module/android/.cxx/Debug/631w101i/prefab/x86/prefab/lib/i686-linux-android/cmake/fbjni/fbjniConfig.cmake
+/Users/worsher/code/self/pocket-code/packages/app/modules/pocket-terminal-module/android/.cxx/Debug/631w101i/prefab/x86/prefab/lib/i686-linux-android/cmake/fbjni/fbjniConfigVersion.cmake
+/Users/worsher/code/self/pocket-code/packages/libpocket-core/CMakeLists.txt

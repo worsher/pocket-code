@@ -1,0 +1,5 @@
+/Users/worsher/Library/Android/sdk/cmake/3.22.1/bin/ninja \
+  -C \
+  /Users/worsher/code/self/pocket-code/packages/app/modules/pocket-terminal-module/android/.cxx/Debug/631w101i/x86 \
+  pocket-core \
+  pocket_terminal_module
