@@ -9,9 +9,11 @@ export interface NativeTerminalCore {
   write(data: string): void;
   getRows(): number;
   getCols(): number;
-  getScreenText(): string;
+  getBuffer(): ArrayBuffer;
   getCursorX(): number;
   getCursorY(): number;
+  startPty(): boolean;
+  stopPty(): void;
 }
 
 // 声明全局挂载构造函数 (由 pocket_terminal_module.cpp 注入)
@@ -56,8 +58,9 @@ export class PocketTerminal {
     return this._core?.getCols() ?? this.cols;
   }
 
-  public getScreenText() {
-    return this._core?.getScreenText() ?? "";
+  public getBuffer() {
+    // Falls back to an empty ArrayBuffer if the core isn't injected yet.
+    return this._core?.getBuffer() ?? new ArrayBuffer(0);
   }
 
   public getCursorX() {
@@ -66,5 +69,13 @@ export class PocketTerminal {
 
   public getCursorY() {
     return this._core?.getCursorY() ?? 0;
+  }
+
+  public startPty() {
+    return this._core?.startPty() ?? false;
+  }
+
+  public stopPty() {
+    this._core?.stopPty();
   }
 }

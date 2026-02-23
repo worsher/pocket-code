@@ -1,6 +1,12 @@
 #include "pocket_terminal.h"
+#include <algorithm>
 #include <cstring>
+#include <fcntl.h>
+#include <pty.h>
 #include <stdexcept>
+#include <sys/ioctl.h>
+#include <sys/wait.h>
+#include <unistd.h>
 
 namespace pocket {
 namespace terminal {
@@ -50,6 +56,7 @@ PocketTerminal::PocketTerminal(int rows, int cols)
 }
 
 PocketTerminal::~PocketTerminal() {
+  stopPty();
   if (m_vterm) {
     vterm_free(m_vterm);
   }
@@ -58,21 +65,109 @@ PocketTerminal::~PocketTerminal() {
 void PocketTerminal::resize(int rows, int cols) {
   if (rows == m_rows && cols == m_cols)
     return;
+
   m_rows = rows;
   m_cols = cols;
-  m_cellBuffer.resize(rows * cols);
-  vterm_set_size(m_vterm, rows, cols);
+
+  {
+    std::lock_guard<std::mutex> lock(m_vtermMutex);
+    m_cellBuffer.resize(rows * cols);
+    vterm_set_size(m_vterm, rows, cols);
+  }
+
+  // 通知子进程 PTY 尺寸改变
+  if (m_ptyFd >= 0) {
+    struct winsize ws;
+    ws.ws_row = rows;
+    ws.ws_col = cols;
+    ws.ws_xpixel = 0;
+    ws.ws_ypixel = 0;
+    ioctl(m_ptyFd, TIOCSWINSZ, &ws);
+  }
 }
 
 size_t PocketTerminal::writeInput(const char *data, size_t len) {
+  // 如果 PTY 已连接且正在运行，则直接将输入推给真实的 Linux 子进程 PTY 管道
+  if (m_ptyFd >= 0 && m_running) {
+    return write(m_ptyFd, data, len);
+  }
+
+  // 否则 (比如用于只读或者脱机截屏状态) 直接推给 vterm 状态机
   if (!m_vterm || len == 0)
     return 0;
-  // 将数据推入状态机，让其解析光标与字符位置
+
+  std::lock_guard<std::mutex> lock(m_vtermMutex);
   return vterm_input_write(m_vterm, data, len);
 }
 
-const TerminalCell *PocketTerminal::getBuffer() const {
-  return m_cellBuffer.data();
+void PocketTerminal::copyBufferOut(TerminalCell *outBuffer, size_t maxBytes) {
+  std::lock_guard<std::mutex> lock(m_vtermMutex);
+  size_t bytesToCopy =
+      std::min(maxBytes, m_cellBuffer.size() * sizeof(TerminalCell));
+  std::memcpy(outBuffer, m_cellBuffer.data(), bytesToCopy);
+}
+
+bool PocketTerminal::startPty() {
+  if (m_running)
+    return false;
+
+  m_pid = forkpty(&m_ptyFd, nullptr, nullptr, nullptr);
+  if (m_pid < 0) {
+    return false; // Error Forking
+  }
+
+  if (m_pid == 0) {
+    // Child process: execute shell
+    setenv("TERM", "xterm-256color", 1);
+    const char *shell = "/system/bin/sh";
+    execl(shell, "-", nullptr);
+    exit(1);
+  }
+
+  // Parent process
+  m_running = true;
+  m_readerThread = std::thread(&PocketTerminal::readerLoop, this);
+
+  // 初始化设置窗口大小
+  struct winsize ws;
+  ws.ws_row = m_rows;
+  ws.ws_col = m_cols;
+  ws.ws_xpixel = 0;
+  ws.ws_ypixel = 0;
+  ioctl(m_ptyFd, TIOCSWINSZ, &ws);
+
+  return true;
+}
+
+void PocketTerminal::stopPty() {
+  m_running = false;
+  if (m_ptyFd >= 0) {
+    close(m_ptyFd);
+    m_ptyFd = -1;
+  }
+  if (m_pid > 0) {
+    kill(m_pid, SIGKILL);
+    waitpid(m_pid, nullptr, 0);
+    m_pid = -1;
+  }
+  if (m_readerThread.joinable()) {
+    m_readerThread.join();
+  }
+}
+
+void PocketTerminal::readerLoop() {
+  char buf[4096];
+  while (m_running) {
+    int bytesRead = read(m_ptyFd, buf, sizeof(buf));
+    if (bytesRead > 0) {
+      std::lock_guard<std::mutex> lock(m_vtermMutex);
+      vterm_input_write(m_vterm, buf, bytesRead);
+    } else if (bytesRead <= 0) {
+      // Error or EOF (Shell closed)
+      break;
+    }
+  }
+  m_running = false;
 }
 
 // ============== C Callbacks ==============
@@ -96,23 +191,36 @@ int PocketTerminal::onDamage(VTermRect rect, void *user) {
       size_t idx = row * self->m_cols + col;
       auto &out = self->m_cellBuffer[idx];
 
-      out.width = vcell.width;
-      std::memcpy(out.chars, vcell.chars, sizeof(out.chars));
+      out.ch = vcell.chars[0];
 
       // 将可能存在的 Palette(Index) 色彩空间强制转换为 RGB 真彩色方便前端消费
       vterm_screen_convert_color_to_rgb(self->m_screen, &vcell.fg);
       vterm_screen_convert_color_to_rgb(self->m_screen, &vcell.bg);
 
-      // 复制颜色与排版属性
-      out.fg = {vcell.fg.rgb.red, vcell.fg.rgb.green, vcell.fg.rgb.blue, 255};
-      out.bg = {vcell.bg.rgb.red, vcell.bg.rgb.green, vcell.bg.rgb.blue, 255};
+      // ARGB (0xAARRGGBB) 方便 JS 端 Uint32Array 直接解析
+      out.fg = (0xFF << 24) | (vcell.fg.rgb.red << 16) |
+               (vcell.fg.rgb.green << 8) | vcell.fg.rgb.blue;
+      out.bg = (0xFF << 24) | (vcell.bg.rgb.red << 16) |
+               (vcell.bg.rgb.green << 8) | vcell.bg.rgb.blue;
 
-      out.bold = vcell.attrs.bold;
-      out.underline = vcell.attrs.underline;
-      out.italic = vcell.attrs.italic;
-      out.blink = vcell.attrs.blink;
-      out.reverse = vcell.attrs.reverse;
-      out.strike = vcell.attrs.strike;
+      // 组装标志位: bit 0(bold), 1(underline), 2(italic), 3(blink), 4(reverse),
+      // 5(strike) bit 8-15 存放宽度 (width)
+      uint32_t flags = 0;
+      if (vcell.attrs.bold)
+        flags |= (1 << 0);
+      if (vcell.attrs.underline)
+        flags |= (1 << 1);
+      if (vcell.attrs.italic)
+        flags |= (1 << 2);
+      if (vcell.attrs.blink)
+        flags |= (1 << 3);
+      if (vcell.attrs.reverse)
+        flags |= (1 << 4);
+      if (vcell.attrs.strike)
+        flags |= (1 << 5);
+
+      flags |= ((vcell.width & 0xFF) << 8);
+      out.flags = flags;
     }
   }
   return 1;

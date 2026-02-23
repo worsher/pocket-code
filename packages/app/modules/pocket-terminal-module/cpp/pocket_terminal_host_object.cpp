@@ -50,56 +50,41 @@ jsi::Value PocketTerminalHostObject::get(jsi::Runtime &rt,
       return jsi::Value(m_terminal->getCursorY());
     };
     return jsi::Function::createFromHostFunction(rt, name, 0, func);
-  } else if (propName == "getScreenText") {
+  } else if (propName == "getBuffer") {
     auto func = [this](jsi::Runtime &rt, const jsi::Value &thisValue,
                        const jsi::Value *args, size_t count) -> jsi::Value {
-      auto buffer = m_terminal->getBuffer();
-      int rows = m_terminal->getRows();
-      int cols = m_terminal->getCols();
+      size_t rows = m_terminal->getRows();
+      size_t cols = m_terminal->getCols();
+      size_t byteLength = rows * cols * sizeof(TerminalCell);
 
-      std::string screenStr;
-      // 预分配内存，每行以换行符结束
-      screenStr.reserve(rows * (cols + 1));
+      // Create a JS ArrayBuffer
+      jsi::Function arrayBufferCtor =
+          rt.global().getPropertyAsFunction(rt, "ArrayBuffer");
+      jsi::Object arrayBufferObj =
+          arrayBufferCtor.callAsConstructor(rt, static_cast<double>(byteLength))
+              .getObject(rt);
+      jsi::ArrayBuffer arrayBuffer = arrayBufferObj.getArrayBuffer(rt);
 
-      for (int r = 0; r < rows; ++r) {
-        for (int c = 0; c < cols; ++c) {
-          const auto &cell = buffer[r * cols + c];
-          if (cell.chars[0] == 0) {
-            screenStr += ' ';
-          } else {
-            // 目前只处理单字节 ASCII/UTF-8 简单呈现（后续可完善多字节支持）
-            // VTerm 会将 unicode 编在 chars 数组中
-            char chStr[5] = {0};
-            int len = 0;
-            for (int i = 0; cell.chars[i] && i < VTERM_MAX_CHARS_PER_CELL;
-                 i++) {
-              uint32_t c32 = cell.chars[i];
-              if (c32 < 0x80) {
-                chStr[len++] = (char)c32;
-              } else if (c32 < 0x800) {
-                chStr[len++] = 0xC0 | (c32 >> 6);
-                chStr[len++] = 0x80 | (c32 & 0x3F);
-              } else if (c32 < 0x10000) {
-                chStr[len++] = 0xE0 | (c32 >> 12);
-                chStr[len++] = 0x80 | ((c32 >> 6) & 0x3F);
-                chStr[len++] = 0x80 | (c32 & 0x3F);
-              } else {
-                chStr[len++] = 0xF0 | (c32 >> 18);
-                chStr[len++] = 0x80 | ((c32 >> 12) & 0x3F);
-                chStr[len++] = 0x80 | ((c32 >> 6) & 0x3F);
-                chStr[len++] = 0x80 | (c32 & 0x3F);
-              }
-            }
-            if (len == 0) {
-              screenStr += ' ';
-            } else {
-              screenStr += chStr;
-            }
-          }
-        }
-        screenStr += '\n';
-      }
-      return jsi::String::createFromUtf8(rt, screenStr);
+      // Copy cells data to JS reachable ArrayBuffer memory using thread-safe
+      // method
+      m_terminal->copyBufferOut(
+          reinterpret_cast<TerminalCell *>(arrayBuffer.data(rt)), byteLength);
+
+      return arrayBufferObj;
+    };
+    return jsi::Function::createFromHostFunction(rt, name, 0, func);
+  } else if (propName == "startPty") {
+    auto func = [this](jsi::Runtime &rt, const jsi::Value &thisValue,
+                       const jsi::Value *args, size_t count) -> jsi::Value {
+      bool success = m_terminal->startPty();
+      return jsi::Value(success);
+    };
+    return jsi::Function::createFromHostFunction(rt, name, 0, func);
+  } else if (propName == "stopPty") {
+    auto func = [this](jsi::Runtime &rt, const jsi::Value &thisValue,
+                       const jsi::Value *args, size_t count) -> jsi::Value {
+      m_terminal->stopPty();
+      return jsi::Value::undefined();
     };
     return jsi::Function::createFromHostFunction(rt, name, 0, func);
   }
