@@ -1,4 +1,5 @@
 import { Paths, File, Directory } from "expo-file-system";
+import { runLocalCommand } from "pocket-terminal-module";
 import type { AppSettings } from "../store/settings";
 import {
   gitClone,
@@ -185,6 +186,11 @@ export async function executeLocalTool(
         args.ref as string,
         args.path as string | undefined
       );
+    case "runCommand": {
+      const workspace = getDefaultWorkspace().replace("file://", "");
+      const cwd = (args.cwd as string | undefined) || workspace;
+      return runLocalCommand(args.command as string, cwd);
+    }
     default:
       return null; // Not supported locally
   }

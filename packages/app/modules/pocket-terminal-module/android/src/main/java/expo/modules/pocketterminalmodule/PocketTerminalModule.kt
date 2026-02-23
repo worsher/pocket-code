@@ -56,6 +56,22 @@ class PocketTerminalModule : Module() {
       ))
     }
 
+    // Headless command execution for AI tool calls (runCommand in local geek mode)
+    AsyncFunction("runLocalCommand") { command: String, workdir: String ->
+      val pb = ProcessBuilder("/system/bin/sh", "-c", command)
+      pb.directory(java.io.File(workdir))
+      val process = pb.start()
+      val stdout = process.inputStream.bufferedReader().readText()
+      val stderr = process.errorStream.bufferedReader().readText()
+      val exitCode = process.waitFor()
+      mapOf(
+        "success"  to (exitCode == 0),
+        "stdout"   to stdout.take(10000),
+        "stderr"   to stderr.take(5000),
+        "exitCode" to exitCode
+      )
+    }
+
     // Enables the module to be used as a native view. Definition components that are accepted as part of
     // the view definition: Prop, Events.
     View(PocketTerminalModuleView::class) {

@@ -85,3 +85,12 @@ export class PocketTerminal {
     return this._core?.pullScrollback() ?? null;
   }
 }
+
+/** 无交互式本地命令执行，供 AI 工具调用 */
+export async function runLocalCommand(
+  command: string,
+  workdir: string = '.'
+): Promise<{ success: boolean; stdout: string; stderr: string; exitCode: number }> {
+  const module = requireNativeModule('PocketTerminalModule');
+  return module.runLocalCommand(command, workdir);
+}

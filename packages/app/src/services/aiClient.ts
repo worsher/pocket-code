@@ -272,11 +272,7 @@ Available tool categories:
 - File operations: readFile, writeFile, listFiles
 - Git: gitClone, gitStatus, gitAdd, gitCommit, gitPush, gitPull, gitLog, gitBranch, gitCheckout`;
 
-    if (isLocal) {
-        prompt += `\n- Shell: runCommand is NOT available in local mode. You MUST use the dedicated git tools (gitClone, gitCommit, etc.) for all git operations.`;
-    } else {
-        prompt += `\n- Shell: runCommand (execute shell commands in the workspace)`;
-    }
+    prompt += `\n- Shell: runCommand (execute shell commands directly on the device)`;
 
     if (configuredGit.length > 0) {
         const platforms = configuredGit.map((c) => `${c.platform} (${c.host})`).join(", ");
