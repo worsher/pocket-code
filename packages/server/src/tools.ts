@@ -10,10 +10,17 @@ import { isDockerEnabled, execInContainer } from "./docker.js";
 const execAsync = promisify(exec);
 
 /**
- * Get the workspace root for a session.
- * Defaults to ~/.pocket-code/workspaces for persistence across restarts.
+ * Get the workspace root for a session or project.
+ * - With projectId: ~/.pocket-code/projects/{projectId}/workspace (shared across sessions)
+ * - Without projectId: ~/.pocket-code/workspaces/{sessionId} (legacy, per-session)
  */
-export function getWorkspaceRoot(sessionId: string): string {
+export function getWorkspaceRoot(sessionId: string, projectId?: string): string {
+  if (projectId) {
+    const base =
+      process.env.PROJECTS_ROOT ||
+      resolve(join(homedir(), ".pocket-code", "projects"));
+    return resolve(join(base, projectId, "workspace"));
+  }
   const base =
     process.env.WORKSPACE_ROOT ||
     resolve(join(homedir(), ".pocket-code", "workspaces"));

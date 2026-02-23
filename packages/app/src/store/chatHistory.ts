@@ -26,6 +26,7 @@ export interface StoredMessage {
 
 export interface SessionInfo {
     id: string;
+    projectId: string; // Project this session belongs to (empty = legacy)
     title: string; // First user message or "New Chat"
     lastUpdated: number;
     messageCount: number;
@@ -40,7 +41,8 @@ const chatKey = (sessionId: string) => `pocket-code:chat:${sessionId}`;
 
 export async function saveChatHistory(
     sessionId: string,
-    messages: StoredMessage[]
+    messages: StoredMessage[],
+    projectId: string = ''
 ): Promise<void> {
     await AsyncStorage.setItem(chatKey(sessionId), JSON.stringify(messages));
 
@@ -53,9 +55,11 @@ export async function saveChatHistory(
         existing.title = title;
         existing.lastUpdated = Date.now();
         existing.messageCount = messages.length;
+        existing.projectId = projectId;
     } else {
         sessions.push({
             id: sessionId,
+            projectId,
             title,
             lastUpdated: Date.now(),
             messageCount: messages.length,
@@ -79,11 +83,21 @@ export async function listSessions(): Promise<SessionInfo[]> {
     try {
         const raw = await AsyncStorage.getItem(SESSIONS_KEY);
         const sessions: SessionInfo[] = raw ? JSON.parse(raw) : [];
+        // Ensure projectId field exists on legacy records
+        for (const s of sessions) {
+            if (s.projectId === undefined) s.projectId = '';
+        }
         // Sort by last updated, newest first
         return sessions.sort((a, b) => b.lastUpdated - a.lastUpdated);
     } catch {
         return [];
     }
+}
+
+/** List sessions filtered by projectId */
+export async function listSessionsByProject(projectId: string): Promise<SessionInfo[]> {
+    const all = await listSessions();
+    return all.filter((s) => s.projectId === projectId);
 }
 
 export async function deleteSession(sessionId: string): Promise<void> {

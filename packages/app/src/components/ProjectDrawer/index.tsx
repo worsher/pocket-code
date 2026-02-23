@@ -17,9 +17,10 @@ import type { Project } from "../../store/projects";
 interface Props {
   onSelectProject?: (projectId: string) => void;
   onEditPrompt?: () => void;
+  onDeleteWorkspace?: (projectId: string) => void;
 }
 
-export default function ProjectDrawer({ onSelectProject, onEditPrompt }: Props) {
+export default function ProjectDrawer({ onSelectProject, onEditPrompt, onDeleteWorkspace }: Props) {
   const {
     projects,
     currentProject,
@@ -47,14 +48,25 @@ export default function ProjectDrawer({ onSelectProject, onEditPrompt }: Props) 
 
   const handleDelete = (project: Project) => {
     if (project.id === "default") return;
-    Alert.alert(`删除项目`, `确定要删除 "${project.name}" 吗？`, [
-      { text: "取消", style: "cancel" },
-      {
-        text: "删除",
-        style: "destructive",
-        onPress: () => deleteProject(project.id),
-      },
-    ]);
+    Alert.alert(
+      `删除项目`,
+      `确定要删除 "${project.name}" 吗？`,
+      [
+        { text: "取消", style: "cancel" },
+        {
+          text: "删除（保留文件）",
+          onPress: () => deleteProject(project.id),
+        },
+        {
+          text: "删除（含文件）",
+          style: "destructive",
+          onPress: () => {
+            deleteProject(project.id);
+            onDeleteWorkspace?.(project.id);
+          },
+        },
+      ]
+    );
   };
 
   const renderItem = ({ item }: { item: Project }) => {

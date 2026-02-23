@@ -1,7 +1,8 @@
 import { WebSocketServer, WebSocket } from "ws";
 import { createServer, type IncomingMessage, type ServerResponse } from "http";
+import { rm } from "fs/promises";
 import { createSession, runAgent, type AgentSession } from "./agent.js";
-import { createTools } from "./tools.js";
+import { createTools, getWorkspaceRoot } from "./tools.js";
 import { setupGitCredentials } from "./gitCredentials.js";
 import { verifyToken, registerAnonymous, type AuthPayload } from "./auth.js";
 import { isDockerEnabled, getContainer } from "./docker.js";
@@ -111,6 +112,7 @@ wss.on("connection", (ws: WebSocket) => {
           }
 
           const sessionId = msg.sessionId || crypto.randomUUID();
+          const projectId: string = msg.projectId || '';
           if (sessions.has(sessionId)) {
             session = sessions.get(sessionId)!;
             // Verify session belongs to this user
@@ -120,7 +122,7 @@ wss.on("connection", (ws: WebSocket) => {
               return;
             }
           } else {
-            session = await createSession(sessionId, auth.userId);
+            session = await createSession(sessionId, auth.userId, projectId);
             sessions.set(sessionId, session);
           }
           // Docker isolation: get or create container
@@ -150,6 +152,7 @@ wss.on("connection", (ws: WebSocket) => {
           send(ws, {
             type: "session",
             sessionId: session.sessionId,
+            projectId: session.projectId,
             workspace: session.workspace,
           });
           break;
@@ -270,7 +273,8 @@ wss.on("connection", (ws: WebSocket) => {
             send(ws, { type: "error", error: "Not authenticated." });
             return;
           }
-          const userSessions = listUserSessions(auth.userId, msg.limit || 50);
+          const projectFilter: string | undefined = msg.projectId || undefined;
+          const userSessions = listUserSessions(auth.userId, msg.limit || 50, projectFilter);
           send(ws, { type: "sessions-list", sessions: userSessions });
           break;
         }
@@ -282,6 +286,32 @@ wss.on("connection", (ws: WebSocket) => {
           }
           const deleted = deleteSession(msg.sessionId, auth.userId);
           send(ws, { type: "session-deleted", sessionId: msg.sessionId, success: deleted });
+          break;
+        }
+
+        case "delete-project-workspace": {
+          if (!auth) {
+            send(ws, { type: "error", error: "Not authenticated." });
+            return;
+          }
+          const { projectId: delProjectId } = msg;
+          if (!delProjectId) {
+            send(ws, { type: "error", error: "projectId is required." });
+            return;
+          }
+          // Verify ownership: check that this user has at least one session in the project
+          const projectSessions = listUserSessions(auth.userId, 1, delProjectId);
+          if (projectSessions.length === 0) {
+            send(ws, { type: "project-workspace-deleted", projectId: delProjectId, success: false, error: "No sessions found for this project." });
+            return;
+          }
+          const workspacePath = getWorkspaceRoot('', delProjectId);
+          try {
+            await rm(workspacePath, { recursive: true, force: true });
+            send(ws, { type: "project-workspace-deleted", projectId: delProjectId, success: true });
+          } catch (err: any) {
+            send(ws, { type: "project-workspace-deleted", projectId: delProjectId, success: false, error: err.message });
+          }
           break;
         }
 

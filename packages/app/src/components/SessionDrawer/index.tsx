@@ -11,10 +11,12 @@ import {
   Alert,
 } from "react-native";
 import {
+  listSessionsByProject,
   listSessions,
   deleteSession,
   type SessionInfo,
 } from "../../store/chatHistory";
+import { useProject } from "../../contexts/ProjectContext";
 import ProjectDrawer from "../ProjectDrawer";
 
 const SCREEN_WIDTH = Dimensions.get("window").width;
@@ -27,6 +29,7 @@ interface Props {
   onSelectSession: (sessionId: string) => void;
   onNewSession: () => void;
   onEditPrompt?: () => void;
+  onDeleteWorkspace?: (projectId: string) => void;
 }
 
 export default function SessionDrawer({
@@ -36,9 +39,11 @@ export default function SessionDrawer({
   onSelectSession,
   onNewSession,
   onEditPrompt,
+  onDeleteWorkspace,
 }: Props) {
   const [sessions, setSessions] = useState<SessionInfo[]>([]);
   const slideAnim = useRef(new Animated.Value(-DRAWER_WIDTH)).current;
+  const { currentProject } = useProject();
 
   useEffect(() => {
     if (visible) {
@@ -58,9 +63,16 @@ export default function SessionDrawer({
   }, [visible]);
 
   const loadSessions = async () => {
-    const list = await listSessions();
+    const list = currentProject
+      ? await listSessionsByProject(currentProject.id)
+      : await listSessions();
     setSessions(list);
   };
+
+  // Reload when project changes
+  useEffect(() => {
+    if (visible) loadSessions();
+  }, [currentProject?.id]);
 
   const handleDelete = (session: SessionInfo) => {
     Alert.alert("删除对话", `确定删除「${session.title}」？`, [
@@ -153,7 +165,7 @@ export default function SessionDrawer({
           ]}
         >
           {/* Project Selector */}
-          <ProjectDrawer onEditPrompt={onEditPrompt} />
+          <ProjectDrawer onEditPrompt={onEditPrompt} onDeleteWorkspace={onDeleteWorkspace} />
 
           {/* Divider */}
           <View style={styles.divider} />

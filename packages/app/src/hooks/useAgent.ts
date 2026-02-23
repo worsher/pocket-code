@@ -64,11 +64,12 @@ interface UseAgentOptions {
   settings: AppSettings;
   model?: string;
   customPrompt?: string;
+  projectId?: string;
 }
 
 // ── Main Hook ──────────────────────────────────────────
 
-export function useAgent({ settings, model = "deepseek-v3", customPrompt }: UseAgentOptions) {
+export function useAgent({ settings, model = "deepseek-v3", customPrompt, projectId }: UseAgentOptions) {
   const [messages, setMessages] = useState<Message[]>([]);
   const [isConnected, setIsConnected] = useState(false);
   const [isStreaming, setIsStreaming] = useState(false);
@@ -84,6 +85,9 @@ export function useAgent({ settings, model = "deepseek-v3", customPrompt }: UseA
 
   const customPromptRef = useRef(customPrompt);
   customPromptRef.current = customPrompt;
+
+  const projectIdRef = useRef(projectId);
+  projectIdRef.current = projectId;
 
   // Ref for workspaceMode — avoid stale closure in executeTool
   const workspaceModeRef = useRef(settings.workspaceMode);
@@ -116,7 +120,7 @@ export function useAgent({ settings, model = "deepseek-v3", customPrompt }: UseA
   // ── Save helper (debounced, avoids high-frequency saves) ──
   const saveMessages = useCallback((msgs: Message[], sid: string | null) => {
     if (!sid || msgs.length === 0) return;
-    saveChatHistory(sid, msgs as StoredMessage[]).catch(() => { });
+    saveChatHistory(sid, msgs as StoredMessage[], projectIdRef.current || '').catch(() => { });
   }, []);
 
   // ── Determine the Server URL based on mode ────────────
@@ -153,6 +157,7 @@ export function useAgent({ settings, model = "deepseek-v3", customPrompt }: UseA
         type: "init",
         token,
         sessionId: sessionIdRef.current,
+        projectId: projectIdRef.current || undefined,
         model: modelRef.current,
         gitCredentials: gitCredentialsRef.current?.filter((c) => c.token) || [],
       })
@@ -914,12 +919,34 @@ export function useAgent({ settings, model = "deepseek-v3", customPrompt }: UseA
     setIsStreaming(false);
   }, []);
 
+  // ── Reset session when project changes ───────────────
+  // When the user switches projects, disconnect and start a new session
+  // so the server creates the workspace for the new project.
+  useEffect(() => {
+    if (!projectId) return;
+    abortRef.current?.abort();
+    wsRef.current?.close();
+    wsRef.current = null;
+    setMessages([]);
+    setSessionId(null);
+    sessionIdRef.current = null;
+    setIsStreaming(false);
+    setIsConnected(false);
+  }, [projectId]);
+
   // ── Cleanup ───────────────────────────────────────────
   useEffect(() => {
     return () => {
       abortRef.current?.abort();
       wsRef.current?.close();
     };
+  }, []);
+
+  /** Send a request to delete a project's workspace directory on the server */
+  const deleteProjectWorkspace = useCallback((pid: string) => {
+    const ws = wsRef.current;
+    if (!ws || ws.readyState !== WebSocket.OPEN) return;
+    ws.send(JSON.stringify({ type: "delete-project-workspace", projectId: pid }));
   }, []);
 
   return {
@@ -940,5 +967,6 @@ export function useAgent({ settings, model = "deepseek-v3", customPrompt }: UseA
     newSession,
     requestFileList,
     requestFileContent,
+    deleteProjectWorkspace,
   };
 }

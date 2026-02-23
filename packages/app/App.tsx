@@ -83,7 +83,8 @@ function MainScreen() {
     newSession,
     requestFileList,
     requestFileContent,
-  } = useAgent({ settings, model: currentModel, customPrompt: currentProject?.customPrompt });
+    deleteProjectWorkspace,
+  } = useAgent({ settings, model: currentModel, customPrompt: currentProject?.customPrompt, projectId: currentProject?.id });
 
   const listRef = useRef<FlatList>(null);
   const appStateRef = useRef<AppStateStatus>(AppState.currentState);
@@ -309,6 +310,7 @@ function MainScreen() {
           setShowSessionDrawer(false);
           setTimeout(() => setShowPromptEditor(true), 250);
         }}
+        onDeleteWorkspace={deleteProjectWorkspace}
       />
 
       {/* Project Prompt Editor */}

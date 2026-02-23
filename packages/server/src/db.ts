@@ -32,6 +32,7 @@ export async function initDb(): Promise<void> {
     CREATE TABLE IF NOT EXISTS sessions (
       session_id TEXT PRIMARY KEY,
       user_id TEXT NOT NULL,
+      project_id TEXT NOT NULL DEFAULT '',
       title TEXT DEFAULT '',
       messages TEXT DEFAULT '[]',
       model_key TEXT DEFAULT 'deepseek-v3',
@@ -41,6 +42,15 @@ export async function initDb(): Promise<void> {
   `);
   db.run(`CREATE INDEX IF NOT EXISTS idx_sessions_user ON sessions(user_id);`);
   db.run(`CREATE INDEX IF NOT EXISTS idx_sessions_updated ON sessions(updated_at DESC);`);
+  db.run(`CREATE INDEX IF NOT EXISTS idx_sessions_project ON sessions(project_id);`);
+
+  // Migration: add project_id column to existing sessions table (if upgrading from older schema)
+  try {
+    db.run(`ALTER TABLE sessions ADD COLUMN project_id TEXT NOT NULL DEFAULT ''`);
+    db.run(`CREATE INDEX IF NOT EXISTS idx_sessions_project ON sessions(project_id)`);
+  } catch {
+    // Column already exists — safe to ignore
+  }
 
   // User quotas table
   db.run(`
@@ -83,6 +93,7 @@ function persist(): void {
 export interface SessionRecord {
   sessionId: string;
   userId: string;
+  projectId: string;
   title: string;
   messages: CoreMessage[];
   modelKey: string;
@@ -92,6 +103,7 @@ export interface SessionRecord {
 
 export interface SessionInfo {
   sessionId: string;
+  projectId: string;
   title: string;
   modelKey: string;
   messageCount: number;
@@ -106,7 +118,8 @@ export function saveSession(
   sessionId: string,
   userId: string,
   messages: CoreMessage[],
-  modelKey: string
+  modelKey: string,
+  projectId: string = ''
 ): void {
   const now = Date.now();
   const firstUserMsg = messages.find((m) => m.role === "user");
@@ -116,14 +129,15 @@ export function saveSession(
       : "";
 
   db.run(
-    `INSERT INTO sessions (session_id, user_id, title, messages, model_key, created_at, updated_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?)
+    `INSERT INTO sessions (session_id, user_id, project_id, title, messages, model_key, created_at, updated_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?)
      ON CONFLICT(session_id) DO UPDATE SET
+       project_id = excluded.project_id,
        title = excluded.title,
        messages = excluded.messages,
        model_key = excluded.model_key,
        updated_at = excluded.updated_at`,
-    [sessionId, userId, title, JSON.stringify(messages), modelKey, now, now]
+    [sessionId, userId, projectId, title, JSON.stringify(messages), modelKey, now, now]
   );
   persist();
 }
@@ -141,6 +155,7 @@ export function getSession(sessionId: string): SessionRecord | null {
   return {
     sessionId: row.session_id as string,
     userId: row.user_id as string,
+    projectId: (row.project_id as string) || '',
     title: row.title as string,
     messages: JSON.parse(row.messages as string),
     modelKey: row.model_key as string,
@@ -149,20 +164,28 @@ export function getSession(sessionId: string): SessionRecord | null {
   };
 }
 
-/** List sessions for a user */
+/** List sessions for a user, optionally filtered by projectId */
 export function listUserSessions(
   userId: string,
-  limit: number = 50
+  limit: number = 50,
+  projectId?: string
 ): SessionInfo[] {
-  const stmt = db.prepare(
-    `SELECT session_id, user_id, title, model_key, messages,
-            created_at, updated_at
-     FROM sessions
-     WHERE user_id = ?
-     ORDER BY updated_at DESC
-     LIMIT ?`
-  );
-  stmt.bind([userId, limit]);
+  const sql = projectId !== undefined
+    ? `SELECT session_id, user_id, project_id, title, model_key, messages,
+              created_at, updated_at
+       FROM sessions
+       WHERE user_id = ? AND project_id = ?
+       ORDER BY updated_at DESC
+       LIMIT ?`
+    : `SELECT session_id, user_id, project_id, title, model_key, messages,
+              created_at, updated_at
+       FROM sessions
+       WHERE user_id = ?
+       ORDER BY updated_at DESC
+       LIMIT ?`;
+
+  const stmt = db.prepare(sql);
+  stmt.bind(projectId !== undefined ? [userId, projectId, limit] : [userId, limit]);
 
   const results: SessionInfo[] = [];
   while (stmt.step()) {
@@ -170,6 +193,7 @@ export function listUserSessions(
     const msgs = JSON.parse(row.messages as string);
     results.push({
       sessionId: row.session_id as string,
+      projectId: (row.project_id as string) || '',
       title: row.title as string,
       modelKey: row.model_key as string,
       messageCount: Array.isArray(msgs) ? msgs.length : 0,

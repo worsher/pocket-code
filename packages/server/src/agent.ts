@@ -78,6 +78,8 @@ Guidelines:
 export interface AgentSession {
   sessionId: string;
   userId: string;
+  /** Project this session belongs to (empty string = legacy per-session workspace) */
+  projectId: string;
   workspace: string;
   messages: CoreMessage[];
   modelKey: string;
@@ -87,8 +89,12 @@ export interface AgentSession {
   customPrompt?: string;
 }
 
-export async function createSession(sessionId: string, userId: string): Promise<AgentSession> {
-  const workspace = getWorkspaceRoot(sessionId);
+export async function createSession(
+  sessionId: string,
+  userId: string,
+  projectId: string = ''
+): Promise<AgentSession> {
+  const workspace = getWorkspaceRoot(sessionId, projectId || undefined);
   await mkdir(workspace, { recursive: true });
 
   // Try to restore from database
@@ -97,6 +103,7 @@ export async function createSession(sessionId: string, userId: string): Promise<
     return {
       sessionId,
       userId,
+      projectId: saved.projectId || projectId,
       workspace,
       messages: saved.messages,
       modelKey: saved.modelKey,
@@ -106,6 +113,7 @@ export async function createSession(sessionId: string, userId: string): Promise<
   return {
     sessionId,
     userId,
+    projectId,
     workspace,
     messages: [],
     modelKey: "deepseek-v3",
@@ -210,13 +218,13 @@ export async function runAgent(
     session.messages.push({ role: "assistant", content: fullText });
 
     // Persist to database
-    saveSession(session.sessionId, session.userId, session.messages, session.modelKey);
+    saveSession(session.sessionId, session.userId, session.messages, session.modelKey, session.projectId);
 
     onEvent({ type: "done" });
   } catch (err: any) {
     console.error("[Agent] Error:", err.message);
     // Still persist what we have
-    saveSession(session.sessionId, session.userId, session.messages, session.modelKey);
+    saveSession(session.sessionId, session.userId, session.messages, session.modelKey, session.projectId);
     onEvent({ type: "error", error: err.message });
     onEvent({ type: "done" });
   }
