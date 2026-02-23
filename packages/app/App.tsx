@@ -144,8 +144,10 @@ function MainScreen() {
   const handleNewSession = useCallback(() => {
     newSession();
     // Reconnect after clearing
-    setTimeout(() => connect(), 100);
-  }, [newSession, connect]);
+    if (needsAutoConnect) {
+      setTimeout(() => connect(), 100);
+    }
+  }, [newSession, connect, needsAutoConnect]);
 
   const selectedModel = AVAILABLE_MODELS.find((m) => m.key === currentModel);
   const isGeek = settings.mode === "geek";
@@ -178,7 +180,7 @@ function MainScreen() {
           >
             <Text style={styles.menuIcon}>☰</Text>
           </TouchableOpacity>
-          <Text style={styles.title}>Pocket Code</Text>
+          <Text style={styles.title} numberOfLines={1}>Pocket Code</Text>
           {isGeek && (
             <View style={styles.geekBadge}>
               <Text style={styles.geekBadgeText}>⚡ 极客</Text>
@@ -191,7 +193,7 @@ function MainScreen() {
             style={styles.modelBadge}
             onPress={() => setShowModelPicker(true)}
           >
-            <Text style={styles.modelBadgeText}>
+            <Text style={styles.modelBadgeText} numberOfLines={1}>
               {selectedModel?.label ?? currentModel}
             </Text>
           </TouchableOpacity>
@@ -741,12 +743,14 @@ const styles = StyleSheet.create({
   headerLeft: {
     flexDirection: "row",
     alignItems: "center",
-    gap: 8,
+    gap: 6,
+    flexShrink: 1,
   },
   headerRight: {
     flexDirection: "row",
     alignItems: "center",
-    gap: 8,
+    gap: 6,
+    flexShrink: 0,
   },
   menuBtn: {
     padding: 4,
@@ -760,6 +764,7 @@ const styles = StyleSheet.create({
     color: "#FFFFFF",
     fontSize: 18,
     fontWeight: "700",
+    flexShrink: 1,
   },
   geekBadge: {
     backgroundColor: "#1B3A1B",
@@ -776,16 +781,18 @@ const styles = StyleSheet.create({
   },
   modelBadge: {
     backgroundColor: "#1C1C1E",
-    paddingHorizontal: 10,
+    paddingHorizontal: 8,
     paddingVertical: 5,
     borderRadius: 12,
     borderWidth: 0.5,
     borderColor: "#38383A",
+    maxWidth: 90,
   },
   modelBadgeText: {
     color: "#8E8E93",
     fontSize: 12,
     fontWeight: "500",
+    flexShrink: 1,
   },
   settingsBtn: {
     padding: 4,

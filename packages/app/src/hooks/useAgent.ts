@@ -923,9 +923,11 @@ export function useAgent({ settings, model = "deepseek-v3", customPrompt, projec
       setIsStreaming(false);
 
       // Reconnect — connect() reads sessionIdRef.current
-      setTimeout(() => connect(), 50);
+      if (needsAutoConnect) {
+        setTimeout(() => connect(), 50);
+      }
     },
-    [serverUrl, connect]
+    [serverUrl, connect, needsAutoConnect]
   );
 
   /** Start a new empty session */

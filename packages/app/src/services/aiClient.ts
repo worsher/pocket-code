@@ -300,16 +300,26 @@ Available tool categories:
 
 function parseSSELines(
     text: string,
-    lastIndex: number
+    lastIndex: number,
+    isDone: boolean = false
 ): { lines: string[]; newIndex: number } {
     const newText = text.substring(lastIndex);
     const parts = newText.split("\n");
-    // If the text doesn't end with newline, the last part is incomplete
     const hasTrailing = newText.endsWith("\n");
-    const lines = hasTrailing ? parts.slice(0, -1) : parts.slice(0, -1);
-    const consumed = hasTrailing
-        ? lastIndex + newText.length
-        : lastIndex + newText.length - (parts[parts.length - 1]?.length || 0);
+
+    let lines: string[];
+    let consumed: number;
+
+    if (isDone) {
+        lines = parts.filter((p) => p.trim().length > 0);
+        consumed = lastIndex + newText.length;
+    } else {
+        lines = parts.slice(0, -1); // Always drop the last element (empty if trailing newline, partial if no newline)
+        consumed = hasTrailing
+            ? lastIndex + newText.length
+            : lastIndex + newText.length - (parts[parts.length - 1]?.length || 0);
+    }
+
     return { lines, newIndex: consumed };
 }
 
@@ -359,9 +369,16 @@ export function streamChatOpenAI(params: {
         xhr.onreadystatechange = () => {
             // readyState 3 = LOADING (partial data available)
             if (xhr.readyState < 3) return;
+            if (xhr.readyState === 3 && lastIndex === 0) {
+                console.log(`[aiClient] Received first byte from ${baseURL}`);
+            }
 
             try {
-                const { lines, newIndex } = parseSSELines(xhr.responseText, lastIndex);
+                const { lines, newIndex } = parseSSELines(
+                    xhr.responseText,
+                    lastIndex,
+                    xhr.readyState === 4
+                );
                 lastIndex = newIndex;
 
                 for (const line of lines) {
@@ -452,34 +469,97 @@ export function streamChatOpenAI(params: {
 
             // readyState 4 = DONE
             if (xhr.readyState === 4) {
+                const textSample = xhr.responseText ? String(xhr.responseText).slice(0, 500) : "empty response";
+                console.log(`[aiClient] Request completed with status ${xhr.status}. Response preview: ${textSample}`);
                 if (xhr.status !== 200 && !settled) {
-                    callbacks.onError(`API error ${xhr.status}: ${xhr.responseText.slice(0, 500)}`);
+                    const errorText = xhr.responseText ? String(xhr.responseText).slice(0, 500) : "No response text";
+                    console.error(`[aiClient] API Error ${xhr.status}:`, errorText);
+                    callbacks.onError(`API error ${xhr.status}: ${errorText}`);
+                } else if (!settled) {
+                    // Fallback for non-compliant providers (like GLM-4.6 on iFlow)
+                    // that don't send `data: [DONE]` at the end of stream.
+                    flushToolCalls(toolCallAccum, callbacks);
+                    callbacks.onDone();
                 }
                 finish();
             }
         };
 
-        xhr.onerror = () => {
+        xhr.onerror = (e) => {
+            console.error(`[aiClient] Network error:`, e);
             callbacks.onError("Network error");
             finish();
         };
 
-        // Convert messages: keep content arrays as-is for multi-modal
-        const apiMessages = [
-            { role: "system", content: systemPrompt },
-            ...messages.map((m) => ({
+        let apiMessages: any[];
+
+        // iFlow/GLM workaround: some versions do not support 'system' role properly 
+        // and return empty responses. We merge the system prompt into the first user message.
+        // Also, GLM is strict: it rejects empty assistant messages or consecutive user/assistant messages.
+        if (baseURL.includes("iflow.cn") || modelId.includes("glm-")) {
+            const rawMessages = messages.map((m) => ({
                 role: m.role,
                 content: m.content,
                 ...(m.tool_calls ? { tool_calls: m.tool_calls } : {}),
                 ...(m.tool_call_id ? { tool_call_id: m.tool_call_id } : {}),
-            })),
-        ];
+            }));
 
-        const body = JSON.stringify({
+            // Clean up history to strictly enforce User-Assistant alternation and drop empties
+            const cleaned: any[] = [];
+            for (const m of rawMessages) {
+                // Ignore empty assistant messages caused by previous failed attempts
+                if (m.role === "assistant" && !m.content && !m.tool_calls?.length) continue;
+
+                const last = cleaned[cleaned.length - 1];
+                if (last && last.role === m.role && typeof last.content === "string" && typeof m.content === "string") {
+                    // Merge consecutive messages of the same role
+                    last.content = `${last.content}\n\n${m.content}`;
+                    continue;
+                }
+                cleaned.push(m);
+            }
+            apiMessages = cleaned;
+
+            // Find first user message and prepend system prompt
+            const firstUserMsg = apiMessages.find(m => m.role === "user");
+            if (firstUserMsg && typeof firstUserMsg.content === "string") {
+                firstUserMsg.content = `[System Instructions]\n${systemPrompt}\n\n[User Query]\n${firstUserMsg.content}`;
+            } else if (firstUserMsg && Array.isArray(firstUserMsg.content)) {
+                // If it's a multi-modal array, prepend a text part
+                firstUserMsg.content.unshift({ type: "text", text: `[System Instructions]\n${systemPrompt}\n\n[User Query]\n` });
+            } else if (!firstUserMsg) {
+                // Fallback if no user message exists (unlikely in chat)
+                apiMessages.unshift({ role: "user", content: systemPrompt });
+            }
+        } else {
+            apiMessages = [
+                { role: "system", content: systemPrompt },
+                ...messages.map((m) => ({
+                    role: m.role,
+                    content: m.content,
+                    ...(m.tool_calls ? { tool_calls: m.tool_calls } : {}),
+                    ...(m.tool_call_id ? { tool_call_id: m.tool_call_id } : {}),
+                })),
+            ];
+        }
+
+        const payload: Record<string, any> = {
             model: modelId,
             messages: apiMessages,
             stream: true,
-            tools: TOOL_DEFINITIONS,
+        };
+
+        // Don't send tools strictly for iFlow/GLM, as it may cause empty responses
+        if (!baseURL.includes("iflow.cn") && !modelId.includes("glm-")) {
+            payload.tools = TOOL_DEFINITIONS;
+        }
+
+        const body = JSON.stringify(payload);
+
+        console.log(`[aiClient] Sending request to ${baseURL}/chat/completions (model: ${modelId})`, {
+            stream: true,
+            hasTools: !!payload.tools,
+            requestBody: body,
         });
 
         xhr.send(body);
@@ -609,7 +689,11 @@ export function streamChatAnthropic(params: {
             if (xhr.readyState < 3) return;
 
             try {
-                const { lines, newIndex } = parseSSELines(xhr.responseText, lastIndex);
+                const { lines, newIndex } = parseSSELines(
+                    xhr.responseText,
+                    lastIndex,
+                    xhr.readyState === 4
+                );
                 lastIndex = newIndex;
 
                 for (const line of lines) {
@@ -673,8 +757,9 @@ export function streamChatAnthropic(params: {
 
             if (xhr.readyState === 4) {
                 if (xhr.status !== 200 && !settled) {
+                    const errorText = xhr.responseText ? String(xhr.responseText).slice(0, 500) : "No response text";
                     callbacks.onError(
-                        `Anthropic API error ${xhr.status}: ${xhr.responseText.slice(0, 500)}`
+                        `Anthropic API error ${xhr.status}: ${errorText}`
                     );
                 }
                 finish();

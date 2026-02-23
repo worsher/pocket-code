@@ -221,10 +221,16 @@ export default function ChatMessage({ message, streamingPhase, currentToolName, 
                 </Markdown>
               ) : (
                 !message.toolCalls?.length && (
-                  <StreamingIndicator
-                    phase={streamingPhase || "connecting"}
-                    toolName={currentToolName}
-                  />
+                  streamingPhase ? (
+                    <StreamingIndicator
+                      phase={streamingPhase}
+                      toolName={currentToolName}
+                    />
+                  ) : (
+                    <Text style={[styles.userText, { color: "#8E8E93", fontStyle: "italic" }]}>
+                      [Empty response]
+                    </Text>
+                  )
                 )
               )}
               {message.modelUsed && (
