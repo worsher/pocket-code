@@ -5,8 +5,16 @@
 namespace pocket {
 namespace terminal {
 
-static VTermColor default_fg = {255, 255, 255, 255}; // White
-static VTermColor default_bg = {0, 0, 0, 255};       // Black
+static VTermColor get_default_fg() {
+  VTermColor c;
+  vterm_color_rgb(&c, 255, 255, 255);
+  return c;
+}
+static VTermColor get_default_bg() {
+  VTermColor c;
+  vterm_color_rgb(&c, 0, 0, 0);
+  return c;
+}
 
 PocketTerminal::PocketTerminal(int rows, int cols)
     : m_rows(rows), m_cols(cols) {
@@ -27,9 +35,11 @@ PocketTerminal::PocketTerminal(int rows, int cols)
   m_screen = vterm_obtain_screen(m_vterm);
   vterm_screen_enable_altscreen(m_screen, 1);
 
-  vterm_screen_set_default_colors(m_screen, &default_fg, &default_bg);
+  VTermColor fg = get_default_fg();
+  VTermColor bg = get_default_bg();
+  vterm_screen_set_default_colors(m_screen, &fg, &bg);
 
-  VTermScreenCallbacks cb = {};
+  static VTermScreenCallbacks cb = {};
   cb.damage = onDamage;
   cb.movecursor = onMoveCursor;
 
@@ -89,9 +99,13 @@ int PocketTerminal::onDamage(VTermRect rect, void *user) {
       out.width = vcell.width;
       std::memcpy(out.chars, vcell.chars, sizeof(out.chars));
 
+      // 将可能存在的 Palette(Index) 色彩空间强制转换为 RGB 真彩色方便前端消费
+      vterm_screen_convert_color_to_rgb(self->m_screen, &vcell.fg);
+      vterm_screen_convert_color_to_rgb(self->m_screen, &vcell.bg);
+
       // 复制颜色与排版属性
-      out.fg = {vcell.fg.red, vcell.fg.green, vcell.fg.blue, 255};
-      out.bg = {vcell.bg.red, vcell.bg.green, vcell.bg.blue, 255};
+      out.fg = {vcell.fg.rgb.red, vcell.fg.rgb.green, vcell.fg.rgb.blue, 255};
+      out.bg = {vcell.bg.rgb.red, vcell.bg.rgb.green, vcell.bg.rgb.blue, 255};
 
       out.bold = vcell.attrs.bold;
       out.underline = vcell.attrs.underline;
@@ -106,7 +120,10 @@ int PocketTerminal::onDamage(VTermRect rect, void *user) {
 
 int PocketTerminal::onMoveCursor(VTermPos pos, VTermPos oldpos, int visible,
                                  void *user) {
-  // 处理光标移动，由于是无头终端，光标坐标可额外存放供上层专门渲染光标块
+  // 处理光标移动，记录当前光标位置供上层渲染
+  auto self = static_cast<PocketTerminal *>(user);
+  self->m_cursorX = pos.col;
+  self->m_cursorY = pos.row;
   return 1;
 }
 
