@@ -1,12 +1,13 @@
 #pragma once
 
+#include "vterm.h"
 #include <atomic>
+#include <deque>
 #include <memory>
 #include <mutex>
 #include <string>
 #include <thread>
 #include <vector>
-#include <vterm.h>
 
 namespace pocket {
 namespace terminal {
@@ -46,6 +47,11 @@ public:
   // 线程安全的缓冲复制
   void copyBufferOut(TerminalCell *outBuffer, size_t maxBytes);
 
+  // 消费暂存的历史缓冲区（取出被挤出屏幕的历史行数组，并将内部队列置空）
+  // 采用连续复制提升 JSI ArrayBuffer 拷贝效率
+  void pullScrollback(std::vector<TerminalCell> &outCells,
+                      std::vector<int> &outRowLengths);
+
   // 获取终端尺寸
   int getRows() const { return m_rows; }
   int getCols() const { return m_cols; }
@@ -83,10 +89,15 @@ private:
   std::thread m_readerThread;
   std::atomic<bool> m_running{false};
 
+  // 保存溢出可视区的历史输出行 (Scrollback Buffer)
+  std::deque<std::vector<TerminalCell>> m_scrollbackBuffer;
+  size_t m_maxScrollback{2000}; // 记录上限 2000 行
+
   // libvterm 的屏幕更新回调集合
   static int onDamage(VTermRect rect, void *user);
   static int onMoveCursor(VTermPos pos, VTermPos oldpos, int visible,
                           void *user);
+  static int onSbPushLine(int cols, const VTermScreenCell *cells, void *user);
 };
 
 } // namespace terminal

@@ -48,6 +48,7 @@ PocketTerminal::PocketTerminal(int rows, int cols)
   static VTermScreenCallbacks cb = {};
   cb.damage = onDamage;
   cb.movecursor = onMoveCursor;
+  cb.sb_pushline = onSbPushLine;
 
   // 注册回调，并将 this 指针传递供 C 回调使用
   vterm_screen_set_callbacks(m_screen, &cb, this);
@@ -232,6 +233,70 @@ int PocketTerminal::onMoveCursor(VTermPos pos, VTermPos oldpos, int visible,
   auto self = static_cast<PocketTerminal *>(user);
   self->m_cursorX = pos.col;
   self->m_cursorY = pos.row;
+  return 1;
+}
+
+void PocketTerminal::pullScrollback(std::vector<TerminalCell> &outCells,
+                                    std::vector<int> &outRowLengths) {
+  std::lock_guard<std::mutex> lock(m_vtermMutex);
+  outCells.clear();
+  outRowLengths.clear();
+
+  for (auto &row : m_scrollbackBuffer) {
+    outRowLengths.push_back(row.size());
+    outCells.insert(outCells.end(), row.begin(), row.end());
+  }
+  m_scrollbackBuffer.clear();
+}
+
+int PocketTerminal::onSbPushLine(int cols, const VTermScreenCell *cells,
+                                 void *user) {
+  auto self = static_cast<PocketTerminal *>(user);
+
+  std::vector<TerminalCell> rowData;
+  rowData.reserve(cols);
+
+  for (int col = 0; col < cols; ++col) {
+    TerminalCell out;
+    const VTermScreenCell &vcell = cells[col];
+    out.ch = vcell.chars[0];
+
+    VTermColor fg = vcell.fg;
+    VTermColor bg = vcell.bg;
+    vterm_screen_convert_color_to_rgb(self->m_screen, &fg);
+    vterm_screen_convert_color_to_rgb(self->m_screen, &bg);
+
+    out.fg =
+        (0xFF << 24) | (fg.rgb.red << 16) | (fg.rgb.green << 8) | fg.rgb.blue;
+    out.bg =
+        (0xFF << 24) | (bg.rgb.red << 16) | (bg.rgb.green << 8) | bg.rgb.blue;
+
+    uint32_t flags = 0;
+    if (vcell.attrs.bold)
+      flags |= (1 << 0);
+    if (vcell.attrs.underline)
+      flags |= (1 << 1);
+    if (vcell.attrs.italic)
+      flags |= (1 << 2);
+    if (vcell.attrs.blink)
+      flags |= (1 << 3);
+    if (vcell.attrs.reverse)
+      flags |= (1 << 4);
+    if (vcell.attrs.strike)
+      flags |= (1 << 5);
+    flags |= ((vcell.width & 0xFF) << 8);
+    out.flags = flags;
+
+    rowData.push_back(out);
+  }
+
+  // 此回调一般由 vterm_input_write 等函数同步触发，此时已被 m_vtermMutex 保护，
+  // 所以操作 std::deque 是并发安全的（pullScrollback 此时无法被抢占并调用）。
+  if (self->m_scrollbackBuffer.size() >= self->m_maxScrollback) {
+    self->m_scrollbackBuffer.pop_front();
+  }
+  self->m_scrollbackBuffer.push_back(std::move(rowData));
+
   return 1;
 }
 

@@ -30,3 +30,11 @@
 4	2658	1771838265606283080	CMakeFiles/pocket_terminal_module.dir/cpp/pocket_terminal_module.cpp.o	4289cfed2c55e087
 3	3648	1771838266575093669	CMakeFiles/pocket_terminal_module.dir/cpp/pocket_terminal_host_object.cpp.o	a82dd9125e7a5721
 3648	3708	1771838266661039563	../../../../build/intermediates/cxx/Debug/631w101i/obj/armeabi-v7a/libpocket_terminal_module.so	3d2c26e82f5c1b2a
+13	1358	1771844607706148310	libpocket-core/CMakeFiles/pocket-core.dir/src/jni_bridge.cpp.o	5c0861f56766dc61
+13	1735	1771844608081706493	libpocket-core/CMakeFiles/pocket-core.dir/src/pocket_terminal.cpp.o	b1fcec5167e59527
+1736	1882	1771844608230211794	../../../../build/intermediates/cxx/Debug/631w101i/obj/armeabi-v7a/libpocket-core.so	10dde557fa44c531
+11	1884	1771844608229968505	CMakeFiles/pocket_terminal_module.dir/cpp/pocket_terminal_module.cpp.o	4289cfed2c55e087
+9	2430	1771844608762603554	CMakeFiles/pocket_terminal_module.dir/cpp/pocket_terminal_host_object.cpp.o	a82dd9125e7a5721
+2430	2499	1771844608846539612	../../../../build/intermediates/cxx/Debug/631w101i/obj/armeabi-v7a/libpocket_terminal_module.so	3d2c26e82f5c1b2a
+4	1001	1771844923629104276	CMakeFiles/pocket_terminal_module.dir/cpp/pocket_terminal_host_object.cpp.o	a82dd9125e7a5721
+1001	1043	1771844923676786953	../../../../build/intermediates/cxx/Debug/631w101i/obj/armeabi-v7a/libpocket_terminal_module.so	3d2c26e82f5c1b2a

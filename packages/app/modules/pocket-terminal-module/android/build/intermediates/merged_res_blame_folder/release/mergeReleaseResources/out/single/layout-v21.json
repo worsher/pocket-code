@@ -1,0 +1,18 @@
+[
+    {
+        "merged": "expo.modules.pocketterminalmodule.pocket-terminal-module-release-29:/layout-v21/notification_template_icon_group.xml",
+        "source": "expo.modules.pocketterminalmodule.pocket-terminal-module-core-1.13.1-10:/layout-v21/notification_template_icon_group.xml"
+    },
+    {
+        "merged": "expo.modules.pocketterminalmodule.pocket-terminal-module-release-29:/layout-v21/notification_template_custom_big.xml",
+        "source": "expo.modules.pocketterminalmodule.pocket-terminal-module-core-1.13.1-10:/layout-v21/notification_template_custom_big.xml"
+    },
+    {
+        "merged": "expo.modules.pocketterminalmodule.pocket-terminal-module-release-29:/layout-v21/notification_action_tombstone.xml",
+        "source": "expo.modules.pocketterminalmodule.pocket-terminal-module-core-1.13.1-10:/layout-v21/notification_action_tombstone.xml"
+    },
+    {
+        "merged": "expo.modules.pocketterminalmodule.pocket-terminal-module-release-29:/layout-v21/notification_action.xml",
+        "source": "expo.modules.pocketterminalmodule.pocket-terminal-module-core-1.13.1-10:/layout-v21/notification_action.xml"
+    }
+]

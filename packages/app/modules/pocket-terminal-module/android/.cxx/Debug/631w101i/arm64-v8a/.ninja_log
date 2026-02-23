@@ -32,3 +32,11 @@
 2	1214	1771838262625690421	libpocket-core/CMakeFiles/pocket-core.dir/src/pocket_terminal.cpp.o	68193205ad0968e2
 1214	1398	1771838262812509053	../../../../build/intermediates/cxx/Debug/631w101i/obj/arm64-v8a/libpocket-core.so	551f624e2d705780
 1398	1472	1771838262884062639	../../../../build/intermediates/cxx/Debug/631w101i/obj/arm64-v8a/libpocket_terminal_module.so	c5cb2c941a0d1bc8
+15	1600	1771844554203728032	libpocket-core/CMakeFiles/pocket-core.dir/src/jni_bridge.cpp.o	35c853993cd47f59
+14	1844	1771844554448649712	libpocket-core/CMakeFiles/pocket-core.dir/src/pocket_terminal.cpp.o	68193205ad0968e2
+12	1959	1771844554560383596	CMakeFiles/pocket_terminal_module.dir/cpp/pocket_terminal_module.cpp.o	f5bca01c42404a4d
+1844	2154	1771844554763501522	../../../../build/intermediates/cxx/Debug/631w101i/obj/arm64-v8a/libpocket-core.so	551f624e2d705780
+3	4299	1771844606011621588	CMakeFiles/pocket_terminal_module.dir/cpp/pocket_terminal_host_object.cpp.o	bbde1d13b54922e2
+4299	4561	1771844606279368950	../../../../build/intermediates/cxx/Debug/631w101i/obj/arm64-v8a/libpocket_terminal_module.so	c5cb2c941a0d1bc8
+5	1624	1771844922362523654	CMakeFiles/pocket_terminal_module.dir/cpp/pocket_terminal_host_object.cpp.o	bbde1d13b54922e2
+1624	1810	1771844922547273269	../../../../build/intermediates/cxx/Debug/631w101i/obj/arm64-v8a/libpocket_terminal_module.so	c5cb2c941a0d1bc8

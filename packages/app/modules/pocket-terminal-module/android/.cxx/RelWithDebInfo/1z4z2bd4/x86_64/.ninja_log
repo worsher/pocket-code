@@ -1,0 +1,18 @@
+# ninja log v5
+17	116	1771844651058079173	libpocket-core/CMakeFiles/pocket-core.dir/third_party/libvterm/src/unicode.c.o	171ea25f3fc8beb8
+5	121	1771844651063835564	libpocket-core/CMakeFiles/pocket-core.dir/third_party/libvterm/src/encoding.c.o	790dc50aeac52789
+7	165	1771844651111087010	libpocket-core/CMakeFiles/pocket-core.dir/third_party/libvterm/src/keyboard.c.o	52f36516a6f80876
+8	175	1771844651120779480	libpocket-core/CMakeFiles/pocket-core.dir/third_party/libvterm/src/mouse.c.o	db192ba6b6e4f484
+10	234	1771844651178492762	libpocket-core/CMakeFiles/pocket-core.dir/third_party/libvterm/src/parser.c.o	c09b95f9197a7072
+116	272	1771844651218561209	libpocket-core/CMakeFiles/pocket-core.dir/third_party/libvterm/src/vterm.c.o	5094f1a88a380f1b
+12	292	1771844651214902169	libpocket-core/CMakeFiles/pocket-core.dir/third_party/libvterm/src/pen.c.o	9c8d26901ab00935
+14	875	1771844651819307504	libpocket-core/CMakeFiles/pocket-core.dir/third_party/libvterm/src/screen.c.o	e1d7ec819bbce39
+15	1041	1771844651985736471	libpocket-core/CMakeFiles/pocket-core.dir/third_party/libvterm/src/state.c.o	191372f8b1d3098
+5	1371	1771844652314892781	libpocket-core/CMakeFiles/pocket-core.dir/src/jni_bridge.cpp.o	440e1af105f66597
+2	1824	1771844652765992288	CMakeFiles/pocket_terminal_module.dir/cpp/pocket_terminal_module.cpp.o	6891dfb1d5cfc8d8
+3	1931	1771844652872748162	libpocket-core/CMakeFiles/pocket-core.dir/src/pocket_terminal.cpp.o	aab49fc4c6005c2
+1931	2091	1771844653025877326	../../../../build/intermediates/cxx/RelWithDebInfo/1z4z2bd4/obj/x86_64/libpocket-core.so	113f1b8712a54761
+0	2876	1771844653817703799	CMakeFiles/pocket_terminal_module.dir/cpp/pocket_terminal_host_object.cpp.o	fc217d4f591d1eb3
+2876	2929	1771844653873659893	../../../../build/intermediates/cxx/RelWithDebInfo/1z4z2bd4/obj/x86_64/libpocket_terminal_module.so	ed984f1239349bcd
+2	847	1771844928660984561	CMakeFiles/pocket_terminal_module.dir/cpp/pocket_terminal_host_object.cpp.o	fc217d4f591d1eb3
+847	886	1771844928703344844	../../../../build/intermediates/cxx/RelWithDebInfo/1z4z2bd4/obj/x86_64/libpocket_terminal_module.so	ed984f1239349bcd

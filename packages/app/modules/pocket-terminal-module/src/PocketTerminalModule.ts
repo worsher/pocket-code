@@ -14,6 +14,8 @@ export interface NativeTerminalCore {
   getCursorY(): number;
   startPty(): boolean;
   stopPty(): void;
+  // 获取刚刚被挤出屏幕的历史行数组
+  pullScrollback(): { buffer: ArrayBuffer; rowLengths: number[] } | null;
 }
 
 // 声明全局挂载构造函数 (由 pocket_terminal_module.cpp 注入)
@@ -77,5 +79,9 @@ export class PocketTerminal {
 
   public stopPty() {
     this._core?.stopPty();
+  }
+
+  public pullScrollback() {
+    return this._core?.pullScrollback() ?? null;
   }
 }

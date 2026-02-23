@@ -1,0 +1,20 @@
+"/Applications/Android Studio.app/Contents/jbr/Contents/Home/bin/java" \
+  --class-path \
+  /Users/worsher/.gradle/caches/modules-2/files-2.1/com.google.prefab/cli/2.1.0/aa32fec809c44fa531f01dcfb739b5b3304d3050/cli-2.1.0-all.jar \
+  com.google.prefab.cli.AppKt \
+  --build-system \
+  cmake \
+  --platform \
+  android \
+  --abi \
+  x86 \
+  --os-version \
+  24 \
+  --stl \
+  c++_shared \
+  --ndk-version \
+  27 \
+  --output \
+  /var/folders/zp/2hmm64t54dz5p_l25g8wgcth0000gn/T/agp-prefab-staging4266033227994104670/staged-cli-output \
+  /Users/worsher/.gradle/caches/8.14.3/transforms/145780e1d71abfdd0f73b65783049973/transformed/react-android-0.81.5-release/prefab \
+  /Users/worsher/.gradle/caches/8.14.3/transforms/c4ed38aee617328a15ca67287b31027e/transformed/fbjni-0.7.0/prefab

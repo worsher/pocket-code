@@ -1,0 +1,42 @@
+{
+  "buildFiles": [
+    "/Users/worsher/code/self/pocket-code/packages/app/modules/pocket-terminal-module/CMakeLists.txt",
+    "/Users/worsher/code/self/pocket-code/packages/app/modules/pocket-terminal-module/android/.cxx/RelWithDebInfo/1z4z2bd4/prefab/x86/prefab/lib/i686-linux-android/cmake/ReactAndroid/ReactAndroidConfig.cmake",
+    "/Users/worsher/code/self/pocket-code/packages/app/modules/pocket-terminal-module/android/.cxx/RelWithDebInfo/1z4z2bd4/prefab/x86/prefab/lib/i686-linux-android/cmake/ReactAndroid/ReactAndroidConfigVersion.cmake",
+    "/Users/worsher/code/self/pocket-code/packages/app/modules/pocket-terminal-module/android/.cxx/RelWithDebInfo/1z4z2bd4/prefab/x86/prefab/lib/i686-linux-android/cmake/fbjni/fbjniConfig.cmake",
+    "/Users/worsher/code/self/pocket-code/packages/app/modules/pocket-terminal-module/android/.cxx/RelWithDebInfo/1z4z2bd4/prefab/x86/prefab/lib/i686-linux-android/cmake/fbjni/fbjniConfigVersion.cmake",
+    "/Users/worsher/code/self/pocket-code/packages/libpocket-core/CMakeLists.txt"
+  ],
+  "cleanCommandsComponents": [
+    [
+      "/Users/worsher/Library/Android/sdk/cmake/3.22.1/bin/ninja",
+      "-C",
+      "/Users/worsher/code/self/pocket-code/packages/app/modules/pocket-terminal-module/android/.cxx/RelWithDebInfo/1z4z2bd4/x86",
+      "clean"
+    ]
+  ],
+  "buildTargetsCommandComponents": [
+    "/Users/worsher/Library/Android/sdk/cmake/3.22.1/bin/ninja",
+    "-C",
+    "/Users/worsher/code/self/pocket-code/packages/app/modules/pocket-terminal-module/android/.cxx/RelWithDebInfo/1z4z2bd4/x86",
+    "{LIST_OF_TARGETS_TO_BUILD}"
+  ],
+  "libraries": {
+    "pocket_terminal_module::@6890427a1f51a3e7e1df": {
+      "artifactName": "pocket_terminal_module",
+      "abi": "x86",
+      "output": "/Users/worsher/code/self/pocket-code/packages/app/modules/pocket-terminal-module/android/build/intermediates/cxx/RelWithDebInfo/1z4z2bd4/obj/x86/libpocket_terminal_module.so",
+      "runtimeFiles": [
+        "/Users/worsher/.gradle/caches/8.14.3/transforms/145780e1d71abfdd0f73b65783049973/transformed/react-android-0.81.5-release/prefab/modules/jsi/libs/android.x86/libjsi.so",
+        "/Users/worsher/.gradle/caches/8.14.3/transforms/c4ed38aee617328a15ca67287b31027e/transformed/fbjni-0.7.0/prefab/modules/fbjni/libs/android.x86/libfbjni.so",
+        "/Users/worsher/code/self/pocket-code/packages/app/modules/pocket-terminal-module/android/build/intermediates/cxx/RelWithDebInfo/1z4z2bd4/obj/x86/libpocket-core.so"
+      ]
+    },
+    "pocket-core::@cad9b6f562984320a4a7": {
+      "artifactName": "pocket-core",
+      "abi": "x86",
+      "output": "/Users/worsher/code/self/pocket-code/packages/app/modules/pocket-terminal-module/android/build/intermediates/cxx/RelWithDebInfo/1z4z2bd4/obj/x86/libpocket-core.so",
+      "runtimeFiles": []
+    }
+  }
+}

@@ -1,4 +1,4 @@
-import React, { useEffect, useRef, useState, useCallback } from "react";
+import React, { useEffect, useRef, useState, useCallback, useMemo } from "react";
 import {
   View,
   Text,
@@ -432,12 +432,14 @@ const KEY_ACTIONS = [
 ];
 
 const TerminalView = () => {
+  const [historyData, setHistoryData] = useState<TextSpan[][]>([]);
   const [rowsData, setRowsData] = useState<TextSpan[][]>([]);
   const [cursor, setCursor] = useState({ x: 0, y: 0 });
   const [blink, setBlink] = useState(true);
-  const [inputValue, setInputValue] = useState("");
+
   const termRef = useRef<PocketTerminal | null>(null);
   const inputRef = useRef<TextInput | null>(null);
+  const flatListRef = useRef<FlatList | null>(null);
 
   useEffect(() => {
     const term = new PocketTerminal(24, 80);
@@ -452,20 +454,17 @@ const TerminalView = () => {
     // 轮询快照获取文本及光标坐标 (后续可通过 C++ 事件 EventCallback 优化)
     const timer = setInterval(() => {
       const buffer = term.getBuffer();
-      if (!buffer || buffer.byteLength === 0) return;
+      const sbResult = term.pullScrollback();
 
-      const view = new Uint32Array(buffer);
-      const rows = term.getRows();
-      const cols = term.getCols();
+      const newHistoryAppends: TextSpan[][] = [];
 
-      const newRowsData: TextSpan[][] = [];
-      let idx = 0;
-
-      for (let r = 0; r < rows; r++) {
+      // Helper to parse cells into TextSpan[]
+      const parseCells = (view: Uint32Array, offset: number, count: number): TextSpan[] => {
         const rowSpans: TextSpan[] = [];
         let currentSpan: TextSpan | null = null;
+        let idx = offset;
 
-        for (let c = 0; c < cols; c++) {
+        for (let c = 0; c < count; c++) {
           const chCode = view[idx++];
           const fgCode = view[idx++];
           const bgCode = view[idx++];
@@ -474,9 +473,8 @@ const TerminalView = () => {
           let fgHex = '#' + ('000000' + (fgCode & 0xFFFFFF).toString(16)).slice(-6);
           let bgHex = '#' + ('000000' + (bgCode & 0xFFFFFF).toString(16)).slice(-6);
 
-          // 临时补丁：如果前端没初始化确切的 vterm 默认色彩，它通常会把默认全算作 #000000
           if (fgHex === '#000000' && bgHex === '#000000') {
-            fgHex = '#FFFFFF'; // 黑底白字默认
+            fgHex = '#FFFFFF';
           }
 
           const bold = (flags & (1 << 0)) !== 0;
@@ -489,12 +487,9 @@ const TerminalView = () => {
           if (!currentSpan) {
             currentSpan = { text: char, fg: fgHex, bg: bgHex, bold, underline, italic, reverse };
           } else if (
-            currentSpan.fg === fgHex &&
-            currentSpan.bg === bgHex &&
-            currentSpan.bold === bold &&
-            currentSpan.underline === underline &&
-            currentSpan.italic === italic &&
-            currentSpan.reverse === reverse
+            currentSpan.fg === fgHex && currentSpan.bg === bgHex &&
+            currentSpan.bold === bold && currentSpan.underline === underline &&
+            currentSpan.italic === italic && currentSpan.reverse === reverse
           ) {
             currentSpan.text += char;
           } else {
@@ -505,7 +500,36 @@ const TerminalView = () => {
         if (currentSpan) {
           rowSpans.push(currentSpan);
         }
-        newRowsData.push(rowSpans);
+        return rowSpans;
+      };
+
+      // 1. Parse Scrollback Data First
+      if (sbResult && sbResult.buffer && sbResult.rowLengths) {
+        const sbView = new Uint32Array(sbResult.buffer);
+        let ptr = 0;
+        for (const length of sbResult.rowLengths) {
+          const parsedRow = parseCells(sbView, ptr, length);
+          newHistoryAppends.push(parsedRow);
+          ptr += (length * 4); // each cell is 4 uint32s
+        }
+      }
+
+      if (newHistoryAppends.length > 0) {
+        setHistoryData(prev => [...prev, ...newHistoryAppends]);
+      }
+
+      // 2. Parse Current Screen Buffer
+      if (!buffer || buffer.byteLength === 0) return;
+      const view = new Uint32Array(buffer);
+      const rows = term.getRows();
+      const cols = term.getCols();
+
+      const newRowsData: TextSpan[][] = [];
+      let idx = 0;
+
+      for (let r = 0; r < rows; r++) {
+        newRowsData.push(parseCells(view, idx, cols));
+        idx += (cols * 4);
       }
 
       setRowsData(newRowsData);
@@ -528,53 +552,74 @@ const TerminalView = () => {
   const charWidth = 7.8;
   const lineHeight = 16;
 
+  const allRows = useMemo(() => {
+    return historyData.concat(rowsData);
+  }, [historyData, rowsData]);
+
   return (
     <View style={{ flex: 1 }}>
       <TouchableOpacity
         activeOpacity={1}
-        style={{ flex: 1, backgroundColor: "#000", padding: 10, position: 'relative' }}
+        style={{ flex: 1, backgroundColor: "#000", position: 'relative' }}
         onPress={() => {
           console.log("TerminalView: Touched, focusing input...");
           inputRef.current?.focus();
         }}
       >
-        {rowsData.map((row, rIdx) => (
-          <View key={rIdx} style={{ flexDirection: 'row', height: lineHeight }}>
-            {row.map((span, sIdx) => {
-              const effectiveFg = span.reverse ? span.bg : span.fg;
-              const effectiveBg = span.reverse ? span.fg : span.bg;
+        <FlatList
+          ref={flatListRef}
+          data={allRows}
+          keyExtractor={(item, index) => index.toString()}
+          contentContainerStyle={{ padding: 10 }}
+          onContentSizeChange={() => {
+            flatListRef.current?.scrollToEnd({ animated: false });
+          }}
+          renderItem={({ item, index }) => {
+            // Check if this row is the row containing the cursor
+            // Cursor row in FlatList is (total history length) + (cursor.y)
+            const isCursorRow = index === historyData.length + cursor.y;
 
-              return (
-                <Text
-                  key={sIdx}
-                  style={{
-                    fontFamily: Platform.OS === "ios" ? "Courier" : "monospace",
-                    color: effectiveFg,
-                    backgroundColor: effectiveBg === '#000000' ? 'transparent' : effectiveBg,
-                    fontSize: 13,
-                    lineHeight: lineHeight,
-                    fontWeight: span.bold ? 'bold' : 'normal',
-                    fontStyle: span.italic ? 'italic' : 'normal',
-                    textDecorationLine: span.underline ? 'underline' : 'none',
-                  }}
-                >
-                  {span.text}
-                </Text>
-              );
-            })}
-          </View>
-        ))}
+            return (
+              <View style={{ flexDirection: 'row', height: lineHeight }}>
+                {item.map((span: TextSpan, sIdx: number) => {
+                  const effectiveFg = span.reverse ? span.bg : span.fg;
+                  const effectiveBg = span.reverse ? span.fg : span.bg;
 
-        {/* 渲染模拟光标块 */}
-        <View
-          style={{
-            position: "absolute",
-            top: 10 + cursor.y * lineHeight,     // 考虑 padding 10
-            left: 10 + cursor.x * charWidth,     // 考虑 padding 10
-            width: charWidth,
-            height: lineHeight,
-            backgroundColor: "#FFF",
-            opacity: blink ? 0.7 : 0,            // 闪烁效果
+                  return (
+                    <Text
+                      key={sIdx}
+                      style={{
+                        fontFamily: Platform.OS === "ios" ? "Courier" : "monospace",
+                        color: effectiveFg,
+                        backgroundColor: effectiveBg === '#000000' ? 'transparent' : effectiveBg,
+                        fontSize: 13,
+                        lineHeight: lineHeight,
+                        fontWeight: span.bold ? 'bold' : 'normal',
+                        fontStyle: span.italic ? 'italic' : 'normal',
+                        textDecorationLine: span.underline ? 'underline' : 'none',
+                      }}
+                    >
+                      {span.text}
+                    </Text>
+                  );
+                })}
+
+                {/* 仅在属于光标的物理逻辑行上额外叠加绝对定位的光标组件以跟随翻滚脱屏 */}
+                {isCursorRow && (
+                  <View
+                    style={{
+                      position: "absolute",
+                      top: 0,
+                      left: cursor.x * charWidth,
+                      width: charWidth,
+                      height: lineHeight,
+                      backgroundColor: "#FFF",
+                      opacity: blink ? 0.7 : 0, // 闪烁效果
+                    }}
+                  />
+                )}
+              </View>
+            );
           }}
         />
 

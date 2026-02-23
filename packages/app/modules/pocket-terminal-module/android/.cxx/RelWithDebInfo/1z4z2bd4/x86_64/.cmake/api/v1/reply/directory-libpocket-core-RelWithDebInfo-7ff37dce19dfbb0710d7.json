@@ -1,0 +1,14 @@
+{
+	"backtraceGraph" : 
+	{
+		"commands" : [],
+		"files" : [],
+		"nodes" : []
+	},
+	"installers" : [],
+	"paths" : 
+	{
+		"build" : "libpocket-core",
+		"source" : "/Users/worsher/code/self/pocket-code/packages/libpocket-core"
+	}
+}

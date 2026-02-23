@@ -87,6 +87,45 @@ jsi::Value PocketTerminalHostObject::get(jsi::Runtime &rt,
       return jsi::Value::undefined();
     };
     return jsi::Function::createFromHostFunction(rt, name, 0, func);
+  } else if (propName == "pullScrollback") {
+    auto func = [this](jsi::Runtime &rt, const jsi::Value &thisValue,
+                       const jsi::Value *args, size_t count) -> jsi::Value {
+      std::vector<TerminalCell> cells;
+      std::vector<int> rowLengths;
+      m_terminal->pullScrollback(cells, rowLengths);
+
+      if (cells.empty()) {
+        return jsi::Value::null();
+      }
+
+      // Create ArrayBuffer for the cell data
+      size_t byteLength = cells.size() * sizeof(TerminalCell);
+      jsi::Function arrayBufferCtor =
+          rt.global().getPropertyAsFunction(rt, "ArrayBuffer");
+      jsi::Object arrayBufferObj =
+          arrayBufferCtor
+              .callAsConstructor(rt,
+                                 jsi::Value(static_cast<double>(byteLength)))
+              .getObject(rt);
+      jsi::ArrayBuffer arrayBuffer = arrayBufferObj.getArrayBuffer(rt);
+
+      // Copy contiguous memory to JS ArrayBuffer
+      std::memcpy(arrayBuffer.data(rt), cells.data(), byteLength);
+
+      // Create Javascript Array for row lengths
+      jsi::Array jsRowLengths(rt, rowLengths.size());
+      for (size_t i = 0; i < rowLengths.size(); ++i) {
+        jsRowLengths.setValueAtIndex(rt, i, static_cast<double>(rowLengths[i]));
+      }
+
+      // Return composite object: { buffer: ArrayBuffer, rowLengths: [int] }
+      jsi::Object result(rt);
+      result.setProperty(rt, "buffer", arrayBufferObj);
+      result.setProperty(rt, "rowLengths", jsRowLengths);
+
+      return result;
+    };
+    return jsi::Function::createFromHostFunction(rt, name, 0, func);
   }
 
   return jsi::Value::undefined();

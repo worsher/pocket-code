@@ -1,0 +1,18 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<incidents format="6" by="lint 8.11.0" type="incidents">
+
+    <incident
+        id="ViewConstructor"
+        severity="warning"
+        message="Custom view `DummyModuleView` is missing constructor used by tools: `(Context)` or `(Context,AttributeSet)` or `(Context,AttributeSet,int)`">
+        <location
+            file="${:dummy-module*debug*MAIN*sourceProvider*0*javaDir*0}/expo/modules/dummymodule/DummyModuleView.kt"
+            line="10"
+            column="7"
+            startOffset="271"
+            endLine="10"
+            endColumn="22"
+            endOffset="286"/>
+    </incident>
+
+</incidents>
