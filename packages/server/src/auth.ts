@@ -10,6 +10,8 @@ const JWT_EXPIRES_IN = (process.env.JWT_EXPIRES_IN || "30d") as SignOptions["exp
 export interface AuthPayload {
   userId: string;
   deviceId: string;
+  githubId?: number;
+  githubLogin?: string;
 }
 
 // ── Token helpers ───────────────────────────────────────

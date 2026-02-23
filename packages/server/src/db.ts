@@ -42,6 +42,33 @@ export async function initDb(): Promise<void> {
   db.run(`CREATE INDEX IF NOT EXISTS idx_sessions_user ON sessions(user_id);`);
   db.run(`CREATE INDEX IF NOT EXISTS idx_sessions_updated ON sessions(updated_at DESC);`);
 
+  // User quotas table
+  db.run(`
+    CREATE TABLE IF NOT EXISTS user_quotas (
+      user_id TEXT PRIMARY KEY,
+      tier TEXT DEFAULT 'free',
+      daily_api_calls_used INTEGER DEFAULT 0,
+      total_container_time_sec INTEGER DEFAULT 0,
+      disk_usage_mb REAL DEFAULT 0,
+      last_reset_date TEXT DEFAULT '',
+      updated_at INTEGER NOT NULL
+    );
+  `);
+
+  // Users table (for OAuth)
+  db.run(`
+    CREATE TABLE IF NOT EXISTS users (
+      user_id TEXT PRIMARY KEY,
+      github_id INTEGER UNIQUE,
+      github_login TEXT,
+      github_token TEXT,
+      display_name TEXT,
+      avatar_url TEXT,
+      created_at INTEGER NOT NULL,
+      updated_at INTEGER NOT NULL
+    );
+  `);
+
   persist();
 }
 
@@ -173,4 +200,117 @@ export function cleanupOldSessions(maxAgeDays: number = 7): number {
   const changes = db.getRowsModified();
   if (changes > 0) persist();
   return changes;
+}
+
+// ── User Quotas ─────────────────────────────────────────
+
+export interface QuotaRecord {
+  tier: string;
+  dailyApiCallsUsed: number;
+  totalContainerTimeSec: number;
+  diskUsageMB: number;
+  lastResetDate: string;
+}
+
+export function getQuotaRecord(userId: string): QuotaRecord | null {
+  const stmt = db.prepare("SELECT * FROM user_quotas WHERE user_id = ?");
+  stmt.bind([userId]);
+  if (!stmt.step()) {
+    stmt.free();
+    return null;
+  }
+  const row = stmt.getAsObject();
+  stmt.free();
+  return {
+    tier: row.tier as string,
+    dailyApiCallsUsed: row.daily_api_calls_used as number,
+    totalContainerTimeSec: row.total_container_time_sec as number,
+    diskUsageMB: row.disk_usage_mb as number,
+    lastResetDate: row.last_reset_date as string,
+  };
+}
+
+export function upsertQuotaRecord(
+  userId: string,
+  tier: string,
+  usage: { dailyApiCallsUsed: number; totalContainerTimeSec: number; diskUsageMB: number; lastResetDate: string }
+): void {
+  db.run(
+    `INSERT INTO user_quotas (user_id, tier, daily_api_calls_used, total_container_time_sec, disk_usage_mb, last_reset_date, updated_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?)
+     ON CONFLICT(user_id) DO UPDATE SET
+       tier = excluded.tier,
+       daily_api_calls_used = excluded.daily_api_calls_used,
+       total_container_time_sec = excluded.total_container_time_sec,
+       disk_usage_mb = excluded.disk_usage_mb,
+       last_reset_date = excluded.last_reset_date,
+       updated_at = excluded.updated_at`,
+    [userId, tier, usage.dailyApiCallsUsed, usage.totalContainerTimeSec, usage.diskUsageMB, usage.lastResetDate, Date.now()]
+  );
+  persist();
+}
+
+// ── Users (OAuth) ────────────────────────────────────────
+
+export interface UserRecord {
+  userId: string;
+  githubId: number | null;
+  githubLogin: string | null;
+  githubToken: string | null;
+  displayName: string | null;
+  avatarUrl: string | null;
+}
+
+export function getUser(userId: string): UserRecord | null {
+  const stmt = db.prepare("SELECT * FROM users WHERE user_id = ?");
+  stmt.bind([userId]);
+  if (!stmt.step()) {
+    stmt.free();
+    return null;
+  }
+  const row = stmt.getAsObject();
+  stmt.free();
+  return {
+    userId: row.user_id as string,
+    githubId: row.github_id as number | null,
+    githubLogin: row.github_login as string | null,
+    githubToken: row.github_token as string | null,
+    displayName: row.display_name as string | null,
+    avatarUrl: row.avatar_url as string | null,
+  };
+}
+
+export function getUserByGithubId(githubId: number): UserRecord | null {
+  const stmt = db.prepare("SELECT * FROM users WHERE github_id = ?");
+  stmt.bind([githubId]);
+  if (!stmt.step()) {
+    stmt.free();
+    return null;
+  }
+  const row = stmt.getAsObject();
+  stmt.free();
+  return {
+    userId: row.user_id as string,
+    githubId: row.github_id as number | null,
+    githubLogin: row.github_login as string | null,
+    githubToken: row.github_token as string | null,
+    displayName: row.display_name as string | null,
+    avatarUrl: row.avatar_url as string | null,
+  };
+}
+
+export function upsertUser(user: UserRecord): void {
+  db.run(
+    `INSERT INTO users (user_id, github_id, github_login, github_token, display_name, avatar_url, created_at, updated_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+     ON CONFLICT(user_id) DO UPDATE SET
+       github_id = excluded.github_id,
+       github_login = excluded.github_login,
+       github_token = excluded.github_token,
+       display_name = excluded.display_name,
+       avatar_url = excluded.avatar_url,
+       updated_at = excluded.updated_at`,
+    [user.userId, user.githubId, user.githubLogin, user.githubToken, user.displayName, user.avatarUrl, Date.now(), Date.now()]
+  );
+  persist();
 }

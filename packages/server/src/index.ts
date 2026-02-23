@@ -1,10 +1,15 @@
 import { WebSocketServer, WebSocket } from "ws";
+import { createServer, type IncomingMessage, type ServerResponse } from "http";
 import { createSession, runAgent, type AgentSession } from "./agent.js";
 import { createTools } from "./tools.js";
 import { setupGitCredentials } from "./gitCredentials.js";
 import { verifyToken, registerAnonymous, type AuthPayload } from "./auth.js";
 import { isDockerEnabled, getContainer } from "./docker.js";
 import { initDb, listUserSessions, deleteSession } from "./db.js";
+import { checkQuota, incrementUsage, getUserQuota } from "./resourceLimits.js";
+import { handleOAuthRoute } from "./oauth.js";
+import { handleFileUpload, handleFileDownload } from "./fileTransfer.js";
+import { isPoolEnabled, initPool } from "./containerPool.js";
 
 const PORT = parseInt(process.env.PORT || "3100", 10);
 
@@ -13,8 +18,58 @@ const sessions = new Map<string, AgentSession>();
 // Initialise DB before starting WebSocket server
 await initDb();
 
-const wss = new WebSocketServer({ port: PORT });
-console.log(`Pocket Code server listening on ws://localhost:${PORT}`);
+// Initialize container pool if enabled
+if (isPoolEnabled()) {
+  await initPool();
+}
+
+// ── HTTP Server (for OAuth, file transfer, etc.) ──────────
+
+const httpServer = createServer(async (req: IncomingMessage, res: ServerResponse) => {
+  // CORS headers
+  res.setHeader("Access-Control-Allow-Origin", "*");
+  res.setHeader("Access-Control-Allow-Methods", "GET, POST, OPTIONS");
+  res.setHeader("Access-Control-Allow-Headers", "Authorization, Content-Type");
+
+  if (req.method === "OPTIONS") {
+    res.writeHead(204);
+    res.end();
+    return;
+  }
+
+  const url = new URL(req.url || "", `http://localhost:${PORT}`);
+
+  // Health check
+  if (url.pathname === "/health") {
+    res.writeHead(200, { "Content-Type": "application/json" });
+    res.end(JSON.stringify({ status: "ok", timestamp: Date.now() }));
+    return;
+  }
+
+  // OAuth endpoints
+  if (url.pathname.startsWith("/oauth/")) {
+    const handled = await handleOAuthRoute(req, res, url);
+    if (handled) return;
+  }
+
+  // File transfer endpoints
+  if (url.pathname === "/api/files/upload" && req.method === "POST") {
+    await handleFileUpload(req, res);
+    return;
+  }
+  if (url.pathname === "/api/files/download" && req.method === "GET") {
+    await handleFileDownload(req, res, url);
+    return;
+  }
+
+  res.writeHead(404, { "Content-Type": "application/json" });
+  res.end(JSON.stringify({ error: "Not Found" }));
+});
+
+const wss = new WebSocketServer({ server: httpServer });
+httpServer.listen(PORT, () => {
+  console.log(`Pocket Code server listening on ws://localhost:${PORT} (HTTP+WS)`);
+});
 
 wss.on("connection", (ws: WebSocket) => {
   let session: AgentSession | null = null;
@@ -81,6 +136,9 @@ wss.on("connection", (ws: WebSocket) => {
           if (msg.model) {
             session.modelKey = msg.model;
           }
+          if (msg.customPrompt !== undefined) {
+            session.customPrompt = msg.customPrompt || undefined;
+          }
           // Setup git credentials if provided
           if (msg.gitCredentials?.length > 0) {
             try {
@@ -102,16 +160,44 @@ wss.on("connection", (ws: WebSocket) => {
             send(ws, { type: "error", error: "No session. Send init first." });
             return;
           }
+          // Check API call quota
+          if (auth) {
+            const quotaCheck = checkQuota(auth.userId, "api_call");
+            if (!quotaCheck.allowed) {
+              send(ws, { type: "error", error: quotaCheck.reason });
+              send(ws, { type: "done" });
+              return;
+            }
+            incrementUsage(auth.userId, "api_call");
+          }
           if (msg.model) {
             session.modelKey = msg.model;
+          }
+          if (msg.customPrompt !== undefined) {
+            session.customPrompt = msg.customPrompt || undefined;
+          }
+
+          // Conversation branching: rewind messages if requested
+          if (typeof msg.rewindTo === "number" && msg.rewindTo >= 0) {
+            session.messages = session.messages.slice(0, msg.rewindTo);
           }
 
           const abort = new AbortController();
           currentAbort = abort;
           await runAgent(session, msg.content, (event) => {
             send(ws, event);
-          }, abort.signal);
+          }, abort.signal, msg.images);
           currentAbort = null;
+          break;
+        }
+
+        case "get-quota": {
+          if (!auth) {
+            send(ws, { type: "error", error: "Not authenticated." });
+            return;
+          }
+          const quota = getUserQuota(auth.userId);
+          send(ws, { type: "quota", ...quota });
           break;
         }
 

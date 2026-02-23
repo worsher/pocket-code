@@ -1,4 +1,6 @@
 import Docker from "dockerode";
+import { getUserQuota, checkQuota, type ResourceLimits } from "./resourceLimits.js";
+import { isPoolEnabled, acquireContainer } from "./containerPool.js";
 
 const docker = new Docker();
 
@@ -35,6 +37,14 @@ export async function getContainer(
   userId: string,
   workspace: string
 ): Promise<string> {
+  // Delegate to container pool if enabled
+  if (isPoolEnabled()) {
+    const quota = getUserQuota(userId);
+    const memLimit = quota.limits.memoryMB * 1024 * 1024;
+    const cpuLimit = Math.floor(quota.limits.cpuCores * 1e9);
+    return acquireContainer(userId, workspace, memLimit, cpuLimit);
+  }
+
   const existing = containers.get(userId);
   if (existing) {
     existing.lastActive = Date.now();
@@ -54,14 +64,25 @@ export async function getContainer(
     }
   }
 
-  // Create new container
+  // Check container quota
+  const containerCheck = checkQuota(userId, "container");
+  if (!containerCheck.allowed) {
+    throw new Error(containerCheck.reason);
+  }
+
+  // Get user quota for resource limits
+  const quota = getUserQuota(userId);
+  const memLimit = quota.limits.memoryMB * 1024 * 1024;
+  const cpuLimit = Math.floor(quota.limits.cpuCores * 1e9);
+
+  // Create new container with user-specific limits
   const container = await docker.createContainer({
     Image: SANDBOX_IMAGE,
     name: `pocket-code-${userId}-${Date.now()}`,
     HostConfig: {
       Binds: [`${workspace}:/workspace`],
-      Memory: CONTAINER_MEMORY,
-      NanoCpus: Math.floor(CONTAINER_CPU * 1e9),
+      Memory: memLimit,
+      NanoCpus: cpuLimit,
       NetworkMode: "bridge",
       // Security
       ReadonlyRootfs: false,
