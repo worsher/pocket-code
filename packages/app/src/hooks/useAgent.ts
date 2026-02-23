@@ -298,8 +298,30 @@ export function useAgent({ settings, model = "deepseek-v3", customPrompt, projec
               }
               return updated;
             });
+            // Notify when runCommand completes in background
+            if (data.toolName === "runCommand" && AppState.currentState !== "active") {
+              const res = data.result as { success?: boolean; stdout?: string; stderr?: string; error?: string };
+              const ok = res?.success !== false;
+              const output = (res?.stdout || res?.stderr || res?.error || "").trim();
+              const firstLine = output.split("\n")[0].slice(0, 80);
+              sendLocalNotification(
+                ok ? "命令执行完成 ✓" : "命令执行失败 ✗",
+                firstLine || (ok ? "命令已完成" : "命令执行失败")
+              );
+            }
           } else {
-            // Geek mode: resolve the pending tool execution
+            // Geek mode: notify when runCommand completes in background
+            if (data.toolName === "runCommand" && AppState.currentState !== "active") {
+              const res = data.result as { success?: boolean; stdout?: string; stderr?: string; error?: string };
+              const ok = res?.success !== false;
+              const output = (res?.stdout || res?.stderr || res?.error || "").trim();
+              const firstLine = output.split("\n")[0].slice(0, 80);
+              sendLocalNotification(
+                ok ? "命令执行完成 ✓" : "命令执行失败 ✗",
+                firstLine || (ok ? "命令已完成" : "命令执行失败")
+              );
+            }
+            // Resolve the pending tool execution
             const resolver = toolResolvers.current.get(data.callId);
             if (resolver) {
               resolver(data.result);

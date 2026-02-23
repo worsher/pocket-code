@@ -255,41 +255,42 @@ pocket-code/
 
 #### 高频刚需
 
-- [ ] 图片/截图输入 (多模态)
+- [x] 图片/截图输入 (多模态)
   - 手机拍 Bug 截图、白板设计图直接发给 AI 分析
   - App: expo-image-picker 拍照/相册选取，base64 编码随消息发送
   - Server: 转发图片给支持视觉的模型 (Claude/GPT-4o/Gemini)
   - 智能路由: 检测到图片时自动选择多模态模型
-- [ ] 对话搜索
+- [x] 对话搜索
   - 全文搜索历史对话内容（消息文本 + 工具调用结果）
-  - App: SearchBar 组件 + chatHistory 增加搜索接口
+  - App: SearchDialog 组件 + chatHistory 增加搜索接口
   - 高亮匹配关键词，点击跳转到对应对话
-- [ ] 自定义项目指令 (Project System Prompt)
+- [x] 自定义项目指令 (Project System Prompt)
   - 每个项目配置专属 system prompt（类似 CLAUDE.md）
   - AI 自动了解项目技术栈、代码风格、命名约定
-  - App: Project 设置页增加指令编辑器
+  - App: ProjectPromptEditor 组件
   - Server/极客模式: 在对话 system message 中注入项目指令
-- [ ] 多轮对话分支 (Edit & Resend)
+- [x] 多轮对话分支 (Edit & Resend)
   - 从某条消息重新发起对话，不用重新描述上下文
   - App: 长按消息 → "从此处重新对话"
-  - chatHistory: 支持 fork 对话，保留原始分支
+  - useAgent: editAndResend，支持云端/极客双模式
 
 #### 体验提升
 
-- [ ] 代码块语法高亮
+- [x] 代码块语法高亮
   - 替换或增强 react-native-markdown-display 的代码块渲染
-  - 支持主流语言语法高亮 (JS/TS/Python/Go/Rust 等)
-- [ ] 快捷指令自定义
+  - CodeBlock 组件，Atom One Dark 主题，支持主流语言
+- [x] 快捷指令自定义
   - 除了预设 Commit/Push/Pull，用户可自定义常用命令
-  - App: QuickActions 支持编辑/添加/排序/删除
-  - 按项目存储自定义指令
-- [ ] 后台任务通知
+  - App: QuickActions + QuickActionEditor 支持编辑/添加/删除
+  - 按项目存储自定义指令（quickActions.ts）
+- [x] 后台任务通知
   - 长时间运行的命令 (build/test/deploy) 后台执行
-  - 完成后推送本地通知 (expo-notifications)
-  - 锁屏状态下也能收到结果
-- [ ] 文件变更汇总视图
+  - runCommand 完成时即时通知（命令执行完成 ✓ / 命令执行失败 ✗，带首行输出）
+  - AI 轮次完成时最终汇总通知，云端/极客模式均支持
+  - App.tsx 启动时自动申请通知权限
+- [x] 文件变更汇总视图
   - AI 本轮对话修改了哪些文件，单独列出 (类似 Git changes)
-  - App: ChangeSummary 组件 — 文件列表 + 增删行数统计
+  - App: FileChangeSummary 组件 — 文件列表 + 增删行数统计
   - 点击可查看 Diff
 
 ### 阶段三：产品化 + 增强 (6-8 周)
