@@ -42,15 +42,15 @@ export async function initDb(): Promise<void> {
   `);
   db.run(`CREATE INDEX IF NOT EXISTS idx_sessions_user ON sessions(user_id);`);
   db.run(`CREATE INDEX IF NOT EXISTS idx_sessions_updated ON sessions(updated_at DESC);`);
-  db.run(`CREATE INDEX IF NOT EXISTS idx_sessions_project ON sessions(project_id);`);
 
   // Migration: add project_id column to existing sessions table (if upgrading from older schema)
+  // Must run BEFORE creating the index on project_id
   try {
     db.run(`ALTER TABLE sessions ADD COLUMN project_id TEXT NOT NULL DEFAULT ''`);
-    db.run(`CREATE INDEX IF NOT EXISTS idx_sessions_project ON sessions(project_id)`);
   } catch {
     // Column already exists — safe to ignore
   }
+  db.run(`CREATE INDEX IF NOT EXISTS idx_sessions_project ON sessions(project_id);`);
 
   // User quotas table
   db.run(`

@@ -3,7 +3,7 @@
 // In geek mode the App calls the provider directly;
 // in cloud mode the key is forwarded to the Server.
 
-export type ModelProvider = "anthropic" | "openai" | "google" | "siliconflow";
+export type ModelProvider = "anthropic" | "openai" | "google" | "siliconflow" | "iflow";
 
 export interface ModelConfig {
     key: string;
@@ -93,6 +93,15 @@ export const MODELS: ModelConfig[] = [
         modelId: "gemini-2.5-flash-preview-05-20",
         baseURL: "https://generativelanguage.googleapis.com/v1beta",
     },
+    // iFlow (心流) — GLM series (OpenAI-compatible)
+    {
+        key: "glm-4-6",
+        label: "GLM-4.6",
+        description: "心流平台，智谱 GLM 系列",
+        provider: "iflow",
+        modelId: "glm-4.6",
+        baseURL: "https://apis.iflow.cn/v1",
+    },
 ];
 
 /** Look up a model config by key, fallback to deepseek-v3 */
@@ -103,6 +112,6 @@ export function getModelConfig(key: string): ModelConfig {
 /** Get the API key name for a provider from settings */
 export function getApiKeyField(
     provider: ModelProvider
-): "siliconflow" | "anthropic" | "openai" | "google" {
+): "siliconflow" | "anthropic" | "openai" | "google" | "iflow" {
     return provider;
 }

@@ -258,6 +258,7 @@ export default function SettingsScreen({ settings, onSave, onClose }: Props) {
                                     ["anthropic", "Anthropic", "Claude"],
                                     ["openai", "OpenAI", "GPT-4o"],
                                     ["google", "Google", "Gemini"],
+                                    ["iflow", "iFlow", "GLM-4.6"],
                                 ] as const
                             ).map(([key, label, desc], idx) => (
                                 <View key={key}>

@@ -10,6 +10,7 @@ export interface ApiKeys {
     anthropic?: string;
     openai?: string;
     google?: string;
+    iflow?: string;
 }
 
 export interface GitCredential {

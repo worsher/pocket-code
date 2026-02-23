@@ -8,7 +8,7 @@ import { mkdir } from "fs/promises";
 import { saveSession, getSession } from "./db.js";
 import { analyzePrompt } from "./modelRouter.js";
 
-export type ModelProvider = "anthropic" | "openai" | "google" | "siliconflow";
+export type ModelProvider = "anthropic" | "openai" | "google" | "siliconflow" | "iflow";
 
 interface ModelConfig {
   provider: ModelProvider;
@@ -22,6 +22,7 @@ interface ModelConfig {
  * - gemini-flash: Google Gemini
  * - deepseek-v3 / deepseek-r1: DeepSeek via SiliconFlow (硅基流动)
  * - qwen-coder: Qwen via SiliconFlow
+ * - glm-4-6: GLM-4.6 via iFlow (心流)
  */
 const MODEL_MAP: Record<string, ModelConfig> = {
   // Anthropic
@@ -36,12 +37,20 @@ const MODEL_MAP: Record<string, ModelConfig> = {
   "deepseek-v3": { provider: "siliconflow", modelId: "deepseek-ai/DeepSeek-V3" },
   "deepseek-r1": { provider: "siliconflow", modelId: "deepseek-ai/DeepSeek-R1" },
   "qwen-coder": { provider: "siliconflow", modelId: "Qwen/Qwen2.5-Coder-32B-Instruct" },
+  // iFlow (心流) — GLM series (OpenAI-compatible)
+  "glm-4-6": { provider: "iflow", modelId: "glm-4.6" },
 };
 
 /** SiliconFlow uses OpenAI-compatible API */
 const siliconflow = createOpenAI({
   baseURL: process.env.SILICONFLOW_BASE_URL || "https://api.siliconflow.cn/v1",
   apiKey: process.env.SILICONFLOW_API_KEY || "",
+});
+
+/** iFlow (心流) uses OpenAI-compatible API */
+const iflow = createOpenAI({
+  baseURL: process.env.IFLOW_BASE_URL || "https://apis.iflow.cn/v1",
+  apiKey: process.env.IFLOW_API_KEY || "",
 });
 
 /** Standard OpenAI */
@@ -60,6 +69,8 @@ function getModel(modelKey: string) {
       return google(config.modelId);
     case "siliconflow":
       return siliconflow(config.modelId);
+    case "iflow":
+      return iflow(config.modelId);
   }
 }
 
