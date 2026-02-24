@@ -33,6 +33,7 @@ out/
 .vscode/
 .idea/
 *.swp
+.claude/
 
 # logs
 *.log
