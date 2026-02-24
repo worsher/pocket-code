@@ -1,6 +1,42 @@
-node_modules
-dist
+# dependencies
+node_modules/
+.pnpm-store/
+
+# build and generated output
+dist/
+build/
+.next/
+out/
+
+# env vars
 .env
-.env.local
-.expo
+.env.*
+!.env.example
+!.env.test
+
+# expo & react native
+.expo/
+**/android/build/
+**/android/.gradle/
+**/android/.cxx/
+**/android/.transforms/
+**/ios/build/
+**/ios/Pods/
+
+# typescript
 *.tsbuildinfo
+
+# OS files
+.DS_Store
+
+# IDE & Editor
+.vscode/
+.idea/
+*.swp
+
+# logs
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*

@@ -1,5 +1,0 @@
-/Users/worsher/Library/Android/sdk/cmake/3.22.1/bin/ninja \
-  -C \
-  /Users/worsher/code/self/pocket-code/packages/app/modules/pocket-terminal-module/android/.cxx/RelWithDebInfo/1z4z2bd4/armeabi-v7a \
-  pocket-core \
-  pocket_terminal_module
