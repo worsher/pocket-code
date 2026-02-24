@@ -130,6 +130,11 @@ export async function bootstrapRootfs(onProgress?: ProgressCallback): Promise<vo
 
     onProgress?.(90, "初始化包管理器...");
 
+    // Write /etc/resolv.conf so apk can resolve DNS inside proot.
+    // Android doesn't use /etc/resolv.conf, so Alpine rootfs has none by default.
+    const resolvConf = new File(rootfsDir, "etc/resolv.conf");
+    resolvConf.write("nameserver 8.8.8.8\nnameserver 1.1.1.1\n");
+
     // Write version manifest
     const manifestFile = getManifestFile();
     manifestFile.write(
