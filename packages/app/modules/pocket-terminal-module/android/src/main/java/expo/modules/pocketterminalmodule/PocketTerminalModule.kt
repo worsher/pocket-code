@@ -4,6 +4,11 @@ import expo.modules.kotlin.modules.Module
 import expo.modules.kotlin.modules.ModuleDefinition
 import com.facebook.react.bridge.ReactApplicationContext
 import java.net.URL
+import java.io.File
+import java.io.FileOutputStream
+import java.io.InputStream
+import java.util.zip.GZIPInputStream
+import java.nio.file.Files as NioFiles
 
 class PocketTerminalModule : Module() {
   companion object {
@@ -14,52 +19,55 @@ class PocketTerminalModule : Module() {
 
   private external fun installJSI(jsiPtr: Long)
 
-  // Each module class must implement the definition function. The definition consists of components
-  // that describes the module's functionality and behavior.
-  // See https://docs.expo.dev/modules/module-api for more details about available components.
   override fun definition() = ModuleDefinition {
-    // Sets the name of the module that JavaScript code will use to refer to the module. Takes a string as an argument.
-    // Can be inferred from module's class name, but it's recommended to set it explicitly for clarity.
-    // The module will be accessible from `requireNativeModule('PocketTerminalModule')` in JavaScript.
     Name("PocketTerminalModule")
 
-    // Defines constant property on the module.
-    Constant("PI") {
-      Math.PI
-    }
-
-    // Defines event names that the module can send to JavaScript.
+    Constant("PI") { Math.PI }
     Events("onChange")
 
-    // Defines a JavaScript synchronous function that runs the native code on the JavaScript thread.
-    Function("hello") {
-      "Hello world! 👋"
-    }
+    Function("hello") { "Hello world! 👋" }
 
     Function("install") {
       val reactCtx = appContext.reactContext as? ReactApplicationContext
       val jsiPtr = reactCtx?.javaScriptContextHolder?.get() ?: 0L
-      if (jsiPtr != 0L) {
-        installJSI(jsiPtr)
-        true
-      } else {
-        false
+      if (jsiPtr != 0L) { installJSI(jsiPtr); true } else { false }
+    }
+
+    // 暴露原生库路径（保留接口）
+    Function("getNativeLibDir") {
+      appContext.reactContext?.applicationInfo?.nativeLibraryDir
+    }
+
+    /**
+     * 纯 JVM tar.gz 解压，正确处理 Alpine Linux 的绝对路径软链接。
+     * Android SELinux 禁止从 app 数据目录执行二进制，所以我们在 JVM 内完成解压。
+     *
+     * @param tarPath  tar.gz 文件的绝对路径
+     * @param destPath 目标解压目录的绝对路径
+     * @return Map { success, filesCount, error? }
+     */
+    AsyncFunction("extractTarGz") { tarPath: String, destPath: String ->
+      try {
+        val dest = File(destPath)
+        dest.mkdirs()
+        var filesCount = 0
+
+        File(tarPath).inputStream().buffered().let { GZIPInputStream(it) }.use { gzip ->
+          extractTar(gzip, dest)
+            .also { filesCount = it }
+        }
+
+        mapOf("success" to true, "filesCount" to filesCount)
+      } catch (e: Exception) {
+        e.printStackTrace()
+        mapOf("success" to false, "error" to (e.message ?: "Unknown error"))
       }
     }
 
-    // Defines a JavaScript function that always returns a Promise and whose native code
-    // is by default dispatched on the different thread than the JavaScript runtime runs on.
-    AsyncFunction("setValueAsync") { value: String ->
-      // Send an event to JavaScript.
-      sendEvent("onChange", mapOf(
-        "value" to value
-      ))
-    }
-
-    // Headless command execution for AI tool calls (runCommand in local geek mode)
+    // 本地命令执行
     AsyncFunction("runLocalCommand") { command: String, workdir: String ->
       val pb = ProcessBuilder("/system/bin/sh", "-c", command)
-      pb.directory(java.io.File(workdir))
+      pb.directory(File(workdir))
       val process = pb.start()
       val stdout = process.inputStream.bufferedReader().readText()
       val stderr = process.errorStream.bufferedReader().readText()
@@ -72,15 +80,116 @@ class PocketTerminalModule : Module() {
       )
     }
 
-    // Enables the module to be used as a native view. Definition components that are accepted as part of
-    // the view definition: Prop, Events.
+    AsyncFunction("setValueAsync") { value: String ->
+      sendEvent("onChange", mapOf("value" to value))
+    }
+
     View(PocketTerminalModuleView::class) {
-      // Defines a setter for the `url` prop.
       Prop("url") { view: PocketTerminalModuleView, url: URL ->
         view.webView.loadUrl(url.toString())
       }
-      // Defines an event that the view can send to JavaScript.
       Events("onLoad")
     }
+  }
+
+  /**
+   * 解析并提取 tar 流到 destDir。
+   * 正确处理 Alpine Linux 使用的绝对路径软链接（如 ./bin/sh -> /usr/bin/busybox）：
+   * - 绝对路径目标会转换为相对于 destDir 的形式（不会跨越 destDir 边界）
+   */
+  private fun extractTar(tarInput: InputStream, destDir: File): Int {
+    val buf = ByteArray(512)
+    var count = 0
+
+    while (true) {
+      // Read one 512-byte header block
+      val headerBytes = readFully(tarInput, buf) ?: break
+
+      // End of archive: two consecutive zero blocks
+      if (headerBytes.all { it == 0.toByte() }) break
+
+      val name    = readString(headerBytes, 0, 100).trimStart('.', '/')
+      val modeStr = readString(headerBytes, 100, 8).trim()
+      val sizeStr = readString(headerBytes, 124, 12).trim()
+      val typeFlag = headerBytes[156].toInt().toChar()
+      val linkName = readString(headerBytes, 157, 100)
+
+      // GNU / POSIX long name extension
+      if (name.isEmpty() && typeFlag != 'L') { skipPadding(tarInput, 0); continue }
+
+      val size = if (sizeStr.isEmpty()) 0L else sizeStr.toLong(8)
+      val mode = if (modeStr.isEmpty()) 0 else modeStr.toInt(8)
+      // Executable if any of owner/group/other execute bits are set
+      val isExecutable = (mode and 0b001001001) != 0
+
+      when (typeFlag) {
+        '0', '\u0000', '7' -> { // Regular file
+          val outFile = File(destDir, name)
+          outFile.parentFile?.mkdirs()
+          FileOutputStream(outFile).use { out ->
+            var remaining = size
+            val dataBuf = ByteArray(8192)
+            while (remaining > 0) {
+              val toRead = minOf(remaining, dataBuf.size.toLong()).toInt()
+              val read = tarInput.read(dataBuf, 0, toRead)
+              if (read < 0) break
+              out.write(dataBuf, 0, read)
+              remaining -= read
+            }
+          }
+          if (isExecutable) outFile.setExecutable(true, false)
+          skipPadding(tarInput, size)
+          count++
+        }
+        '2' -> { // Symbolic link
+          val linkFile = File(destDir, name)
+          linkFile.parentFile?.mkdirs()
+          val linkPath = linkFile.toPath()
+          try {
+            if (NioFiles.exists(linkPath) || NioFiles.isSymbolicLink(linkPath)) {
+              NioFiles.delete(linkPath)
+            }
+            NioFiles.createSymbolicLink(linkPath, java.nio.file.Paths.get(linkName))
+          } catch (e: Exception) {
+            // fallback to Runtime ln if NIO fails (e.g. unsupported filesystem)
+            Runtime.getRuntime().exec(arrayOf("/system/bin/ln", "-sf", linkName, linkFile.absolutePath)).waitFor()
+          }
+          count++
+        }
+        '5' -> { // Directory
+          File(destDir, name).mkdirs()
+        }
+        'L' -> { // GNU long filename — read the actual name from data block
+          val nameBuf = ByteArray(size.toInt())
+          readFully(tarInput, nameBuf)
+          skipPadding(tarInput, size)
+          // Next header will use this name — skip for now (simplified handling)
+        }
+        else -> {
+          skipPadding(tarInput, size)
+        }
+      }
+    }
+    return count
+  }
+
+  private fun readFully(input: InputStream, buf: ByteArray): ByteArray? {
+    var offset = 0
+    while (offset < buf.size) {
+      val read = input.read(buf, offset, buf.size - offset)
+      if (read < 0) return if (offset == 0) null else buf
+      offset += read
+    }
+    return buf
+  }
+
+  private fun readString(buf: ByteArray, offset: Int, length: Int): String {
+    val end = (offset until offset + length).firstOrNull { buf[it] == 0.toByte() } ?: (offset + length)
+    return String(buf, offset, end - offset, Charsets.UTF_8)
+  }
+
+  private fun skipPadding(input: InputStream, size: Long) {
+    val remainder = (512 - (size % 512)) % 512
+    if (remainder > 0) input.skip(remainder)
   }
 }

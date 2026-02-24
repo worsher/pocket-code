@@ -1,5 +1,5 @@
 import { Paths, File, Directory } from "expo-file-system";
-import { runLocalCommand } from "pocket-terminal-module";
+import { exec as localExec } from "./localExecutor";
 import type { AppSettings } from "../store/settings";
 import {
   gitClone,
@@ -187,9 +187,9 @@ export async function executeLocalTool(
         args.path as string | undefined
       );
     case "runCommand": {
-      const workspace = getDefaultWorkspace().replace("file://", "");
-      const cwd = (args.cwd as string | undefined) || workspace;
-      return runLocalCommand(args.command as string, cwd);
+      const cwd = (args.cwd as string | undefined) ?? undefined;
+      const result = await localExec(args.command as string, cwd, { timeout: 60_000 });
+      return result;
     }
     default:
       return null; // Not supported locally

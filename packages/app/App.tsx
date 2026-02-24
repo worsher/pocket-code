@@ -1,4 +1,4 @@
-import React, { useEffect, useRef, useState, useCallback, useMemo } from "react";
+import React, { useEffect, useRef, useState, useCallback } from "react";
 import {
   View,
   Text,
@@ -26,7 +26,7 @@ import FileExplorer from "./src/components/FileExplorer";
 import { listLocalFiles, readLocalFile } from "./src/services/localFileSystem";
 import QuickActions from "./src/components/QuickActions";
 import SearchDialog from "./src/components/SearchDialog";
-import { PocketTerminal } from "pocket-terminal-module";
+import TerminalScreen from "./src/components/TerminalScreen";
 import {
   type AppSettings,
   DEFAULT_SETTINGS,
@@ -46,7 +46,8 @@ function MainScreen() {
   const [showFileExplorer, setShowFileExplorer] = useState(false);
   const [showSearch, setShowSearch] = useState(false);
   const [showPromptEditor, setShowPromptEditor] = useState(false);
-  const [showTerminalDemo, setShowTerminalDemo] = useState(false);
+  // Bottom tab: "chat" | "terminal" | "files"
+  const [activeTab, setActiveTab] = useState<"chat" | "terminal" | "files">("chat");
   const [settings, setSettings] = useState<AppSettings>(DEFAULT_SETTINGS);
   const [settingsLoaded, setSettingsLoaded] = useState(false);
 
@@ -197,13 +198,6 @@ function MainScreen() {
               {selectedModel?.label ?? currentModel}
             </Text>
           </TouchableOpacity>
-          {/* Terminal Demo Button */}
-          <TouchableOpacity
-            style={styles.settingsBtn}
-            onPress={() => setShowTerminalDemo(true)}
-          >
-            <Text style={styles.settingsIcon}>💻</Text>
-          </TouchableOpacity>
           {/* Search Button */}
           <TouchableOpacity
             style={styles.settingsBtn}
@@ -245,55 +239,70 @@ function MainScreen() {
         </View>
       </View>
 
-      {/* Content + Input */}
-      <KeyboardAvoidingView
-        style={styles.flex1}
-        behavior={Platform.OS === "ios" ? "padding" : "height"}
-        keyboardVerticalOffset={Platform.OS === "ios" ? insets.top : 0}
-      >
-        {/* Messages */}
-        {messages.length === 0 ? (
-          <View style={styles.emptyState}>
-            <Text style={styles.emptyTitle}>Pocket Code</Text>
-            <Text style={styles.emptySubtitle}>
-              Your AI coding agent on mobile
-            </Text>
-            <Text style={styles.emptyHint}>
-              {isGeek
-                ? `极客模式已启用 ⚡\n直接调用 AI API`
-                : `云端模式 ☁️\n通过 Server 中转`}
-            </Text>
-            <Text style={[styles.emptyHint, { marginTop: 16 }]}>
-              Try: "Create a simple Express server" {"\n"}
-              or: "Help me fix the bug in app.ts"
-            </Text>
-          </View>
-        ) : (
-          <FlatList
-            ref={listRef}
-            data={messages}
-            renderItem={renderItem}
-            keyExtractor={(item) => item.id}
-            style={styles.messageList}
-            contentContainerStyle={styles.messageListContent}
-            keyboardShouldPersistTaps="handled"
+      {/* Tab content — use display to keep all mounted and PTY alive */}
+      <View style={styles.flex1}>
+        {/* ── Chat Tab ── */}
+        <KeyboardAvoidingView
+          style={[styles.flex1, activeTab !== "chat" && styles.hidden]}
+          behavior={Platform.OS === "ios" ? "padding" : "height"}
+          keyboardVerticalOffset={Platform.OS === "ios" ? insets.top : 0}
+        >
+          {/* Messages */}
+          {messages.length === 0 ? (
+            <View style={styles.emptyState}>
+              <Text style={styles.emptyTitle}>Pocket Code</Text>
+              <Text style={styles.emptySubtitle}>
+                Your AI coding agent on mobile
+              </Text>
+              <Text style={styles.emptyHint}>
+                {isGeek
+                  ? `极客模式已启用 ⚡\n直接调用 AI API`
+                  : `云端模式 ☁️\n通过 Server 中转`}
+              </Text>
+              <Text style={[styles.emptyHint, { marginTop: 16 }]}>
+                Try: "Create a simple Express server" {"\n"}
+                or: "Help me fix the bug in app.ts"
+              </Text>
+            </View>
+          ) : (
+            <FlatList
+              ref={listRef}
+              data={messages}
+              renderItem={renderItem}
+              keyExtractor={(item) => item.id}
+              style={styles.messageList}
+              contentContainerStyle={styles.messageListContent}
+              keyboardShouldPersistTaps="handled"
+            />
+          )}
+
+          {/* Quick Actions */}
+          <QuickActions
+            onSend={sendMessage}
+            disabled={isStreaming || (!isGeek && !isConnected)}
           />
-        )}
 
-        {/* Quick Actions */}
-        <QuickActions
-          onSend={sendMessage}
-          disabled={isStreaming || (!isGeek && !isConnected)}
-        />
+          {/* Input */}
+          <ChatInput
+            onSend={sendMessage}
+            onStop={stopStreaming}
+            isStreaming={isStreaming}
+            disabled={isStreaming || (!isGeek && !isConnected)}
+          />
+        </KeyboardAvoidingView>
 
-        {/* Input */}
-        <ChatInput
-          onSend={sendMessage}
-          onStop={stopStreaming}
-          isStreaming={isStreaming}
-          disabled={isStreaming || (!isGeek && !isConnected)}
-        />
-      </KeyboardAvoidingView>
+        {/* ── Terminal Tab — always mounted to keep PTY session alive ── */}
+        <View style={[styles.flex1, activeTab !== "terminal" && styles.hidden]}>
+          <TerminalScreen />
+        </View>
+
+        {/* ── Files Tab ── */}
+        <View style={[styles.flex1, activeTab !== "files" && styles.hidden]}>
+          <View style={styles.emptyState}>
+            <Text style={styles.emptySubtitle}>Files coming soon</Text>
+          </View>
+        </View>
+      </View>
 
       {/* Search Dialog */}
       <SearchDialog
@@ -391,327 +400,32 @@ function MainScreen() {
         </View>
       </Modal>
 
-      {/* Terminal Demo Modal */}
-      <Modal
-        visible={showTerminalDemo}
-        animationType="slide"
-        onRequestClose={() => setShowTerminalDemo(false)}
-      >
-        <KeyboardAvoidingView
-          behavior={Platform.OS === "ios" ? "padding" : undefined}
-          style={{ flex: 1, backgroundColor: "#000", paddingTop: insets.top }}
-        >
-          <View style={styles.header}>
-            <Text style={styles.title}>VTerm POC Demo</Text>
-            <TouchableOpacity onPress={() => setShowTerminalDemo(false)}>
-              <Text style={{ color: "#007AFF" }}>Close</Text>
-            </TouchableOpacity>
-          </View>
-          <TerminalView />
-        </KeyboardAvoidingView>
-      </Modal>
-    </View>
-  );
-}
-interface TextSpan {
-  text: string;
-  fg: string;
-  bg: string;
-  bold: boolean;
-  underline: boolean;
-  italic: boolean;
-  reverse: boolean;
-}
-
-const KEY_ACTIONS = [
-  { label: "ESC", sequence: "\x1b" },
-  { label: "TAB", sequence: "\t" },
-  { label: "CTRL-C", sequence: "\x03" },
-  { label: "UP", sequence: "\x1b[A" },
-  { label: "DN", sequence: "\x1b[B" },
-  { label: "LT", sequence: "\x1b[D" },
-  { label: "RT", sequence: "\x1b[C" },
-];
-
-const TerminalView = () => {
-  const [historyData, setHistoryData] = useState<TextSpan[][]>([]);
-  const [rowsData, setRowsData] = useState<TextSpan[][]>([]);
-  const [cursor, setCursor] = useState({ x: 0, y: 0 });
-  const [blink, setBlink] = useState(true);
-
-  const termRef = useRef<PocketTerminal | null>(null);
-  const inputRef = useRef<TextInput | null>(null);
-  const flatListRef = useRef<FlatList | null>(null);
-
-  useEffect(() => {
-    const term = new PocketTerminal(24, 80);
-    termRef.current = term;
-
-    // 启动 PTY！这将派生 /system/bin/sh 并在后台用子线程收发数据
-    const success = term.startPty();
-    if (!success) {
-      term.write("Failed to start Android PTY /system/bin/sh\r\n");
-    }
-
-    // 轮询快照获取文本及光标坐标 (后续可通过 C++ 事件 EventCallback 优化)
-    const timer = setInterval(() => {
-      const buffer = term.getBuffer();
-      const sbResult = term.pullScrollback();
-
-      const newHistoryAppends: TextSpan[][] = [];
-
-      // Helper to parse cells into TextSpan[]
-      const parseCells = (view: Uint32Array, offset: number, count: number): TextSpan[] => {
-        const rowSpans: TextSpan[] = [];
-        let currentSpan: TextSpan | null = null;
-        let idx = offset;
-
-        for (let c = 0; c < count; c++) {
-          const chCode = view[idx++];
-          const fgCode = view[idx++];
-          const bgCode = view[idx++];
-          const flags = view[idx++];
-
-          let fgHex = '#' + ('000000' + (fgCode & 0xFFFFFF).toString(16)).slice(-6);
-          let bgHex = '#' + ('000000' + (bgCode & 0xFFFFFF).toString(16)).slice(-6);
-
-          if (fgHex === '#000000' && bgHex === '#000000') {
-            fgHex = '#FFFFFF';
-          }
-
-          const bold = (flags & (1 << 0)) !== 0;
-          const underline = (flags & (1 << 1)) !== 0;
-          const italic = (flags & (1 << 2)) !== 0;
-          const reverse = (flags & (1 << 4)) !== 0;
-
-          const char = chCode === 0 ? ' ' : String.fromCodePoint(chCode);
-
-          if (!currentSpan) {
-            currentSpan = { text: char, fg: fgHex, bg: bgHex, bold, underline, italic, reverse };
-          } else if (
-            currentSpan.fg === fgHex && currentSpan.bg === bgHex &&
-            currentSpan.bold === bold && currentSpan.underline === underline &&
-            currentSpan.italic === italic && currentSpan.reverse === reverse
-          ) {
-            currentSpan.text += char;
-          } else {
-            rowSpans.push(currentSpan);
-            currentSpan = { text: char, fg: fgHex, bg: bgHex, bold, underline, italic, reverse };
-          }
-        }
-        if (currentSpan) {
-          rowSpans.push(currentSpan);
-        }
-        return rowSpans;
-      };
-
-      // 1. Parse Scrollback Data First
-      if (sbResult && sbResult.buffer && sbResult.rowLengths) {
-        const sbView = new Uint32Array(sbResult.buffer);
-        let ptr = 0;
-        for (const length of sbResult.rowLengths) {
-          const parsedRow = parseCells(sbView, ptr, length);
-          newHistoryAppends.push(parsedRow);
-          ptr += (length * 4); // each cell is 4 uint32s
-        }
-      }
-
-      if (newHistoryAppends.length > 0) {
-        setHistoryData(prev => [...prev, ...newHistoryAppends]);
-      }
-
-      // 2. Parse Current Screen Buffer
-      if (!buffer || buffer.byteLength === 0) return;
-      const view = new Uint32Array(buffer);
-      const rows = term.getRows();
-      const cols = term.getCols();
-
-      const newRowsData: TextSpan[][] = [];
-      let idx = 0;
-
-      for (let r = 0; r < rows; r++) {
-        newRowsData.push(parseCells(view, idx, cols));
-        idx += (cols * 4);
-      }
-
-      setRowsData(newRowsData);
-      setCursor({ x: term.getCursorX(), y: term.getCursorY() });
-    }, 100);
-
-    // 光标闪烁定时器
-    const blinkTimer = setInterval(() => {
-      setBlink((prev) => !prev);
-    }, 500);
-
-    return () => {
-      term.stopPty();
-      clearInterval(timer);
-      clearInterval(blinkTimer);
-    };
-  }, []);
-
-  // FontSize = 13 取近似等宽宽高
-  const charWidth = 7.8;
-  const lineHeight = 16;
-
-  const allRows = useMemo(() => {
-    return historyData.concat(rowsData);
-  }, [historyData, rowsData]);
-
-  return (
-    <View style={{ flex: 1 }}>
-      <TouchableOpacity
-        activeOpacity={1}
-        style={{ flex: 1, backgroundColor: "#000", position: 'relative' }}
-        onPress={() => {
-          console.log("TerminalView: Touched, focusing input...");
-          inputRef.current?.focus();
-        }}
-      >
-        <FlatList
-          ref={flatListRef}
-          data={allRows}
-          keyExtractor={(item, index) => index.toString()}
-          contentContainerStyle={{ padding: 10 }}
-          onContentSizeChange={() => {
-            flatListRef.current?.scrollToEnd({ animated: false });
-          }}
-          renderItem={({ item, index }) => {
-            // Check if this row is the row containing the cursor
-            // Cursor row in FlatList is (total history length) + (cursor.y)
-            const isCursorRow = index === historyData.length + cursor.y;
-
-            return (
-              <View style={{ flexDirection: 'row', height: lineHeight }}>
-                {item.map((span: TextSpan, sIdx: number) => {
-                  const effectiveFg = span.reverse ? span.bg : span.fg;
-                  const effectiveBg = span.reverse ? span.fg : span.bg;
-
-                  return (
-                    <Text
-                      key={sIdx}
-                      style={{
-                        fontFamily: Platform.OS === "ios" ? "Courier" : "monospace",
-                        color: effectiveFg,
-                        backgroundColor: effectiveBg === '#000000' ? 'transparent' : effectiveBg,
-                        fontSize: 13,
-                        lineHeight: lineHeight,
-                        fontWeight: span.bold ? 'bold' : 'normal',
-                        fontStyle: span.italic ? 'italic' : 'normal',
-                        textDecorationLine: span.underline ? 'underline' : 'none',
-                      }}
-                    >
-                      {span.text}
-                    </Text>
-                  );
-                })}
-
-                {/* 仅在属于光标的物理逻辑行上额外叠加绝对定位的光标组件以跟随翻滚脱屏 */}
-                {isCursorRow && (
-                  <View
-                    style={{
-                      position: "absolute",
-                      top: 0,
-                      left: cursor.x * charWidth,
-                      width: charWidth,
-                      height: lineHeight,
-                      backgroundColor: "#FFF",
-                      opacity: blink ? 0.7 : 0, // 闪烁效果
-                    }}
-                  />
-                )}
-              </View>
-            );
-          }}
-        />
-
-        {/* 隐形键盘输入捕获 */}
-        <TextInput
-          ref={inputRef}
-          autoFocus
-          autoCapitalize="none"
-          autoCorrect={false}
-          spellCheck={false}
-          textContentType="none"
-          keyboardType={Platform.OS === "android" ? "visible-password" : "ascii-capable"} // visible-password is the only way to disable composing and smart quotes on Android
-          smartInsertDelete={false}
-          blurOnSubmit={false}
-          style={{
-            position: "absolute",
-            top: -100, // Move off-screen instead of just 0,0
-            left: -100,
-            width: 1,
-            height: 1,
-          }}
-          onSubmitEditing={() => {
-            if (!termRef.current) return;
-            console.log(`[Terminal] onSubmitEditing: Writing \\r`);
-            termRef.current.write("\r");
-          }}
-          onKeyPress={(e) => {
-            if (!termRef.current) return;
-            const key = e.nativeEvent.key;
-            console.log(`[Terminal] onKeyPress: ${key}`);
-            if (key === "Enter") {
-              // This might not fire on Android with visible-password, but we keep it for iOS or other keyboards
-              console.log(`[Terminal] Writing \\r from onKeyPress`);
-              termRef.current.write("\r");
-            } else if (key === "Backspace") {
-              console.log(`[Terminal] Writing \\x7f`);
-              termRef.current.write("\x7f"); // Use DEL (127) for generic backspace
-            }
-          }}
-          onChangeText={(text) => {
-            if (!termRef.current) return;
-            console.log(`[Terminal] onChangeText full: '${text}'`);
-            const prev = (inputRef.current as any)._lastText || "";
-
-            if (text.length > prev.length) {
-              let added = text.slice(prev.length);
-              added = added.replace(/\n/g, "");
-              if (added.length > 0) {
-                console.log(`[Terminal] Writing chunk: '${added}'`);
-                termRef.current.write(added);
-              }
-            } else if (text.length < prev.length) {
-              console.log(`[Terminal] onChangeText detected deletion. Previous len: ${prev.length}, current: ${text.length}`);
-              const deletedCount = prev.length - text.length;
-              for (let i = 0; i < deletedCount; i++) {
-                termRef.current.write("\x7f");
-              }
-            }
-
-            (inputRef.current as any)._lastText = text;
-          }}
-        />
-      </TouchableOpacity>
-
-      {/* 辅助操作栏 */}
-      <View style={{ flexDirection: "row", backgroundColor: "#1C1C1E", borderTopWidth: 1, borderTopColor: "#38383A", paddingVertical: 8, paddingHorizontal: 10 }}>
-        <FlatList
-          horizontal
-          showsHorizontalScrollIndicator={false}
-          data={KEY_ACTIONS}
-          keyExtractor={(item) => item.label}
-          renderItem={({ item }) => (
+      {/* Bottom Tab Bar */}
+      <View style={styles.tabBar}>
+        {(["chat", "terminal", "files"] as const).map((tab) => {
+          const icons = { chat: "💬", terminal: "💻", files: "📁" };
+          const labels = { chat: "Chat", terminal: "Terminal", files: "Files" };
+          const active = activeTab === tab;
+          return (
             <TouchableOpacity
-              style={{
-                backgroundColor: "#2C2C2E",
-                paddingHorizontal: 12,
-                paddingVertical: 8,
-                borderRadius: 6,
-                marginRight: 8,
-              }}
-              onPress={() => termRef.current?.write(item.sequence)}
+              key={tab}
+              style={styles.tabItem}
+              onPress={() => setActiveTab(tab)}
             >
-              <Text style={{ color: "#FFF", fontSize: 13, fontWeight: "600" }}>{item.label}</Text>
+              <Text style={[styles.tabIcon, active && styles.tabIconActive]}>
+                {icons[tab]}
+              </Text>
+              <Text style={[styles.tabLabel, active && styles.tabLabelActive]}>
+                {labels[tab]}
+              </Text>
             </TouchableOpacity>
-          )}
-        />
+          );
+        })}
       </View>
     </View>
   );
-};
+}
+
 
 export default function App() {
   return (
@@ -904,5 +618,38 @@ const styles = StyleSheet.create({
     fontSize: 18,
     fontWeight: "700",
     marginLeft: 12,
+  },
+  // ── Tab Bar ──────────────────────────────────────────
+  tabBar: {
+    flexDirection: "row" as const,
+    backgroundColor: "#1C1C1E",
+    borderTopWidth: 0.5,
+    borderTopColor: "#38383A",
+  },
+  tabItem: {
+    flex: 1,
+    alignItems: "center" as const,
+    justifyContent: "center" as const,
+    paddingVertical: 8,
+    gap: 2,
+  },
+  tabIcon: {
+    fontSize: 22,
+    opacity: 0.4,
+  },
+  tabIconActive: {
+    opacity: 1,
+  },
+  tabLabel: {
+    color: "#8E8E93",
+    fontSize: 10,
+    fontWeight: "600" as const,
+    letterSpacing: 0.3,
+  },
+  tabLabelActive: {
+    color: "#007AFF",
+  },
+  hidden: {
+    display: "none" as const,
   },
 });

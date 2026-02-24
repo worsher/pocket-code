@@ -14,6 +14,7 @@ export interface NativeTerminalCore {
   getCursorY(): number;
   startPty(): boolean;
   stopPty(): void;
+  resize(rows: number, cols: number): void;
   // 获取刚刚被挤出屏幕的历史行数组
   pullScrollback(): { buffer: ArrayBuffer; rowLengths: number[] } | null;
 }
@@ -81,6 +82,10 @@ export class PocketTerminal {
     this._core?.stopPty();
   }
 
+  public resize(rows: number, cols: number) {
+    (this._core as any)?.resize?.(rows, cols);
+  }
+
   public pullScrollback() {
     return this._core?.pullScrollback() ?? null;
   }
@@ -93,4 +98,22 @@ export async function runLocalCommand(
 ): Promise<{ success: boolean; stdout: string; stderr: string; exitCode: number }> {
   const module = requireNativeModule('PocketTerminalModule');
   return module.runLocalCommand(command, workdir);
+}
+
+/** 获取原生私有 lib 路径 */
+export function getNativeLibDir(): string | null {
+  const module = requireNativeModule('PocketTerminalModule');
+  return module.getNativeLibDir ? module.getNativeLibDir() : null;
+}
+
+/**
+ * 纯 JVM tar.gz 解压，正确处理 Alpine Linux 的绝对路径软链接。
+ * 在 JVM 上运行，完全绕过 Android SELinux 执行限制。
+ */
+export async function extractTarGz(
+  tarPath: string,
+  destPath: string
+): Promise<{ success: boolean; filesCount?: number; error?: string }> {
+  const module = requireNativeModule('PocketTerminalModule');
+  return module.extractTarGz(tarPath, destPath);
 }
