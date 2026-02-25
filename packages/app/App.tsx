@@ -10,6 +10,7 @@ import {
   AppState,
   Modal,
   TextInput,
+  Keyboard,
   type AppStateStatus,
 } from "react-native";
 import { StatusBar } from "expo-status-bar";
@@ -50,6 +51,23 @@ function MainScreen() {
   const [activeTab, setActiveTab] = useState<"chat" | "terminal" | "files">("chat");
   const [settings, setSettings] = useState<AppSettings>(DEFAULT_SETTINGS);
   const [settingsLoaded, setSettingsLoaded] = useState(false);
+  const [keyboardVisible, setKeyboardVisible] = useState(false);
+
+  // Track keyboard visibility to hide tab bar
+  useEffect(() => {
+    const showSub = Keyboard.addListener(
+      Platform.OS === "ios" ? "keyboardWillShow" : "keyboardDidShow",
+      () => setKeyboardVisible(true),
+    );
+    const hideSub = Keyboard.addListener(
+      Platform.OS === "ios" ? "keyboardWillHide" : "keyboardDidHide",
+      () => setKeyboardVisible(false),
+    );
+    return () => {
+      showSub.remove();
+      hideSub.remove();
+    };
+  }, []);
 
   // Load settings on mount
   useEffect(() => {
@@ -244,8 +262,8 @@ function MainScreen() {
         {/* ── Chat Tab ── */}
         <KeyboardAvoidingView
           style={[styles.flex1, activeTab !== "chat" && styles.hidden]}
-          behavior={Platform.OS === "ios" ? "padding" : "height"}
-          keyboardVerticalOffset={Platform.OS === "ios" ? insets.top : 0}
+          behavior="padding"
+          keyboardVerticalOffset={insets.top}
         >
           {/* Messages */}
           {messages.length === 0 ? (
@@ -292,9 +310,13 @@ function MainScreen() {
         </KeyboardAvoidingView>
 
         {/* ── Terminal Tab — always mounted to keep PTY session alive ── */}
-        <View style={[styles.flex1, activeTab !== "terminal" && styles.hidden]}>
+        <KeyboardAvoidingView
+          style={[styles.flex1, activeTab !== "terminal" && styles.hidden]}
+          behavior="padding"
+          keyboardVerticalOffset={insets.top}
+        >
           <TerminalScreen />
-        </View>
+        </KeyboardAvoidingView>
 
         {/* ── Files Tab ── */}
         <View style={[styles.flex1, activeTab !== "files" && styles.hidden]}>
@@ -400,28 +422,30 @@ function MainScreen() {
         </View>
       </Modal>
 
-      {/* Bottom Tab Bar */}
-      <View style={styles.tabBar}>
-        {(["chat", "terminal", "files"] as const).map((tab) => {
-          const icons = { chat: "💬", terminal: "💻", files: "📁" };
-          const labels = { chat: "Chat", terminal: "Terminal", files: "Files" };
-          const active = activeTab === tab;
-          return (
-            <TouchableOpacity
-              key={tab}
-              style={styles.tabItem}
-              onPress={() => setActiveTab(tab)}
-            >
-              <Text style={[styles.tabIcon, active && styles.tabIconActive]}>
-                {icons[tab]}
-              </Text>
-              <Text style={[styles.tabLabel, active && styles.tabLabelActive]}>
-                {labels[tab]}
-              </Text>
-            </TouchableOpacity>
-          );
-        })}
-      </View>
+      {/* Bottom Tab Bar — hidden when keyboard is visible */}
+      {!keyboardVisible && (
+        <View style={styles.tabBar}>
+          {(["chat", "terminal", "files"] as const).map((tab) => {
+            const icons = { chat: "💬", terminal: "💻", files: "📁" };
+            const labels = { chat: "Chat", terminal: "Terminal", files: "Files" };
+            const active = activeTab === tab;
+            return (
+              <TouchableOpacity
+                key={tab}
+                style={styles.tabItem}
+                onPress={() => setActiveTab(tab)}
+              >
+                <Text style={[styles.tabIcon, active && styles.tabIconActive]}>
+                  {icons[tab]}
+                </Text>
+                <Text style={[styles.tabLabel, active && styles.tabLabelActive]}>
+                  {labels[tab]}
+                </Text>
+              </TouchableOpacity>
+            );
+          })}
+        </View>
+      )}
     </View>
   );
 }
