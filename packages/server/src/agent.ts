@@ -7,8 +7,9 @@ import { createTools, getWorkspaceRoot } from "./tools.js";
 import { mkdir } from "fs/promises";
 import { saveSession, getSession } from "./db.js";
 import { analyzePrompt } from "./modelRouter.js";
+import { runClaudeCodeAgent, runGeminiCliAgent } from "./cliRunner.js";
 
-export type ModelProvider = "anthropic" | "openai" | "google" | "siliconflow" | "iflow";
+export type ModelProvider = "anthropic" | "openai" | "google" | "siliconflow" | "iflow" | "cli-claude" | "cli-gemini";
 
 interface ModelConfig {
   provider: ModelProvider;
@@ -39,6 +40,9 @@ const MODEL_MAP: Record<string, ModelConfig> = {
   "qwen-coder": { provider: "siliconflow", modelId: "Qwen/Qwen2.5-Coder-32B-Instruct" },
   // iFlow (心流) — GLM series (OpenAI-compatible)
   "glm-4-6": { provider: "iflow", modelId: "glm-4.6" },
+  // CLI providers — use server-side installed CLI tools with Pro subscription
+  "claude-code": { provider: "cli-claude", modelId: "claude-code" },
+  "gemini-cli":  { provider: "cli-gemini", modelId: "gemini-cli"  },
 };
 
 /** SiliconFlow uses OpenAI-compatible API */
@@ -71,6 +75,9 @@ function getModel(modelKey: string) {
       return siliconflow(config.modelId);
     case "iflow":
       return iflow(config.modelId);
+    default:
+      // CLI providers are handled before getModel() is called; this should never be reached
+      throw new Error(`Unsupported provider: ${config.provider}`);
   }
 }
 
@@ -152,6 +159,20 @@ export async function runAgent(
   signal?: AbortSignal,
   images?: ImageData[]
 ): Promise<void> {
+  // ── CLI routing: delegate to local CLI tools if selected ──
+  if (session.modelKey === "claude-code") {
+    session.messages.push({ role: "user", content: userMessage });
+    await runClaudeCodeAgent(session, userMessage, onEvent, signal);
+    saveSession(session.sessionId, session.userId, session.messages, session.modelKey, session.projectId);
+    return;
+  }
+  if (session.modelKey === "gemini-cli") {
+    session.messages.push({ role: "user", content: userMessage });
+    await runGeminiCliAgent(session, userMessage, onEvent, signal);
+    saveSession(session.sessionId, session.userId, session.messages, session.modelKey, session.projectId);
+    return;
+  }
+
   // Build user message — multi-modal if images are present
   if (images?.length) {
     const content: Array<{ type: string; text?: string; image?: Uint8Array; mimeType?: string }> = [

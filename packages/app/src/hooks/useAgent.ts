@@ -5,7 +5,7 @@ import {
   type ChatMessage,
   type ToolCallRequest,
 } from "../services/aiClient";
-import { getModelConfig, MODELS, type ModelConfig } from "../services/modelConfig";
+import { getModelConfig, getApiKeyField, MODELS, type ModelConfig } from "../services/modelConfig";
 import type { AppSettings } from "../store/settings";
 import {
   saveChatHistory,
@@ -599,7 +599,8 @@ export function useAgent({ settings, model = "deepseek-v3", customPrompt, projec
       }
 
       const modelConfig = getModelConfig(modelRef.current);
-      const apiKey = settings.apiKeys[modelConfig.provider] || "";
+      const apiKeyField = getApiKeyField(modelConfig.provider);
+      const apiKey = apiKeyField ? (settings.apiKeys[apiKeyField] || "") : "";
 
       const userMsg: Message = {
         id: Date.now().toString(),

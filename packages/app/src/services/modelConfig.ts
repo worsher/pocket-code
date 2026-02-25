@@ -3,7 +3,7 @@
 // In geek mode the App calls the provider directly;
 // in cloud mode the key is forwarded to the Server.
 
-export type ModelProvider = "anthropic" | "openai" | "google" | "siliconflow" | "iflow";
+export type ModelProvider = "anthropic" | "openai" | "google" | "siliconflow" | "iflow" | "cli-claude" | "cli-gemini";
 
 export interface ModelConfig {
     key: string;
@@ -13,6 +13,8 @@ export interface ModelConfig {
     modelId: string;
     /** Base URL for the provider API (used in geek mode) */
     baseURL: string;
+    /** CLI-based models are only available in cloud mode (server handles execution) */
+    cloudOnly?: boolean;
 }
 
 export const MODELS: ModelConfig[] = [
@@ -102,6 +104,25 @@ export const MODELS: ModelConfig[] = [
         modelId: "glm-4.6",
         baseURL: "https://apis.iflow.cn/v1",
     },
+    // CLI providers — cloud mode only, use server-side Pro subscription, no API key needed
+    {
+        key: "claude-code",
+        label: "Claude Code (Pro)",
+        description: "服务器 Claude Pro 订阅，无需 API Key",
+        provider: "cli-claude",
+        modelId: "claude-code",
+        baseURL: "",
+        cloudOnly: true,
+    },
+    {
+        key: "gemini-cli",
+        label: "Gemini CLI (Pro)",
+        description: "服务器 Gemini Pro 订阅，无需 API Key",
+        provider: "cli-gemini",
+        modelId: "gemini-cli",
+        baseURL: "",
+        cloudOnly: true,
+    },
 ];
 
 /** Look up a model config by key, fallback to deepseek-v3 */
@@ -109,9 +130,10 @@ export function getModelConfig(key: string): ModelConfig {
     return MODELS.find((m) => m.key === key) ?? MODELS[0];
 }
 
-/** Get the API key name for a provider from settings */
+/** Get the API key name for a provider from settings. Returns null for CLI providers (no key needed). */
 export function getApiKeyField(
     provider: ModelProvider
-): "siliconflow" | "anthropic" | "openai" | "google" | "iflow" {
+): "siliconflow" | "anthropic" | "openai" | "google" | "iflow" | null {
+    if (provider === "cli-claude" || provider === "cli-gemini") return null;
     return provider;
 }
