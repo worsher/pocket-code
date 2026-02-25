@@ -106,16 +106,55 @@ export const TOOL_DEFINITIONS: ToolDefinition[] = [
         function: {
             name: "runCommand",
             description:
-                "Execute a shell command in the workspace directory. Use for npm, git, build tools, etc.",
+                "Execute a shell command in the workspace directory. ONLY for commands that complete and exit on their own (e.g. npm install, npm run build, npm test, ls, cat, mkdir). NEVER use for long-running processes that block indefinitely such as: npm run dev, npm start, python -m http.server, nodemon, vite, webpack --watch, or any other dev server / file watcher — those will timeout and fail. For development servers, instruct the user to run them manually in the Terminal tab.",
             parameters: {
                 type: "object",
                 properties: {
                     command: {
                         type: "string",
-                        description: "The shell command to execute",
+                        description: "The shell command to execute. Must be a command that exits on its own.",
                     },
                 },
                 required: ["command"],
+            },
+        },
+    },
+    {
+        type: "function",
+        function: {
+            name: "runInBackground",
+            description:
+                "Start a long-running process in the background (dev server, watcher, etc.) that does NOT exit on its own. Use this for: npm run dev, npm start, vite, python -m http.server, nodemon, webpack --watch, etc. The process starts immediately and streams output in real-time. Returns a processId that can be used with stopProcess. The dev server will be accessible at http://localhost:PORT from the device browser.",
+            parameters: {
+                type: "object",
+                properties: {
+                    command: {
+                        type: "string",
+                        description: "The long-running shell command to start (e.g. 'npm run dev').",
+                    },
+                    cwd: {
+                        type: "string",
+                        description: "Working directory relative to workspace root (e.g. 'vite-example'). Defaults to workspace root.",
+                    },
+                },
+                required: ["command"],
+            },
+        },
+    },
+    {
+        type: "function",
+        function: {
+            name: "stopProcess",
+            description: "Stop a running background process started with runInBackground.",
+            parameters: {
+                type: "object",
+                properties: {
+                    processId: {
+                        type: "number",
+                        description: "The processId returned by runInBackground.",
+                    },
+                },
+                required: ["processId"],
             },
         },
     },
@@ -272,7 +311,7 @@ Available tool categories:
 - File operations: readFile, writeFile, listFiles
 - Git: gitClone, gitStatus, gitAdd, gitCommit, gitPush, gitPull, gitLog, gitBranch, gitCheckout`;
 
-    prompt += `\n- Shell: runCommand (execute shell commands directly on the device)`;
+    prompt += `\n- Shell: runCommand (one-shot commands that exit), runInBackground (long-running servers/watchers), stopProcess (stop a background process)`;
 
     if (configuredGit.length > 0) {
         const platforms = configuredGit.map((c) => `${c.platform} (${c.host})`).join(", ");
@@ -287,6 +326,8 @@ Available tool categories:
 - When executing commands, explain what you're doing briefly
 - If a command fails, try to diagnose and fix the issue
 - ALWAYS use the dedicated git tools (gitClone, gitCommit, etc.) instead of runCommand for git operations
+- NEVER run long-running server/watcher commands via runCommand — use runInBackground instead. Examples: npm run dev, npm start, vite, nodemon, python -m http.server, webpack --watch.
+- After starting a dev server with runInBackground, tell the user the port (e.g. http://localhost:5173) so they can open it in the browser. They can stop it with stopProcess.
 - IMPORTANT: The workspace root is NOT a git repository. When you clone a repo (e.g. gitClone with url "https://gitee.com/user/my-repo"), it creates a subdirectory (e.g. "my-repo"). All subsequent git operations (gitStatus, gitAdd, gitCommit, gitPush, etc.) MUST pass the repo directory name as the "path" parameter (e.g. path: "my-repo").`;
 
     if (customPrompt?.trim()) {

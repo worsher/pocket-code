@@ -1,5 +1,6 @@
 import { Paths, File, Directory } from "expo-file-system";
-import { exec as localExec } from "./localExecutor";
+import { exec as localExec, startBackgroundExec } from "./localExecutor";
+import { killProcess } from "./processManager";
 import type { AppSettings } from "../store/settings";
 import {
   gitClone,
@@ -190,6 +191,22 @@ export async function executeLocalTool(
       const cwd = (args.cwd as string | undefined) ?? undefined;
       const result = await localExec(args.command as string, cwd, { timeout: 60_000 });
       return result;
+    }
+    case "runInBackground": {
+      const cwd = (args.cwd as string | undefined) ?? undefined;
+      const result = await startBackgroundExec(args.command as string, cwd);
+      if (result.success) {
+        return {
+          success: true,
+          processId: result.processId,
+          message: `Process started (id=${result.processId}). Output is streaming in the chat. Access dev servers at http://localhost:PORT from the device browser. Use stopProcess to terminate.`,
+        };
+      }
+      return { success: false, error: result.error };
+    }
+    case "stopProcess": {
+      killProcess(args.processId as number);
+      return { success: true, message: `Process ${args.processId} stopped.` };
     }
     default:
       return null; // Not supported locally

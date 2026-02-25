@@ -17,6 +17,7 @@ import StreamingIndicator from "../StreamingIndicator";
 import ThinkingBlock from "../ThinkingBlock";
 import DiffPreview from "../DiffPreview";
 import TerminalOutput from "../TerminalOutput";
+import ProcessOutput from "../ProcessOutput";
 import CodeBlock from "../CodeBlock";
 import FileChangeSummary from "../FileChangeSummary";
 
@@ -71,6 +72,16 @@ function ToolCallView({ toolCall }: { toolCall: ToolCall }) {
         stderr={result.stderr}
         success={result.success}
         error={result.error}
+      />
+    );
+  }
+
+  // Special rendering for runInBackground — show live streaming output
+  if (toolCall.toolName === "runInBackground" && result?.processId != null) {
+    return (
+      <ProcessOutput
+        processId={result.processId}
+        command={(toolCall.args as any).command || ""}
       />
     );
   }

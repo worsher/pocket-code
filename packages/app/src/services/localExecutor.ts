@@ -10,6 +10,7 @@
 import { requireNativeModule } from "expo-modules-core";
 import { Paths, Directory } from "expo-file-system";
 import { getRuntimeStatus, buildProotCommand } from "./runtimeManager";
+import { startNativeProcess } from "./processManager";
 
 // ── Types ─────────────────────────────────────────────────────────────────────
 
@@ -50,8 +51,9 @@ export function getWorkspaceDir(): string {
  * 相对路径相对于 workspace 根目录。
  */
 function resolveCwd(cwd?: string): string {
-    const workspace = getWorkspaceDir();
-    if (!cwd) return workspace;
+    // Strip trailing slash from workspace dir (Directory.uri may include one)
+    const workspace = getWorkspaceDir().replace(/\/$/, "");
+    if (!cwd || cwd === ".") return workspace;
     if (cwd.startsWith("/")) return cwd;
     return `${workspace}/${cwd}`;
 }
@@ -128,6 +130,32 @@ export async function exec(
         exitCode: result.exitCode,
         truncated,
     };
+}
+
+/**
+ * 启动后台长期运行进程（dev server、watcher 等）。
+ * 立即返回，不等待进程退出。输出通过 processManager 事件推送给 UI。
+ *
+ * @param command - Shell 命令字符串
+ * @param cwd     - 工作目录（可相对 workspace）
+ * @returns { success, processId?, error? }
+ */
+export async function startBackgroundExec(
+    command: string,
+    cwd?: string
+): Promise<{ success: boolean; processId?: number; error?: string }> {
+    const resolvedCwd = resolveCwd(cwd);
+
+    const status = await getRuntimeStatus();
+    const useProot = status.prootAvailable && status.rootfsInstalled;
+
+    const actualCommand = useProot
+        ? buildProotCommand(command, resolvedCwd)
+        : command;
+
+    const actualCwd = useProot ? "/" : resolvedCwd;
+
+    return startNativeProcess(actualCommand, actualCwd, command);
 }
 
 /**

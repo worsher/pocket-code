@@ -117,8 +117,38 @@ export default function TerminalScreen({ onClose }: TerminalScreenProps) {
     const flatListRef = useRef<FlatList | null>(null);
     // Track PTY start state so we don't restart on re-render
     const ptyStartedRef = useRef(false);
+    // Prevent double proot launch (PTY effect + showSetup transition both might trigger)
+    const prootLaunchedRef = useRef(false);
     // Adaptive poll interval: fast when user is typing, slow otherwise
     const lastInputRef = useRef(Date.now());
+
+    // ── proot auto-launch helper ────────────────────
+    // Checks rootfs status and writes the proot entry command to the terminal.
+    // prootLaunchedRef guards against duplicate launches.
+    function tryLaunchProot(term: PocketTerminal) {
+        if (prootLaunchedRef.current) return;
+        getRuntimeStatus().then((status) => {
+            if (!status.rootfsInstalled) return;
+            const nativeLibDir = getNativeLibDir();
+            if (!nativeLibDir) return;
+            if (prootLaunchedRef.current) return;
+            prootLaunchedRef.current = true;
+            const { Paths } = require('expo-file-system');
+            const prootBin = `${nativeLibDir}/libproot.so`;
+            const prootLoaderBin = `${nativeLibDir}/libproot-loader.so`;
+            const rootfsPath = Paths.document.uri.replace('file://', '') + 'rootfs';
+            const tmpDir = Paths.cache.uri.replace('file://', '') + 'proot-tmp';
+            // Wait for shell to initialize, then clean line and send command.
+            // Use export to pass PROOT_LOADER (app_lib_file SELinux context = executable),
+            // bypassing extract_loader() which fails on Android 10+ W^X restriction.
+            // Launch with -l (login shell) so Alpine's /etc/profile sets correct PATH.
+            // Do NOT bind Android system binaries — they need bionic libc.
+            setTimeout(() => {
+                const cmd = `\x15mkdir -p "${tmpDir}" && export PROOT_TMP_DIR="${tmpDir}" && export PROOT_LOADER="${prootLoaderBin}" && "${prootBin}" -0 --rootfs="${rootfsPath}" --bind=/dev --bind=/proc --bind=/sys -w /root /bin/sh -l\n`;
+                term.write(cmd);
+            }, 400);
+        }).catch(() => {/* ignore */});
+    }
 
     // ── PTY lifecycle ──────────────────────────────
     useEffect(() => {
@@ -131,31 +161,8 @@ export default function TerminalScreen({ onClose }: TerminalScreenProps) {
             if (!success) {
                 term.write("Failed to start PTY \u2014 /system/bin/sh unavailable\r\n");
             } else {
-                // If Alpine rootfs is installed, auto-launch proot to enter Alpine shell
-                getRuntimeStatus().then((status) => {
-                    if (status.rootfsInstalled) {
-                        const nativeLibDir = getNativeLibDir();
-                        if (nativeLibDir) {
-                            const { Paths } = require('expo-file-system');
-                            const prootBin = `${nativeLibDir}/libproot.so`;
-                            const prootLoaderBin = `${nativeLibDir}/libproot-loader.so`;
-                            const rootfsPath = Paths.document.uri.replace('file://', '') + 'rootfs';
-                            const tmpDir = Paths.cache.uri.replace('file://', '') + 'proot-tmp';
-                            // Wait for shell to initialize, then clean line and send command
-                            setTimeout(() => {
-                                // Use export to pass PROOT_LOADER to proot. PROOT_LOADER points
-                                // to libproot-loader.so in nativeLibDir (app_lib_file SELinux
-                                // context = executable), bypassing extract_loader() which fails
-                                // on Android 10+ due to W^X restriction on app_data_file context.
-                                // Launch with -l (login shell) so Alpine's /etc/profile is sourced,
-                                // setting correct PATH for all commands (apk, cat, ls, etc).
-                                // Do NOT bind Android system binaries — they need bionic libc.
-                                const cmd = `\x15mkdir -p "${tmpDir}" && export PROOT_TMP_DIR="${tmpDir}" && export PROOT_LOADER="${prootLoaderBin}" && "${prootBin}" -0 --rootfs="${rootfsPath}" --bind=/dev --bind=/proc --bind=/sys -w /root /bin/sh -l\n`;
-                                term.write(cmd);
-                            }, 600);
-                        }
-                    }
-                }).catch(() => {/* ignore */ });
+                // If Alpine rootfs is already installed on first mount, auto-launch proot
+                tryLaunchProot(term);
             }
         }
 
@@ -213,6 +220,16 @@ export default function TerminalScreen({ onClose }: TerminalScreenProps) {
         };
         // eslint-disable-next-line react-hooks/exhaustive-deps
     }, []);
+
+    // When RuntimeSetup completes (showSetup → false), try to enter Alpine shell.
+    // This handles the case where rootfs was just installed for the first time:
+    // the PTY was already running but proot was skipped because rootfs wasn't ready.
+    useEffect(() => {
+        if (showSetup === false && termRef.current && ptyStartedRef.current) {
+            tryLaunchProot(termRef.current);
+        }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, [showSetup]);
 
     // ── Resize on orientation change ──────────────
     useEffect(() => {

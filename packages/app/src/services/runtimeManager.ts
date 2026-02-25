@@ -173,21 +173,22 @@ export async function installPackage(
         const prootLoaderBin = `${nativeLibDir}/libproot-loader.so`;
         const prootTmpDir = Paths.cache.uri.replace("file://", "") + "proot-tmp";
 
-        const apkCmd = `apk update && apk add --no-cache ${pkgList}`;
-        // Use env to pass PROOT_LOADER reliably. Alpine rootfs has its own busybox
-        // at /bin/busybox — do NOT bind Android system binaries (they need bionic libc).
+        // Use export (not env) to pass PROOT_LOADER/PROOT_TMP_DIR — Android toybox env
+        // can misinterpret proot flags. Alpine rootfs has its own busybox; do NOT bind
+        // Android system binaries (they need bionic libc).
+        const apkCmd = `export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin; apk update && apk add --no-cache ${pkgList}`;
         const command = [
             `mkdir -p "${prootTmpDir}"`,
             `&&`,
-            `env`,
-            `PROOT_TMP_DIR="${prootTmpDir}"`,
-            `PROOT_LOADER="${prootLoaderBin}"`,
+            `export PROOT_TMP_DIR="${prootTmpDir}"`,
+            `&&`,
+            `export PROOT_LOADER="${prootLoaderBin}"`,
+            `&&`,
             `"${prootBin}"`,
             `--rootfs="${rootfsPath}"`,
             `--bind=/dev`,
             `--bind=/proc`,
             `--bind=/sys`,
-            `--bind=${workspaceDir}:/workspace`,
             `-w /`,
             `-0`,
             `/bin/sh -c '${apkCmd}'`,
@@ -221,26 +222,55 @@ export async function installPackage(
 
 /**
  * 构建 proot 包裹命令字符串。供 localExecutor.ts 使用。
+ *
+ * 使用 nativeLibDir 中的完整 libproot.so 路径（而非裸命令名 "proot"），
+ * 并设置 PROOT_LOADER / PROOT_TMP_DIR 环境变量，绕过 Android SELinux W^X 限制。
  */
 export function buildProotCommand(cmd: string, cwd: string): string {
+    const mod = requireNativeModule("PocketTerminalModule");
+    const nativeLibDir: string = mod.getNativeLibDir?.() ?? "";
+    const prootBin = `${nativeLibDir}/libproot.so`;
+    const prootLoaderBin = `${nativeLibDir}/libproot-loader.so`;
+    const prootTmpDir = Paths.cache.uri.replace("file://", "") + "proot-tmp";
     const rootfsDir = getRootfsDir().uri.replace("file://", "");
-    const workspaceDir = new Directory(Paths.document.uri || "", "workspace").uri.replace("file://", "");
+    // Strip trailing slash — Directory.uri may include one, which causes
+    // proot "can't sanitize binding" warnings and incorrect cwd mapping.
+    const workspaceDir = new Directory(Paths.document.uri || "", "workspace").uri
+        .replace("file://", "")
+        .replace(/\/$/, "");
 
-    const resolvedCwd = cwd.startsWith(workspaceDir)
-        ? cwd.replace(workspaceDir, "/workspace")
-        : cwd;
+    // Map host workspace path → /workspace inside container.
+    // Use startsWith(workspaceDir + "/") or exact match to avoid false prefix hits.
+    let resolvedCwd: string;
+    if (cwd === workspaceDir || cwd.startsWith(workspaceDir + "/")) {
+        resolvedCwd = "/workspace" + cwd.slice(workspaceDir.length);
+    } else {
+        resolvedCwd = cwd;
+    }
+    // Normalize: collapse // and strip trailing /.
+    resolvedCwd = resolvedCwd.replace(/\/\//g, "/").replace(/\/\.$/, "") || "/workspace";
+
+    // 在 Alpine /bin/sh 内先注入正确 PATH，确保 apk/node/python3 等可被找到
+    const innerCmd = `export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin; ${cmd.replace(/'/g, "'\\''")}`;
 
     return [
-        "proot",
-        `--rootfs=${rootfsDir}`,
-        "--bind=/dev",
-        "--bind=/proc",
-        "--bind=/sys",
-        `--bind=${workspaceDir}:/workspace`,
-        "-w", resolvedCwd,
-        "-0",
-        "/bin/sh",
-        "-c",
-        `'${cmd.replace(/'/g, "'\\''")}'`,
+        `mkdir -p "${prootTmpDir}"`,
+        `&&`,
+        // Ensure workspace dir exists on host before proot tries to bind it
+        `mkdir -p "${workspaceDir}"`,
+        `&&`,
+        `export PROOT_TMP_DIR="${prootTmpDir}"`,
+        `&&`,
+        `export PROOT_LOADER="${prootLoaderBin}"`,
+        `&&`,
+        `"${prootBin}"`,
+        `--rootfs="${rootfsDir}"`,
+        `--bind=/dev`,
+        `--bind=/proc`,
+        `--bind=/sys`,
+        `"--bind=${workspaceDir}:/workspace"`,
+        `-w "${resolvedCwd}"`,
+        `-0`,
+        `/bin/sh -c '${innerCmd}'`,
     ].join(" ");
 }

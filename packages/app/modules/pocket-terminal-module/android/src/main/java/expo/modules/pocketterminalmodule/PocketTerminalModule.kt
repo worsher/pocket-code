@@ -9,6 +9,8 @@ import java.io.FileOutputStream
 import java.io.InputStream
 import java.util.zip.GZIPInputStream
 import java.nio.file.Files as NioFiles
+import java.util.concurrent.ConcurrentHashMap
+import java.util.concurrent.atomic.AtomicInteger
 
 class PocketTerminalModule : Module() {
   companion object {
@@ -19,11 +21,15 @@ class PocketTerminalModule : Module() {
 
   private external fun installJSI(jsiPtr: Long)
 
+  // ── Background process management ──────────────────────────────────────────
+  private val bgProcesses = ConcurrentHashMap<Int, Process>()
+  private val pidCounter  = AtomicInteger(0)
+
   override fun definition() = ModuleDefinition {
     Name("PocketTerminalModule")
 
     Constant("PI") { Math.PI }
-    Events("onChange")
+    Events("onChange", "onProcessOutput", "onProcessExit")
 
     Function("hello") { "Hello world! 👋" }
 
@@ -67,7 +73,9 @@ class PocketTerminalModule : Module() {
     // 本地命令执行
     AsyncFunction("runLocalCommand") { command: String, workdir: String ->
       val pb = ProcessBuilder("/system/bin/sh", "-c", command)
-      pb.directory(File(workdir))
+      // If workdir doesn't exist, fall back to "/" to avoid IOException
+      val dir = File(workdir)
+      pb.directory(if (dir.exists()) dir else File("/"))
       val process = pb.start()
       val stdout = process.inputStream.bufferedReader().readText()
       val stderr = process.errorStream.bufferedReader().readText()
@@ -78,6 +86,50 @@ class PocketTerminalModule : Module() {
         "stderr"   to stderr.take(5000),
         "exitCode" to exitCode
       )
+    }
+
+    /**
+     * 启动后台长期运行进程（dev server、watcher 等）。
+     * 立即返回 processId，不等待退出。
+     * stdout+stderr 通过 onProcessOutput 事件流式推送。
+     * 进程退出时触发 onProcessExit 事件。
+     */
+    AsyncFunction("startProcess") { command: String, workdir: String ->
+      val pid = pidCounter.incrementAndGet()
+      val pb = ProcessBuilder("/system/bin/sh", "-c", command)
+      val dir = File(workdir)
+      pb.directory(if (dir.exists()) dir else File("/"))
+      pb.redirectErrorStream(true) // 合并 stderr 到 stdout
+      val process = pb.start()
+      bgProcesses[pid] = process
+
+      // 后台线程逐行读取输出并推送事件
+      Thread {
+        try {
+          process.inputStream.bufferedReader().forEachLine { line ->
+            if (bgProcesses.containsKey(pid)) {
+              sendEvent("onProcessOutput", mapOf("processId" to pid, "data" to line))
+            }
+          }
+        } catch (_: Exception) {
+          // 进程被 kill 或流关闭，正常退出
+        } finally {
+          val exitCode = try { process.exitValue() } catch (_: Exception) { -1 }
+          bgProcesses.remove(pid)
+          sendEvent("onProcessExit", mapOf("processId" to pid, "exitCode" to exitCode))
+        }
+      }.also { it.isDaemon = true }.start()
+
+      mapOf("success" to true, "processId" to pid)
+    }
+
+    /**
+     * 停止后台进程。
+     */
+    Function("stopProcess") { pid: Int ->
+      val process = bgProcesses.remove(pid)
+      process?.destroy()
+      mapOf("success" to true)
     }
 
     AsyncFunction("setValueAsync") { value: String ->
