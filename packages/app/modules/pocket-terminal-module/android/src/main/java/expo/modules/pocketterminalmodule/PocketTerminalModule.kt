@@ -125,10 +125,17 @@ class PocketTerminalModule : Module() {
 
     /**
      * 停止后台进程。
+     * 递归杀掉整棵进程树（proot + 子进程），使用 SIGKILL 确保立即终止。
      */
     Function("stopProcess") { pid: Int ->
       val process = bgProcesses.remove(pid)
-      process?.destroy()
+      if (process != null) {
+        try {
+          val osPid = getProcessPid(process)
+          if (osPid != null) killProcessTree(osPid)
+        } catch (_: Exception) {}
+        process.destroyForcibly()
+      }
       mapOf("success" to true)
     }
 
@@ -238,6 +245,44 @@ class PocketTerminalModule : Module() {
   private fun readString(buf: ByteArray, offset: Int, length: Int): String {
     val end = (offset until offset + length).firstOrNull { buf[it] == 0.toByte() } ?: (offset + length)
     return String(buf, offset, end - offset, Charsets.UTF_8)
+  }
+
+  /**
+   * 通过反射获取 Java Process 对象对应的 OS PID。
+   * 兼容所有 Android 版本：优先用 Process.pid()（Java 9+），回退到字段反射。
+   */
+  private fun getProcessPid(process: Process): Int? {
+    return try {
+      val pidMethod = Process::class.java.getMethod("pid")
+      (pidMethod.invoke(process) as? Long)?.toInt()
+    } catch (_: Exception) {
+      try {
+        val field = process.javaClass.getDeclaredField("pid")
+        field.isAccessible = true
+        field.getInt(process)
+      } catch (_: Exception) { null }
+    }
+  }
+
+  /**
+   * 递归杀掉以 rootPid 为根的整棵进程树（通过读取 /proc 找子进程）。
+   * 先递归杀子孙，再 SIGKILL 自身，确保 proot / node 等孙子进程不变成孤儿。
+   */
+  private fun killProcessTree(rootPid: Int) {
+    try {
+      File("/proc").listFiles { f -> f.isDirectory && f.name.all { c -> c.isDigit() } }
+        ?.forEach { procDir ->
+          try {
+            val ppid = File(procDir, "status").readLines()
+              .firstOrNull { it.startsWith("PPid:") }
+              ?.removePrefix("PPid:")?.trim()?.toIntOrNull()
+            if (ppid == rootPid) {
+              killProcessTree(procDir.name.toInt())
+            }
+          } catch (_: Exception) {}
+        }
+    } catch (_: Exception) {}
+    android.os.Process.killProcess(rootPid)
   }
 
   private fun skipPadding(input: InputStream, size: Long) {
