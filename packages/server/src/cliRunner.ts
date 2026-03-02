@@ -6,6 +6,54 @@
 import { spawn } from "child_process";
 import type { AgentSession, StreamEvent } from "./agent.js";
 
+// ── 进程树终止工具（移植自 clawdbot/src/process/kill-tree.ts）────────────
+
+function isProcessAlive(pid: number): boolean {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * 跨平台进程树终止：先 SIGTERM，等待 grace 后 SIGKILL。
+ * 使用进程组信号（kill -pid）确保子进程一并终止。
+ */
+function killProcessTree(pid: number, graceMs = 3000): void {
+  if (!Number.isFinite(pid) || pid <= 0) return;
+
+  if (process.platform === "win32") {
+    // Windows：taskkill /T 包含子进程，先优雅，再强制
+    try {
+      spawn("taskkill", ["/T", "/PID", String(pid)], { stdio: "ignore", detached: true });
+    } catch { /* ignore */ }
+    setTimeout(() => {
+      if (!isProcessAlive(pid)) return;
+      try {
+        spawn("taskkill", ["/F", "/T", "/PID", String(pid)], { stdio: "ignore", detached: true });
+      } catch { /* ignore */ }
+    }, graceMs).unref();
+    return;
+  }
+
+  // Unix：向进程组发 SIGTERM，等待后 SIGKILL
+  try {
+    process.kill(-pid, "SIGTERM");
+  } catch {
+    try { process.kill(pid, "SIGTERM"); } catch { return; }
+  }
+  setTimeout(() => {
+    if (isProcessAlive(-pid)) {
+      try { process.kill(-pid, "SIGKILL"); return; } catch { /* fall through */ }
+    }
+    if (isProcessAlive(pid)) {
+      try { process.kill(pid, "SIGKILL"); } catch { /* already gone */ }
+    }
+  }, graceMs).unref();
+}
+
 // ── Claude Code SDK Runner ────────────────────────────────
 
 /**
@@ -123,15 +171,27 @@ export async function runClaudeCodeAgent(
 
 /**
  * Gemini CLI stream-json 事件结构（NDJSON，每行一个 JSON 对象）。
+ * 实际格式参考: gemini --output-format stream-json 的输出
  */
 interface GeminiStreamLine {
-  type: "message" | "tool_call" | "tool_result" | "error" | "done";
-  role?: "user" | "assistant" | "tool";
+  type: "init" | "message" | "tool_use" | "tool_result" | "result" | "error";
+  timestamp?: string;
+  session_id?: string;
+  model?: string;
+  // message 事件（role 为 "user" 或 "assistant"）
+  role?: "user" | "assistant";
   content?: string;
-  name?: string;
-  input?: unknown;
-  result?: unknown;
-  error?: string;
+  delta?: boolean;
+  // tool_use 事件
+  tool_name?: string;
+  tool_id?: string;
+  parameters?: unknown;
+  // tool_result 事件
+  status?: "success" | "error";
+  output?: unknown;
+  // result/error 事件
+  error?: { type?: string; message?: string } | string;
+  stats?: unknown;
 }
 
 /**
@@ -150,11 +210,11 @@ export async function runGeminiCliAgent(
   console.log(`[CLI] Gemini CLI: workspace=${session.workspace}, msg="${userMessage.slice(0, 80)}"`);
 
   // 构建 CLI 参数
-  // --yolo / --approval-mode yolo: 自动批准所有工具调用，无需交互
-  // --output_format stream_json: NDJSON 流式输出
+  // -y/--yolo: 自动批准所有工具调用，无需交互
+  // -o/--output-format stream-json: NDJSON 流式输出（每行一个 JSON 对象）
   const args = [
     "--prompt", userMessage,
-    "--output_format", "stream_json",
+    "--output-format", "stream-json",
     "--yolo",
   ];
 
@@ -163,14 +223,35 @@ export async function runGeminiCliAgent(
     args.push("--model", geminiModel);
   }
 
+  // 默认不加载用户全局扩展（Figma、chrome-devtools 等），避免 chrome-devtools 挂起
+  // -e/--extensions：只加载指定名称的扩展；传不存在的名称 = 跳过所有扩展加载
+  // 如需保留特定扩展，设置 GEMINI_CLI_EXTENSIONS=ext1,ext2
+  const extensions = process.env.GEMINI_CLI_EXTENSIONS?.split(",").filter(Boolean) ?? [];
+  args.push("--extensions", ...(extensions.length > 0 ? extensions : ["__none__"]));
+
+  // 清除 GOOGLE_CLOUD_PROJECT / GCLOUD_PROJECT 避免干扰 Gemini CLI 的项目选择
+  const env = { ...process.env };
+  delete env.GOOGLE_CLOUD_PROJECT;
+  delete env.GCLOUD_PROJECT;
+
   const proc = spawn(geminiPath, args, {
     cwd: session.workspace,
     stdio: ["pipe", "pipe", "pipe"],
-    env: { ...process.env },
+    // Unix 上独立进程组，便于 kill-tree 终止整个子进程树
+    detached: process.platform !== "win32",
+    windowsHide: true,
+    env,
   });
 
+  // 立即关闭 stdin，向 Gemini CLI 发送 EOF 信号
+  // 若 stdin 保持 pipe 开放，CLI 可能一直等待输入而不产生输出
+  proc.stdin?.end();
+
   if (signal) {
-    signal.addEventListener("abort", () => proc.kill("SIGTERM"));
+    signal.addEventListener("abort", () => {
+      if (proc.pid) killProcessTree(proc.pid);
+      else proc.kill("SIGTERM");
+    });
   }
 
   let fullText = "";
@@ -233,27 +314,34 @@ function parseLine(
     return;
   }
   switch (evt.type) {
+    case "init":
+      console.log(`[CLI] Gemini session=${evt.session_id}, model=${evt.model}`);
+      break;
     case "message":
       if (evt.role === "assistant" && evt.content) {
         appendText(evt.content);
         onEvent({ type: "text-delta", text: evt.content });
       }
       break;
-    case "tool_call":
-      if (evt.name) {
-        onEvent({ type: "tool-call", toolName: evt.name, args: evt.input ?? {} });
+    case "tool_use":
+      if (evt.tool_name) {
+        onEvent({ type: "tool-call", toolName: evt.tool_name, args: evt.parameters ?? {} });
       }
       break;
     case "tool_result":
-      if (evt.name) {
-        onEvent({ type: "tool-result", toolName: evt.name, result: evt.result ?? {} });
+      if (evt.tool_id) {
+        onEvent({ type: "tool-result", toolName: evt.tool_id, result: evt.output ?? {} });
       }
       break;
-    case "error":
-      onEvent({ type: "error", error: evt.error || "Gemini CLI 未知错误" });
+    case "result":
+      if (evt.status === "error" && evt.error) {
+        const errMsg = typeof evt.error === "string" ? evt.error : (evt.error.message ?? "Gemini CLI 执行失败");
+        onEvent({ type: "error", error: errMsg });
+      }
+      // status === "success" 无需额外处理，proc.on("close") 会发出 done
       break;
-    case "done":
-      // 正常结束标记，无需处理
+    case "error":
+      onEvent({ type: "error", error: typeof evt.error === "string" ? evt.error : "Gemini CLI 未知错误" });
       break;
   }
 }
