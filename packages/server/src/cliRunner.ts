@@ -54,12 +54,12 @@ function killProcessTree(pid: number, graceMs = 3000): void {
   }, graceMs).unref();
 }
 
-// ── Claude Code SDK Runner ────────────────────────────────
+// ── Claude Code CLI Runner ────────────────────────────────
 
 /**
- * 使用 @anthropic-ai/claude-code 的 query() SDK 运行 Claude Code。
- * Claude Code 自己管理工具调用（文件读写、命令执行等），
- * 我们只需要将 SDK 消息格式转换为 StreamEvent。
+ * 使用 claude CLI 子进程运行，解析 stream-json 格式的 NDJSON 输出。
+ * 与 Gemini CLI runner 相同模式：spawn → stdin.end → 解析 stdout NDJSON。
+ * 服务器上需要全局安装并认证：npm install -g @anthropic-ai/claude-code
  */
 export async function runClaudeCodeAgent(
   session: AgentSession,
@@ -67,104 +67,156 @@ export async function runClaudeCodeAgent(
   onEvent: (event: StreamEvent) => void,
   signal?: AbortSignal
 ): Promise<void> {
-  let queryFn: any;
-  try {
-    // @ts-ignore — @anthropic-ai/claude-code is an optional runtime dependency
-    const mod = await import("@anthropic-ai/claude-code");
-    queryFn = mod.query;
-  } catch {
-    onEvent({
-      type: "error",
-      error: "Claude Code SDK 未安装。请在服务器上执行: npm install -g @anthropic-ai/claude-code",
-    });
-    onEvent({ type: "done" });
-    return;
-  }
+  const claudePath = process.env.CLAUDE_CLI_PATH || "claude";
 
-  const abortController = new AbortController();
-  if (signal) {
-    signal.addEventListener("abort", () => abortController.abort());
+  const args = [
+    "-p", userMessage,
+    "--output-format", "stream-json",
+    "--verbose",
+    "--include-partial-messages",
+    "--dangerously-skip-permissions",
+  ];
+
+  if (session.customPrompt?.trim()) {
+    args.push("--append-system-prompt", `\n\n## Project Instructions\n${session.customPrompt.trim()}`);
   }
 
   console.log(`[CLI] Claude Code: workspace=${session.workspace}, msg="${userMessage.slice(0, 80)}"`);
 
+  // 清除 API key 环境变量，避免干扰 claude CLI 的 OAuth 认证
+  // claude CLI 使用自己存储的 OAuth 凭证，不应使用服务器的 API key
+  const env = { ...process.env };
+  delete env.ANTHROPIC_API_KEY;
+  delete env.ANTHROPIC_AUTH_TOKEN;
+
+  const proc = spawn(claudePath, args, {
+    cwd: session.workspace,
+    stdio: ["pipe", "pipe", "pipe"],
+    detached: process.platform !== "win32",
+    windowsHide: true,
+    env,
+  });
+
+  // 立即关闭 stdin，防止 claude CLI 等待输入
+  proc.stdin?.end();
+
+  if (signal) {
+    signal.addEventListener("abort", () => {
+      if (proc.pid) killProcessTree(proc.pid);
+      else proc.kill("SIGTERM");
+    });
+  }
+
   let fullText = "";
+  let lineBuffer = "";
+  let resultSuccess = false;
 
-  try {
-    for await (const message of queryFn({
-      prompt: userMessage,
-      abortController,
-      options: {
-        cwd: session.workspace,
-        permissionMode: "bypassPermissions",
-        appendSystemPrompt: session.customPrompt?.trim()
-          ? `\n\n## Project Instructions\n${session.customPrompt.trim()}`
-          : undefined,
-      },
-    })) {
-      if (signal?.aborted) break;
-
-      switch ((message as any).type) {
-        case "system": {
-          const sys = message as any;
-          if (sys.subtype === "init") {
-            console.log(`[CLI] Claude Code session=${sys.session_id}, model=${sys.model}`);
-          }
-          break;
-        }
-
-        case "assistant": {
-          const content = (message as any).message?.content;
-          if (!Array.isArray(content)) break;
-          for (const block of content) {
-            if (block.type === "text") {
-              fullText += block.text;
-              onEvent({ type: "text-delta", text: block.text });
-            } else if (block.type === "tool_use") {
-              onEvent({ type: "tool-call", toolName: block.name, args: block.input });
-            }
-          }
-          break;
-        }
-
-        case "user": {
-          const content = (message as any).message?.content;
-          if (!Array.isArray(content)) break;
-          for (const block of content) {
-            if (block.type === "tool_result") {
-              const resultText = Array.isArray(block.content)
-                ? block.content.map((c: any) => (c.type === "text" ? c.text : "")).join("")
-                : String(block.content ?? "");
-              onEvent({ type: "tool-result", toolName: "_claude_tool", result: resultText });
-            }
-          }
-          break;
-        }
-
-        case "result": {
-          const res = message as any;
-          if (res.subtype !== "success") {
-            const errMsg = Array.isArray(res.errors) ? res.errors.join(", ") : (res.subtype ?? "unknown error");
-            onEvent({ type: "error", error: `Claude Code 执行失败: ${errMsg}` });
-          } else {
-            console.log(`[CLI] Claude Code done. turns=${res.num_turns}, cost=$${res.total_cost_usd?.toFixed(4) ?? "?"}`);
-          }
-          break;
+  return new Promise<void>((resolve) => {
+    proc.stdout.on("data", (chunk: Buffer) => {
+      lineBuffer += chunk.toString("utf-8");
+      const lines = lineBuffer.split("\n");
+      lineBuffer = lines.pop() ?? "";
+      for (const line of lines) {
+        if (parseClaudeLine(line, onEvent, (t) => { fullText += t; })) {
+          resultSuccess = true;
         }
       }
+    });
+
+    proc.stderr.on("data", (chunk: Buffer) => {
+      const msg = chunk.toString("utf-8").trim();
+      if (msg) console.warn("[CLI] Claude Code stderr:", msg.slice(0, 300));
+    });
+
+    proc.on("close", (code) => {
+      if (lineBuffer.trim()) {
+        if (parseClaudeLine(lineBuffer, onEvent, (t) => { fullText += t; })) {
+          resultSuccess = true;
+        }
+      }
+      // claude CLI 有时即使成功也以非零退出码结束，已收到 result.success 则忽略
+      if (code !== 0 && !signal?.aborted && !resultSuccess) {
+        console.error(`[CLI] Claude Code exited with code ${code}`);
+        onEvent({ type: "error", error: `Claude Code 进程异常退出 (code=${code})` });
+      }
+      session.messages.push({ role: "assistant", content: fullText || "(Claude Code completed)" });
+      onEvent({ type: "done" });
+      resolve();
+    });
+
+    proc.on("error", (err) => {
+      console.error("[CLI] Failed to start Claude Code:", err.message);
+      onEvent({
+        type: "error",
+        error: `无法启动 Claude Code CLI: ${err.message}。请确认已安装: npm install -g @anthropic-ai/claude-code`,
+      });
+      onEvent({ type: "done" });
+      resolve();
+    });
+  });
+}
+
+/** 返回 true 表示收到了 result.subtype=success */
+function parseClaudeLine(
+  line: string,
+  onEvent: (e: StreamEvent) => void,
+  appendText: (t: string) => void
+): boolean {
+  const trimmed = line.trim();
+  if (!trimmed) return false;
+  let msg: any;
+  try {
+    msg = JSON.parse(trimmed);
+  } catch {
+    return false;
+  }
+
+  switch (msg.type) {
+    case "system":
+      if (msg.subtype === "init") {
+        console.log(`[CLI] Claude Code session=${msg.session_id}, model=${msg.model}`);
+      }
+      break;
+
+    case "assistant": {
+      const content = msg.message?.content;
+      if (!Array.isArray(content)) break;
+      for (const block of content) {
+        if (block.type === "text") {
+          appendText(block.text);
+          onEvent({ type: "text-delta", text: block.text });
+        } else if (block.type === "tool_use") {
+          onEvent({ type: "tool-call", toolName: block.name, args: block.input });
+        }
+      }
+      break;
     }
 
-    session.messages.push({ role: "assistant", content: fullText || "(Claude Code completed)" });
-    onEvent({ type: "done" });
-  } catch (err: any) {
-    if (err?.name === "AbortError") {
-      onEvent({ type: "done" });
-      return;
+    case "user": {
+      const content = msg.message?.content;
+      if (!Array.isArray(content)) break;
+      for (const block of content) {
+        if (block.type === "tool_result") {
+          const resultText = Array.isArray(block.content)
+            ? block.content.map((c: any) => (c.type === "text" ? c.text : "")).join("")
+            : String(block.content ?? "");
+          onEvent({ type: "tool-result", toolName: "_claude_tool", result: resultText });
+        }
+      }
+      break;
     }
-    console.error("[CLI] Claude Code error:", err.message);
-    onEvent({ type: "error", error: err.message });
-    onEvent({ type: "done" });
+
+    case "result":
+      if (msg.subtype !== "success") {
+        const errMsg = Array.isArray(msg.errors) ? msg.errors.join(", ") : (msg.subtype ?? "unknown error");
+        onEvent({ type: "error", error: `Claude Code 执行失败: ${errMsg}` });
+      } else {
+        console.log(`[CLI] Claude Code done. turns=${msg.num_turns}, cost=$${msg.total_cost_usd?.toFixed(4) ?? "?"}`);
+        return true;
+      }
+      break;
   }
+  return false;
 }
 
 // ── Gemini CLI Runner ─────────────────────────────────────
