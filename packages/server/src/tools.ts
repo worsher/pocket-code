@@ -462,5 +462,173 @@ export function createTools(workspace: string, containerId?: string) {
         }
       },
     }),
+
+    // ── Search & Edit tools ──────────────────────────────
+
+    searchFiles: tool({
+      description:
+        "Search for a text pattern across files in the workspace using grep. Returns matching lines with file paths and line numbers. Use this to find code, functions, imports, or any text patterns.",
+      parameters: z.object({
+        pattern: z.string().describe("Search pattern (text or regex)"),
+        path: z
+          .string()
+          .default(".")
+          .describe("Directory to search in (relative to workspace root)"),
+        include: z
+          .string()
+          .optional()
+          .describe("File glob pattern to include, e.g. '*.ts' or '*.py'"),
+        ignoreCase: z
+          .boolean()
+          .default(false)
+          .describe("Whether to ignore case"),
+        isRegex: z
+          .boolean()
+          .default(false)
+          .describe("Whether the pattern is a regex"),
+      }),
+      execute: async ({ pattern, path, include, ignoreCase, isRegex }) => {
+        try {
+          // Build grep command
+          const flags = [
+            "-rn", // recursive + line numbers
+            "--color=never",
+            ignoreCase ? "-i" : "",
+            isRegex ? "-E" : "-F", // -F for fixed string, -E for extended regex
+          ]
+            .filter(Boolean)
+            .join(" ");
+
+          const includeFlag = include ? `--include='${include}'` : "";
+          const safePattern = JSON.stringify(pattern);
+
+          const searchPath =
+            containerId && isDockerEnabled()
+              ? path === "." ? "/workspace" : `/workspace/${path}`
+              : path === "." ? workspace : safePath(workspace, path);
+
+          const cmd = `grep ${flags} ${includeFlag} ${safePattern} ${JSON.stringify(searchPath)} | head -50`;
+
+          const { stdout } = await shellExec(cmd, {
+            workspace,
+            containerId,
+            timeout: 15000,
+          });
+
+          const matches = stdout
+            .trim()
+            .split("\n")
+            .filter(Boolean)
+            .map((line) => {
+              // Format: filepath:lineNumber:content
+              const firstColon = line.indexOf(":");
+              const secondColon = line.indexOf(":", firstColon + 1);
+              if (firstColon === -1 || secondColon === -1) {
+                return { file: "", line: 0, content: line };
+              }
+              let file = line.slice(0, firstColon);
+              // Strip workspace prefix for cleaner output
+              const wsPrefix = containerId && isDockerEnabled() ? "/workspace/" : workspace + "/";
+              if (file.startsWith(wsPrefix)) {
+                file = file.slice(wsPrefix.length);
+              }
+              return {
+                file,
+                line: parseInt(line.slice(firstColon + 1, secondColon), 10) || 0,
+                content: line.slice(secondColon + 1).trim(),
+              };
+            });
+
+          return {
+            success: true,
+            matchCount: matches.length,
+            matches,
+            truncated: matches.length >= 50,
+          };
+        } catch (err: any) {
+          // grep returns exit code 1 when no matches found
+          if (err.message?.includes("exit code 1") || err.stdout === "") {
+            return { success: true, matchCount: 0, matches: [], truncated: false };
+          }
+          return { success: false, error: err.message };
+        }
+      },
+    }),
+
+    editFile: tool({
+      description:
+        "Edit a file by replacing a specific text string with new content. More precise than writeFile for modifying existing files — only the matched portion is changed. The oldText must match exactly (including whitespace and indentation).",
+      parameters: z.object({
+        path: z.string().describe("Relative file path"),
+        oldText: z
+          .string()
+          .describe(
+            "The exact text to find and replace. Must match the file content exactly."
+          ),
+        newText: z.string().describe("The replacement text"),
+      }),
+      execute: async ({ path, oldText, newText }) => {
+        try {
+          // Read current content
+          let content: string;
+          if (containerId && isDockerEnabled()) {
+            const containerPath = `/workspace/${path}`;
+            const { stdout } = await shellExec(
+              `cat ${JSON.stringify(containerPath)}`,
+              { workspace, containerId, timeout: 10000 }
+            );
+            content = stdout;
+          } else {
+            const fullPath = safePath(workspace, path);
+            content = await readFile(fullPath, "utf-8");
+          }
+
+          // Verify the old text exists
+          const index = content.indexOf(oldText);
+          if (index === -1) {
+            return {
+              success: false,
+              error:
+                "oldText not found in the file. Make sure it matches exactly including whitespace.",
+            };
+          }
+
+          // Check for multiple occurrences
+          const secondIndex = content.indexOf(oldText, index + oldText.length);
+          if (secondIndex !== -1) {
+            return {
+              success: false,
+              error:
+                "oldText found multiple times in the file. Provide a more specific (longer) oldText to match uniquely.",
+            };
+          }
+
+          // Apply the edit
+          const newContent = content.slice(0, index) + newText + content.slice(index + oldText.length);
+
+          // Write back
+          if (containerId && isDockerEnabled()) {
+            const containerPath = `/workspace/${path}`;
+            const b64 = Buffer.from(newContent, "utf-8").toString("base64");
+            await shellExec(
+              `echo ${JSON.stringify(b64)} | base64 -d > ${JSON.stringify(containerPath)}`,
+              { workspace, containerId, timeout: 10000 }
+            );
+          } else {
+            const fullPath = safePath(workspace, path);
+            await writeFile(fullPath, newContent, "utf-8");
+          }
+
+          return {
+            success: true,
+            path,
+            oldContent: content,
+            newContent,
+          };
+        } catch (err: any) {
+          return { success: false, error: err.message };
+        }
+      },
+    }),
   };
 }

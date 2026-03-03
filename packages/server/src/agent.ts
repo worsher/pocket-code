@@ -42,7 +42,7 @@ const MODEL_MAP: Record<string, ModelConfig> = {
   "glm-4-6": { provider: "iflow", modelId: "glm-4.6" },
   // CLI providers — use server-side installed CLI tools with Pro subscription
   "claude-code": { provider: "cli-claude", modelId: "claude-code" },
-  "gemini-cli":  { provider: "cli-gemini", modelId: "gemini-cli"  },
+  "gemini-cli": { provider: "cli-gemini", modelId: "gemini-cli" },
 };
 
 /** SiliconFlow uses OpenAI-compatible API */
@@ -144,6 +144,7 @@ export type StreamEvent =
   | { type: "model-selected"; model: string; reason: string }
   | { type: "tool-call"; toolName: string; args: unknown }
   | { type: "tool-result"; toolName: string; result: unknown }
+  | { type: "usage"; promptTokens: number; completionTokens: number; totalTokens: number }
   | { type: "error"; error: string }
   | { type: "done" };
 
@@ -210,13 +211,15 @@ export async function runAgent(
 
   console.log(`[Agent] model=${effectiveModelKey}, message="${userMessage.slice(0, 80)}"`);
 
+  const maxSteps = parseInt(process.env.AGENT_MAX_STEPS || "25", 10);
+
   try {
     const result = streamText({
       model,
       system: systemPrompt,
       messages: session.messages,
       tools,
-      maxSteps: 10,
+      maxSteps,
       abortSignal: signal,
     });
 
@@ -247,10 +250,33 @@ export async function runAgent(
       }
     }
 
-    session.messages.push({ role: "assistant", content: fullText });
+    // Use the SDK's response messages which include tool calls and results,
+    // preserving full context for subsequent conversation turns.
+    const responseMessages = (await result.response).messages;
+    if (responseMessages.length > 0) {
+      session.messages.push(...responseMessages);
+    } else {
+      // Fallback: save at least the text content
+      session.messages.push({ role: "assistant", content: fullText });
+    }
 
     // Persist to database
     saveSession(session.sessionId, session.userId, session.messages, session.modelKey, session.projectId);
+
+    // Emit token usage stats
+    try {
+      const usage = await result.usage;
+      if (usage) {
+        onEvent({
+          type: "usage",
+          promptTokens: usage.promptTokens || 0,
+          completionTokens: usage.completionTokens || 0,
+          totalTokens: (usage.promptTokens || 0) + (usage.completionTokens || 0),
+        });
+      }
+    } catch {
+      // Usage data not available — ignore
+    }
 
     onEvent({ type: "done" });
   } catch (err: any) {

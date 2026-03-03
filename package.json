@@ -6,11 +6,21 @@
   "scripts": {
     "dev:server": "pnpm --filter @pocket-code/server dev",
     "build:server": "pnpm --filter @pocket-code/server build",
-    "dev:app": "pnpm --filter @pocket-code/app start"
+    "dev:app": "pnpm --filter @pocket-code/app start",
+    "test": "pnpm --filter @pocket-code/server test",
+    "lint": "eslint packages/server/src packages/app/src",
+    "format": "prettier --write 'packages/**/*.{ts,tsx,json}'"
   },
   "pnpm": {
     "onlyBuiltDependencies": [
       "esbuild"
     ]
+  },
+  "devDependencies": {
+    "@eslint/js": "^10.0.1",
+    "eslint": "^10.0.2",
+    "eslint-config-prettier": "^10.1.8",
+    "prettier": "^3.8.1",
+    "typescript-eslint": "^8.56.1"
   }
 }

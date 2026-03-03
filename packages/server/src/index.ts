@@ -11,6 +11,7 @@ import { checkQuota, incrementUsage, getUserQuota } from "./resourceLimits.js";
 import { handleOAuthRoute } from "./oauth.js";
 import { handleFileUpload, handleFileDownload } from "./fileTransfer.js";
 import { isPoolEnabled, initPool } from "./containerPool.js";
+import { WsMessage } from "./wsSchemas.js";
 
 const PORT = parseInt(process.env.PORT || "3100", 10);
 
@@ -76,11 +77,20 @@ wss.on("connection", (ws: WebSocket) => {
   let session: AgentSession | null = null;
   let currentAbort: AbortController | null = null;
   let auth: AuthPayload | null = null;
+  let activeSessionId: string | null = null;
   console.log("[WS] Client connected");
 
   ws.on("message", async (raw: Buffer) => {
     try {
-      const msg = JSON.parse(raw.toString());
+      const raw_msg = JSON.parse(raw.toString());
+      // Validate message shape
+      const parsed = WsMessage.safeParse(raw_msg);
+      if (!parsed.success) {
+        const errMsg = parsed.error.issues.map(i => `${i.path.join('.')}: ${i.message}`).join('; ');
+        send(ws, { type: "error", error: `Invalid message: ${errMsg}` });
+        return;
+      }
+      const msg = parsed.data;
       console.log("[WS] Received:", msg.type);
 
       switch (msg.type) {
@@ -92,6 +102,10 @@ wss.on("connection", (ws: WebSocket) => {
             return;
           }
           const result = registerAnonymous(deviceId);
+          if ("error" in result) {
+            send(ws, { type: "error", error: result.error });
+            return;
+          }
           send(ws, {
             type: "auth",
             token: result.token,
@@ -125,6 +139,7 @@ wss.on("connection", (ws: WebSocket) => {
             session = await createSession(sessionId, auth.userId, projectId);
             sessions.set(sessionId, session);
           }
+          activeSessionId = sessionId;
           // Docker isolation: get or create container
           if (isDockerEnabled() && !session.containerId) {
             try {
@@ -142,9 +157,9 @@ wss.on("connection", (ws: WebSocket) => {
             session.customPrompt = msg.customPrompt || undefined;
           }
           // Setup git credentials if provided
-          if (msg.gitCredentials?.length > 0) {
+          if (msg.gitCredentials && msg.gitCredentials.length > 0) {
             try {
-              await setupGitCredentials(session.workspace, msg.gitCredentials);
+              await setupGitCredentials(session.workspace, msg.gitCredentials as any);
             } catch (err: any) {
               console.error("[WS] Failed to setup git credentials:", err.message);
             }
@@ -323,8 +338,10 @@ wss.on("connection", (ws: WebSocket) => {
           break;
         }
 
-        default:
-          send(ws, { type: "error", error: `Unknown message type: ${msg.type}` });
+        default: {
+          const _exhaustive: never = msg;
+          send(ws, { type: "error", error: `Unknown message type: ${(msg as any).type}` });
+        }
       }
     } catch (err: any) {
       console.error("[WS] Error:", err.message);
@@ -334,6 +351,18 @@ wss.on("connection", (ws: WebSocket) => {
 
   ws.on("close", () => {
     console.log("[WS] Client disconnected");
+    // Abort any running agent
+    if (currentAbort) {
+      currentAbort.abort();
+      currentAbort = null;
+    }
+    // Clean up session from memory to prevent leaks
+    if (activeSessionId) {
+      sessions.delete(activeSessionId);
+      activeSessionId = null;
+    }
+    session = null;
+    auth = null;
   });
 });
 
