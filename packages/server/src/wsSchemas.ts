@@ -1,7 +1,13 @@
 // ── WebSocket Message Schemas (zod) ──────────────────────
 // Validates all incoming WebSocket messages to prevent malformed input.
+// NOTE: Client (React Native) may send `null` for optional fields (from useState),
+// so we use .nullable() alongside .optional() where needed.
 
 import { z } from "zod";
+
+/** Helper: accept string, undefined, or null — coerce null to undefined */
+const optStr = (maxLen = 1024) =>
+    z.string().max(maxLen).optional().nullable().transform(v => v ?? undefined);
 
 export const RegisterMessage = z.object({
     type: z.literal("register"),
@@ -10,11 +16,11 @@ export const RegisterMessage = z.object({
 
 export const InitMessage = z.object({
     type: z.literal("init"),
-    token: z.string().optional(),
-    sessionId: z.string().max(128).optional(),
-    projectId: z.string().max(128).optional(),
-    model: z.string().max(64).optional(),
-    customPrompt: z.string().max(10000).optional(),
+    token: optStr(),
+    sessionId: optStr(128),
+    projectId: optStr(128),
+    model: optStr(64),
+    customPrompt: optStr(10000),
     gitCredentials: z
         .array(
             z.object({
@@ -24,15 +30,17 @@ export const InitMessage = z.object({
                 token: z.string(),
             })
         )
-        .optional(),
+        .optional()
+        .nullable()
+        .transform(v => v ?? undefined),
 });
 
 export const MessageMessage = z.object({
     type: z.literal("message"),
     content: z.string().min(1).max(100000),
-    model: z.string().max(64).optional(),
-    customPrompt: z.string().max(10000).optional(),
-    rewindTo: z.number().int().min(0).optional(),
+    model: optStr(64),
+    customPrompt: optStr(10000),
+    rewindTo: z.number().int().min(0).optional().nullable().transform(v => v ?? undefined),
     images: z
         .array(
             z.object({
@@ -41,32 +49,34 @@ export const MessageMessage = z.object({
             })
         )
         .max(10)
-        .optional(),
+        .optional()
+        .nullable()
+        .transform(v => v ?? undefined),
 });
 
 export const ToolExecMessage = z.object({
     type: z.literal("tool-exec"),
     toolName: z.string().min(1).max(64),
     args: z.record(z.unknown()),
-    callId: z.string().optional(),
+    callId: optStr(),
 });
 
 export const ListFilesMessage = z.object({
     type: z.literal("list-files"),
-    path: z.string().max(1024).optional(),
-    _reqId: z.string().optional(),
+    path: optStr(1024),
+    _reqId: optStr(),
 });
 
 export const ReadFileMessage = z.object({
     type: z.literal("read-file"),
     path: z.string().min(1).max(1024),
-    _reqId: z.string().optional(),
+    _reqId: optStr(),
 });
 
 export const ListSessionsMessage = z.object({
     type: z.literal("list-sessions"),
-    projectId: z.string().max(128).optional(),
-    limit: z.number().int().min(1).max(200).optional(),
+    projectId: optStr(128),
+    limit: z.number().int().min(1).max(200).optional().nullable().transform(v => v ?? undefined),
 });
 
 export const DeleteSessionMessage = z.object({

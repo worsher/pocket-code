@@ -17,6 +17,18 @@ const PORT = parseInt(process.env.PORT || "3100", 10);
 
 const sessions = new Map<string, AgentSession>();
 
+// TTL cleanup: remove sessions idle for more than 30 minutes
+const SESSION_TTL_MS = 30 * 60 * 1000;
+setInterval(() => {
+  const now = Date.now();
+  for (const [id, sess] of sessions) {
+    if (now - (sess.lastActivity || 0) > SESSION_TTL_MS) {
+      sessions.delete(id);
+      console.log(`[Session] Cleaned up stale session: ${id}`);
+    }
+  }
+}, 5 * 60 * 1000); // check every 5 min
+
 // Initialise DB before starting WebSocket server
 await initDb();
 
@@ -87,6 +99,7 @@ wss.on("connection", (ws: WebSocket) => {
       const parsed = WsMessage.safeParse(raw_msg);
       if (!parsed.success) {
         const errMsg = parsed.error.issues.map(i => `${i.path.join('.')}: ${i.message}`).join('; ');
+        console.log("[WS] Validation failed for type:", raw_msg?.type, "errors:", errMsg);
         send(ws, { type: "error", error: `Invalid message: ${errMsg}` });
         return;
       }
@@ -96,6 +109,7 @@ wss.on("connection", (ws: WebSocket) => {
       switch (msg.type) {
         // ── Anonymous registration ─────────────────────
         case "register": {
+          console.log("[WS] Processing register, deviceId:", msg.deviceId);
           const deviceId = msg.deviceId;
           if (!deviceId) {
             send(ws, { type: "error", error: "deviceId is required" });
@@ -106,6 +120,7 @@ wss.on("connection", (ws: WebSocket) => {
             send(ws, { type: "error", error: result.error });
             return;
           }
+          console.log("[WS] Register success, userId:", result.userId);
           send(ws, {
             type: "auth",
             token: result.token,
@@ -116,14 +131,17 @@ wss.on("connection", (ws: WebSocket) => {
 
         // ── Session init (requires auth) ───────────────
         case "init": {
+          console.log("[WS] Processing init, token present:", !!msg.token, "sessionId:", msg.sessionId);
           // Verify token
           if (msg.token) {
             auth = verifyToken(msg.token);
           }
           if (!auth) {
+            console.log("[WS] Init failed: invalid or missing token");
             send(ws, { type: "error", error: "Invalid or missing token. Send register first." });
             return;
           }
+          console.log("[WS] Auth verified, userId:", auth.userId);
 
           const sessionId = msg.sessionId || crypto.randomUUID();
           const projectId: string = msg.projectId || '';
@@ -140,6 +158,7 @@ wss.on("connection", (ws: WebSocket) => {
             sessions.set(sessionId, session);
           }
           activeSessionId = sessionId;
+          session.lastActivity = Date.now();
           // Docker isolation: get or create container
           if (isDockerEnabled() && !session.containerId) {
             try {
@@ -178,6 +197,7 @@ wss.on("connection", (ws: WebSocket) => {
             send(ws, { type: "error", error: "No session. Send init first." });
             return;
           }
+          session.lastActivity = Date.now();
           // Check API call quota
           if (auth) {
             const quotaCheck = checkQuota(auth.userId, "api_call");
@@ -339,7 +359,6 @@ wss.on("connection", (ws: WebSocket) => {
         }
 
         default: {
-          const _exhaustive: never = msg;
           send(ws, { type: "error", error: `Unknown message type: ${(msg as any).type}` });
         }
       }
@@ -356,13 +375,11 @@ wss.on("connection", (ws: WebSocket) => {
       currentAbort.abort();
       currentAbort = null;
     }
-    // Clean up session from memory to prevent leaks
-    if (activeSessionId) {
-      sessions.delete(activeSessionId);
-      activeSessionId = null;
-    }
+    // Don't immediately delete the session — client may reconnect and reuse it.
+    // Sessions will be garbage-collected by the TTL cleanup below.
     session = null;
     auth = null;
+    activeSessionId = null;
   });
 });
 

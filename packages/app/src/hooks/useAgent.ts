@@ -127,6 +127,12 @@ export function useAgent({ settings, model = "deepseek-v3", customPrompt, projec
   const serverUrl =
     settings.mode === "geek" ? settings.toolServerUrl : settings.cloudServerUrl;
 
+  // Refs for connect — avoid stale closure and prevent unnecessary re-creation
+  const serverUrlRef = useRef(serverUrl);
+  serverUrlRef.current = serverUrl;
+  const modeRef = useRef(settings.mode);
+  modeRef.current = settings.mode;
+
   // Whether auto-connect is needed:
   // - Cloud mode: always (all operations go through server)
   // - Geek + server (Termux): always (all tools go through WS)
@@ -168,8 +174,8 @@ export function useAgent({ settings, model = "deepseek-v3", customPrompt, projec
   const connect = useCallback(() => {
     if (wsRef.current?.readyState === WebSocket.OPEN) return;
 
-    console.log("[useAgent] Connecting to:", serverUrl, "mode:", settings.mode);
-    const ws = new WebSocket(serverUrl);
+    console.log("[useAgent] Connecting to:", serverUrlRef.current, "mode:", modeRef.current);
+    const ws = new WebSocket(serverUrlRef.current);
     wsRef.current = ws;
 
     ws.onopen = () => {
@@ -392,7 +398,7 @@ export function useAgent({ settings, model = "deepseek-v3", customPrompt, projec
       console.error("[useAgent] WebSocket error:", (e as any).message || e);
       setIsConnected(false);
     };
-  }, [serverUrl, settings.mode, saveMessages, getDeviceId, sendInit]);
+  }, [getDeviceId, sendInit]);
 
   const disconnect = useCallback(() => {
     abortRef.current?.abort();

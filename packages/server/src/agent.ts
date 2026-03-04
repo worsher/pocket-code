@@ -105,6 +105,8 @@ export interface AgentSession {
   containerId?: string;
   /** Custom project instructions (appended to system prompt) */
   customPrompt?: string;
+  /** Timestamp of last activity, used for TTL cleanup */
+  lastActivity: number;
 }
 
 export async function createSession(
@@ -125,6 +127,7 @@ export async function createSession(
       workspace,
       messages: saved.messages,
       modelKey: saved.modelKey,
+      lastActivity: Date.now(),
     };
   }
 
@@ -135,6 +138,7 @@ export async function createSession(
     workspace,
     messages: [],
     modelKey: "deepseek-v3",
+    lastActivity: Date.now(),
   };
 }
 
