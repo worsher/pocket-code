@@ -1,33 +1,12 @@
 import { WebSocketServer, WebSocket } from "ws";
 import { createServer, type IncomingMessage, type ServerResponse } from "http";
-import { rm } from "fs/promises";
-import { createSession, runAgent, type AgentSession } from "./agent.js";
-import { createTools, getWorkspaceRoot } from "./tools.js";
-import { setupGitCredentials } from "./gitCredentials.js";
-import { verifyToken, registerAnonymous, type AuthPayload } from "./auth.js";
-import { isDockerEnabled, getContainer } from "./docker.js";
-import { initDb, listUserSessions, deleteSession } from "./db.js";
-import { checkQuota, incrementUsage, getUserQuota } from "./resourceLimits.js";
 import { handleOAuthRoute } from "./oauth.js";
 import { handleFileUpload, handleFileDownload } from "./fileTransfer.js";
 import { isPoolEnabled, initPool } from "./containerPool.js";
-import { WsMessage } from "./wsSchemas.js";
+import { initDb } from "./db.js";
+import { createMessageHandler } from "./messageHandler.js";
 
 const PORT = parseInt(process.env.PORT || "3100", 10);
-
-const sessions = new Map<string, AgentSession>();
-
-// TTL cleanup: remove sessions idle for more than 30 minutes
-const SESSION_TTL_MS = 30 * 60 * 1000;
-setInterval(() => {
-  const now = Date.now();
-  for (const [id, sess] of sessions) {
-    if (now - (sess.lastActivity || 0) > SESSION_TTL_MS) {
-      sessions.delete(id);
-      console.log(`[Session] Cleaned up stale session: ${id}`);
-    }
-  }
-}, 5 * 60 * 1000); // check every 5 min
 
 // Initialise DB before starting WebSocket server
 await initDb();
@@ -80,307 +59,11 @@ const httpServer = createServer(async (req: IncomingMessage, res: ServerResponse
   res.end(JSON.stringify({ error: "Not Found" }));
 });
 
+// ── WebSocket Server ──────────────────────────────────────
+
 const wss = new WebSocketServer({ server: httpServer });
 httpServer.listen(PORT, () => {
   console.log(`Pocket Code server listening on ws://localhost:${PORT} (HTTP+WS)`);
-});
-
-wss.on("connection", (ws: WebSocket) => {
-  let session: AgentSession | null = null;
-  let currentAbort: AbortController | null = null;
-  let auth: AuthPayload | null = null;
-  let activeSessionId: string | null = null;
-  console.log("[WS] Client connected");
-
-  ws.on("message", async (raw: Buffer) => {
-    try {
-      const raw_msg = JSON.parse(raw.toString());
-      // Validate message shape
-      const parsed = WsMessage.safeParse(raw_msg);
-      if (!parsed.success) {
-        const errMsg = parsed.error.issues.map(i => `${i.path.join('.')}: ${i.message}`).join('; ');
-        console.log("[WS] Validation failed for type:", raw_msg?.type, "errors:", errMsg);
-        send(ws, { type: "error", error: `Invalid message: ${errMsg}` });
-        return;
-      }
-      const msg = parsed.data;
-      console.log("[WS] Received:", msg.type);
-
-      switch (msg.type) {
-        // ── Anonymous registration ─────────────────────
-        case "register": {
-          console.log("[WS] Processing register, deviceId:", msg.deviceId);
-          const deviceId = msg.deviceId;
-          if (!deviceId) {
-            send(ws, { type: "error", error: "deviceId is required" });
-            return;
-          }
-          const result = registerAnonymous(deviceId);
-          if ("error" in result) {
-            send(ws, { type: "error", error: result.error });
-            return;
-          }
-          console.log("[WS] Register success, userId:", result.userId);
-          send(ws, {
-            type: "auth",
-            token: result.token,
-            userId: result.userId,
-          });
-          break;
-        }
-
-        // ── Session init (requires auth) ───────────────
-        case "init": {
-          console.log("[WS] Processing init, token present:", !!msg.token, "sessionId:", msg.sessionId);
-          // Verify token
-          if (msg.token) {
-            auth = verifyToken(msg.token);
-          }
-          if (!auth) {
-            console.log("[WS] Init failed: invalid or missing token");
-            send(ws, { type: "error", error: "Invalid or missing token. Send register first." });
-            return;
-          }
-          console.log("[WS] Auth verified, userId:", auth.userId);
-
-          const sessionId = msg.sessionId || crypto.randomUUID();
-          const projectId: string = msg.projectId || '';
-          if (sessions.has(sessionId)) {
-            session = sessions.get(sessionId)!;
-            // Verify session belongs to this user
-            if (session.userId !== auth.userId) {
-              send(ws, { type: "error", error: "Session does not belong to this user." });
-              session = null;
-              return;
-            }
-          } else {
-            session = await createSession(sessionId, auth.userId, projectId);
-            sessions.set(sessionId, session);
-          }
-          activeSessionId = sessionId;
-          session.lastActivity = Date.now();
-          // Docker isolation: get or create container
-          if (isDockerEnabled() && !session.containerId) {
-            try {
-              session.containerId = await getContainer(auth.userId, session.workspace);
-              console.log(`[WS] Docker container: ${session.containerId.slice(0, 12)}`);
-            } catch (err: any) {
-              console.error("[WS] Failed to create Docker container:", err.message);
-              // Continue without Docker — falls back to host execution
-            }
-          }
-          if (msg.model) {
-            session.modelKey = msg.model;
-          }
-          if (msg.customPrompt !== undefined) {
-            session.customPrompt = msg.customPrompt || undefined;
-          }
-          // Setup git credentials if provided
-          if (msg.gitCredentials && msg.gitCredentials.length > 0) {
-            try {
-              await setupGitCredentials(session.workspace, msg.gitCredentials as any);
-            } catch (err: any) {
-              console.error("[WS] Failed to setup git credentials:", err.message);
-            }
-          }
-          send(ws, {
-            type: "session",
-            sessionId: session.sessionId,
-            projectId: session.projectId,
-            workspace: session.workspace,
-          });
-          break;
-        }
-
-        case "message": {
-          if (!session) {
-            send(ws, { type: "error", error: "No session. Send init first." });
-            return;
-          }
-          session.lastActivity = Date.now();
-          // Check API call quota
-          if (auth) {
-            const quotaCheck = checkQuota(auth.userId, "api_call");
-            if (!quotaCheck.allowed) {
-              send(ws, { type: "error", error: quotaCheck.reason });
-              send(ws, { type: "done" });
-              return;
-            }
-            incrementUsage(auth.userId, "api_call");
-          }
-          if (msg.model) {
-            session.modelKey = msg.model;
-          }
-          if (msg.customPrompt !== undefined) {
-            session.customPrompt = msg.customPrompt || undefined;
-          }
-
-          // Conversation branching: rewind messages if requested
-          if (typeof msg.rewindTo === "number" && msg.rewindTo >= 0) {
-            session.messages = session.messages.slice(0, msg.rewindTo);
-          }
-
-          const abort = new AbortController();
-          currentAbort = abort;
-          await runAgent(session, msg.content, (event) => {
-            send(ws, event);
-          }, abort.signal, msg.images);
-          currentAbort = null;
-          break;
-        }
-
-        case "get-quota": {
-          if (!auth) {
-            send(ws, { type: "error", error: "Not authenticated." });
-            return;
-          }
-          const quota = getUserQuota(auth.userId);
-          send(ws, { type: "quota", ...quota });
-          break;
-        }
-
-        // ── Geek mode: execute a single tool on demand ──
-        case "tool-exec": {
-          if (!session) {
-            send(ws, { type: "error", error: "No session. Send init first." });
-            return;
-          }
-          const { toolName, args, callId } = msg;
-          const tools = createTools(session.workspace, session.containerId);
-          const toolFn = (tools as Record<string, any>)[toolName];
-          if (!toolFn) {
-            send(ws, {
-              type: "tool-result",
-              callId,
-              toolName,
-              result: { success: false, error: `Unknown tool: ${toolName}` },
-            });
-            break;
-          }
-          try {
-            const result = await toolFn.execute(args);
-            send(ws, { type: "tool-result", callId, toolName, result });
-          } catch (err: any) {
-            send(ws, {
-              type: "tool-result",
-              callId,
-              toolName,
-              result: { success: false, error: err.message },
-            });
-          }
-          break;
-        }
-
-        // ── File operations (both modes) ──
-        case "list-files": {
-          if (!session) {
-            send(ws, { type: "error", error: "No session. Send init first." });
-            return;
-          }
-          const listTools = createTools(session.workspace, session.containerId) as Record<string, any>;
-          try {
-            const result = await listTools.listFiles.execute({ path: msg.path || "." });
-            send(ws, { type: "file-list", path: msg.path || ".", _reqId: msg._reqId, ...result });
-          } catch (err: any) {
-            send(ws, { type: "file-list", path: msg.path || ".", _reqId: msg._reqId, success: false, error: err.message });
-          }
-          break;
-        }
-
-        case "read-file": {
-          if (!session) {
-            send(ws, { type: "error", error: "No session. Send init first." });
-            return;
-          }
-          const readTools = createTools(session.workspace, session.containerId) as Record<string, any>;
-          try {
-            const result = await readTools.readFile.execute({ path: msg.path });
-            send(ws, { type: "file-content", path: msg.path, _reqId: msg._reqId, ...result });
-          } catch (err: any) {
-            send(ws, { type: "file-content", path: msg.path, _reqId: msg._reqId, success: false, error: err.message });
-          }
-          break;
-        }
-
-        // ── Session management ──
-        case "list-sessions": {
-          if (!auth) {
-            send(ws, { type: "error", error: "Not authenticated." });
-            return;
-          }
-          const projectFilter: string | undefined = msg.projectId || undefined;
-          const userSessions = listUserSessions(auth.userId, msg.limit || 50, projectFilter);
-          send(ws, { type: "sessions-list", sessions: userSessions });
-          break;
-        }
-
-        case "delete-session": {
-          if (!auth) {
-            send(ws, { type: "error", error: "Not authenticated." });
-            return;
-          }
-          const deleted = deleteSession(msg.sessionId, auth.userId);
-          send(ws, { type: "session-deleted", sessionId: msg.sessionId, success: deleted });
-          break;
-        }
-
-        case "delete-project-workspace": {
-          if (!auth) {
-            send(ws, { type: "error", error: "Not authenticated." });
-            return;
-          }
-          const { projectId: delProjectId } = msg;
-          if (!delProjectId) {
-            send(ws, { type: "error", error: "projectId is required." });
-            return;
-          }
-          // Verify ownership: check that this user has at least one session in the project
-          const projectSessions = listUserSessions(auth.userId, 1, delProjectId);
-          if (projectSessions.length === 0) {
-            send(ws, { type: "project-workspace-deleted", projectId: delProjectId, success: false, error: "No sessions found for this project." });
-            return;
-          }
-          const workspacePath = getWorkspaceRoot('', delProjectId);
-          try {
-            await rm(workspacePath, { recursive: true, force: true });
-            send(ws, { type: "project-workspace-deleted", projectId: delProjectId, success: true });
-          } catch (err: any) {
-            send(ws, { type: "project-workspace-deleted", projectId: delProjectId, success: false, error: err.message });
-          }
-          break;
-        }
-
-        case "abort": {
-          if (currentAbort) {
-            currentAbort.abort();
-            currentAbort = null;
-          }
-          break;
-        }
-
-        default: {
-          send(ws, { type: "error", error: `Unknown message type: ${(msg as any).type}` });
-        }
-      }
-    } catch (err: any) {
-      console.error("[WS] Error:", err.message);
-      send(ws, { type: "error", error: `Server error: ${err.message}` });
-    }
-  });
-
-  ws.on("close", () => {
-    console.log("[WS] Client disconnected");
-    // Abort any running agent
-    if (currentAbort) {
-      currentAbort.abort();
-      currentAbort = null;
-    }
-    // Don't immediately delete the session — client may reconnect and reuse it.
-    // Sessions will be garbage-collected by the TTL cleanup below.
-    session = null;
-    auth = null;
-    activeSessionId = null;
-  });
 });
 
 function send(ws: WebSocket, data: unknown) {
@@ -388,3 +71,18 @@ function send(ws: WebSocket, data: unknown) {
     ws.send(JSON.stringify(data));
   }
 }
+
+wss.on("connection", (ws: WebSocket) => {
+  console.log("[WS] Client connected");
+
+  const handler = createMessageHandler((data) => send(ws, data));
+
+  ws.on("message", async (raw: Buffer) => {
+    await handler.onMessage(raw);
+  });
+
+  ws.on("close", () => {
+    console.log("[WS] Client disconnected");
+    handler.onClose();
+  });
+});

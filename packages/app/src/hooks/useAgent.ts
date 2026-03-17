@@ -17,6 +17,7 @@ import { updateSettings } from "../store/settings";
 import type { StreamingPhase } from "../components/StreamingIndicator";
 import { enqueueMessage, getQueue, dequeueMessage } from "../services/offlineQueue";
 import { sendLocalNotification } from "../services/notifications";
+import { RelayClient } from "../services/relayClient";
 
 // ── Public Types ───────────────────────────────────────
 
@@ -77,7 +78,7 @@ export function useAgent({ settings, model = "deepseek-v3", customPrompt, projec
   const [streamingPhase, setStreamingPhase] = useState<StreamingPhase>("idle");
   const [currentToolName, setCurrentToolName] = useState<string | undefined>();
 
-  const wsRef = useRef<WebSocket | null>(null);
+  const wsRef = useRef<WebSocket | RelayClient | null>(null);
   const currentAssistantRef = useRef<Message | null>(null);
   const modelRef = useRef(model);
   const abortRef = useRef<AbortController | null>(null);
@@ -125,7 +126,9 @@ export function useAgent({ settings, model = "deepseek-v3", customPrompt, projec
 
   // ── Determine the Server URL based on mode ────────────
   const serverUrl =
-    settings.mode === "geek" ? settings.toolServerUrl : settings.cloudServerUrl;
+    settings.mode === "geek" 
+      ? settings.toolServerUrl
+      : (settings.workspaceMode === "relay" ? (settings.relayServerUrl || "wss://relay.your-vps.com") : settings.cloudServerUrl);
 
   // Refs for connect — avoid stale closure and prevent unnecessary re-creation
   const serverUrlRef = useRef(serverUrl);
@@ -134,9 +137,10 @@ export function useAgent({ settings, model = "deepseek-v3", customPrompt, projec
   modeRef.current = settings.mode;
 
   // Whether auto-connect is needed:
-  // - Cloud mode: always (all operations go through server)
+  // - Cloud mode (direct server): always
+  // - Cloud mode (relay): always
   // - Geek + server (Termux): always (all tools go through WS)
-  // - Geek + local: no (only runCommand needs WS, lazy connect)
+  // - Geek + local: no (runCommand falls back lazily)
   const needsAutoConnect =
     settings.mode === "cloud" || settings.workspaceMode === "server";
 
@@ -149,15 +153,20 @@ export function useAgent({ settings, model = "deepseek-v3", customPrompt, projec
   /** Generate or retrieve a persistent deviceId */
   const getDeviceId = useCallback((): string => {
     if (deviceIdRef.current) return deviceIdRef.current;
+    
+    // We derive the name from the platform if possible, defaulting to 'React Native App'
+    const name = "Pocket Code App";
+    
     const id = `dev_${Date.now()}_${Math.random().toString(36).slice(2, 10)}`;
     // Persist deviceId (fire-and-forget)
     updateSettings({ deviceId: id });
     deviceIdRef.current = id;
+    
     return id;
   }, []);
 
   /** Send init message with token */
-  const sendInit = useCallback((ws: WebSocket, token: string) => {
+  const sendInit = useCallback((ws: WebSocket | RelayClient, token: string) => {
     ws.send(
       JSON.stringify({
         type: "init",
@@ -170,33 +179,94 @@ export function useAgent({ settings, model = "deepseek-v3", customPrompt, projec
     );
   }, []);
 
+  // Replay offline queue when connection is established
+  const replayOfflineQueue = useCallback(async () => {
+    const queue = await getQueue();
+    for (const msg of queue) {
+      if (wsRef.current?.readyState === WebSocket.OPEN) {
+        
+        // Inline sendCloudMessage logic to avoid use-before-def issues
+        const content = msg.content;
+        const reqId = `msg_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+        wsRef.current.send(
+          JSON.stringify({
+            type: "chat",
+            payload: { message: content },
+            requestId: reqId,
+          })
+        );
+        
+        await dequeueMessage(msg.id);
+        // Small delay between replayed messages
+        await new Promise((r) => setTimeout(r, 500));
+      }
+    }
+  }, []);
+
   // ── WebSocket connection (shared between modes) ───────
   const connect = useCallback(() => {
     if (wsRef.current?.readyState === WebSocket.OPEN) return;
 
-    console.log("[useAgent] Connecting to:", serverUrlRef.current, "mode:", modeRef.current);
-    const ws = new WebSocket(serverUrlRef.current);
+    console.log("[useAgent] Connecting to:", serverUrlRef.current, "mode:", modeRef.current, "workspaceMode:", workspaceModeRef.current);
+    
+    let ws: WebSocket | RelayClient;
+
+    if (workspaceModeRef.current === "relay") {
+      // Use the Relay Wrapper
+      ws = new RelayClient({
+        relayUrl: serverUrlRef.current,
+        machineId: settingsRef.current.relayMachineId || "",
+        deviceId: getDeviceId(),
+        deviceName: "Pocket Code App",
+        token: settingsRef.current.relayToken,
+      });
+      ws.connect();
+    } else {
+      // Use raw WebSocket for Cloud or Server(Termux) modes
+      ws = new WebSocket(serverUrlRef.current);
+    }
+    
     wsRef.current = ws;
 
     ws.onopen = () => {
-      console.log("[useAgent] WebSocket connected");
+      console.log("[useAgent] WebSocket/Relay connected");
       setIsConnected(true);
 
-      // If we already have a token, go straight to init
-      if (authTokenRef.current) {
-        sendInit(ws, authTokenRef.current);
+      // In Relay Mode, auth/handshake is handled differently via pair-request flow (see settings UI).
+      // Once paired, we just send init normally. It will be wrapped.
+      // But if we are in missing-auth state for Relay, do NOT send init yet. The Settings screen handles pairing.
+      if (workspaceModeRef.current === "relay") {
+          if (settingsRef.current.relayToken && settingsRef.current.relayMachineId) {
+             // Relay mode: auth is handled by Daemon (preAuth), so init without token
+             ws.send(
+               JSON.stringify({
+                 type: "init",
+                 sessionId: sessionIdRef.current,
+                 projectId: projectIdRef.current || undefined,
+                 model: modelRef.current,
+                 gitCredentials: gitCredentialsRef.current?.filter((c) => c.token) || [],
+               })
+             );
+             replayOfflineQueue();
+          } else {
+             // Let the settings UI handle pairing. We are connected to relay but not to daemon yet.
+             console.log("[useAgent] Connected to relay but not paired yet.");
+          }
       } else {
-        // Register anonymously first
-        const deviceId = getDeviceId();
-        ws.send(JSON.stringify({ type: "register", deviceId }));
+        // Normal Cloud / Termux mode auth
+        if (authTokenRef.current) {
+          sendInit(ws, authTokenRef.current);
+        } else {
+          // Register anonymously first
+          const deviceId = getDeviceId();
+          ws.send(JSON.stringify({ type: "register", deviceId }));
+        }
+        replayOfflineQueue();
       }
-
-      // Replay any queued offline messages
-      replayOfflineQueue();
     };
 
-    ws.onmessage = (event) => {
-      const data = JSON.parse(event.data);
+    ws.onmessage = (event: MessageEvent<any> | { data: string }) => {
+      const data = typeof event.data === "string" ? JSON.parse(event.data) : JSON.parse(event.data.toString());
 
       switch (data.type) {
         // ── Auth response (anonymous registration) ──
@@ -389,16 +459,16 @@ export function useAgent({ settings, model = "deepseek-v3", customPrompt, projec
       }
     };
 
-    ws.onclose = (e) => {
-      console.log("[useAgent] WebSocket closed, code:", e.code, "reason:", e.reason);
+    ws.onclose = (e: any) => {
+      console.log("[useAgent] WebSocket/Relay closed");
       setIsConnected(false);
     };
 
-    ws.onerror = (e) => {
-      console.error("[useAgent] WebSocket error:", (e as any).message || e);
+    ws.onerror = (e: any) => {
+      console.error("[useAgent] WebSocket error");
       setIsConnected(false);
     };
-  }, [getDeviceId, sendInit]);
+  }, [getDeviceId, sendInit, replayOfflineQueue]);
 
   const disconnect = useCallback(() => {
     abortRef.current?.abort();
@@ -536,18 +606,7 @@ export function useAgent({ settings, model = "deepseek-v3", customPrompt, projec
     [settings.mode]
   );
 
-  // Replay offline queue when connection is established
-  const replayOfflineQueue = useCallback(async () => {
-    const queue = await getQueue();
-    for (const msg of queue) {
-      if (wsRef.current?.readyState === WebSocket.OPEN) {
-        sendCloudMessage(msg.content);
-        await dequeueMessage(msg.id);
-        // Small delay between replayed messages
-        await new Promise((r) => setTimeout(r, 500));
-      }
-    }
-  }, []);
+
 
   // ── Cloud mode: forward to Server (existing logic) ───
   const sendCloudMessage = useCallback(

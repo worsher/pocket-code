@@ -3,6 +3,26 @@
   "version": "0.1.0",
   "private": true,
   "type": "module",
+  "exports": {
+    ".": {
+      "import": "./dist/index.js",
+      "require": "./dist/index.js",
+      "types": "./dist/index.d.ts",
+      "default": "./src/index.ts"
+    },
+    "./messageHandler": {
+      "import": "./dist/messageHandler.js",
+      "require": "./dist/messageHandler.js",
+      "types": "./dist/messageHandler.d.ts",
+      "default": "./src/messageHandler.ts"
+    },
+    "./db": {
+      "import": "./dist/db.js",
+      "require": "./dist/db.js",
+      "types": "./dist/db.d.ts",
+      "default": "./src/db.ts"
+    }
+  },
   "scripts": {
     "dev": "tsx watch src/index.ts",
     "build": "tsc",

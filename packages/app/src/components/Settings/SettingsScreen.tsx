@@ -13,6 +13,7 @@ import type { AppSettings } from "../../store/settings";
 import { GIT_PLATFORMS, type GitCredential } from "../../store/settings";
 import { clearAllHistory } from "../../store/chatHistory";
 import { startGitHubOAuth } from "../../services/oauth";
+import { RelayClient } from "../../services/relayClient";
 
 interface Props {
     settings: AppSettings;
@@ -22,6 +23,8 @@ interface Props {
 
 export default function SettingsScreen({ settings, onSave, onClose }: Props) {
     const [draft, setDraft] = useState<AppSettings>({ ...settings });
+    const [pairingCode, setPairingCode] = useState("");
+    const [isPairing, setIsPairing] = useState(false);
 
     const updateDraft = (partial: Partial<AppSettings>) => {
         setDraft((prev) => ({ ...prev, ...partial }));
@@ -106,6 +109,67 @@ export default function SettingsScreen({ settings, onSave, onClose }: Props) {
 
     const isGeek = draft.mode === "geek";
     const isServerWorkspace = draft.workspaceMode === "server";
+    const isRelayWorkspace = draft.workspaceMode === "relay";
+
+    const handlePairRelay = async () => {
+        if (!pairingCode || pairingCode.length !== 8) {
+            Alert.alert("错误", "请输入 8 位配对码");
+            return;
+        }
+
+        if (!draft.relayServerUrl) {
+            Alert.alert("错误", "请先输入 Relay 服务器地址");
+            return;
+        }
+
+        setIsPairing(true);
+        
+        try {
+            // Use a temporary client just for the pairing flow
+            const client = new RelayClient({
+                relayUrl: draft.relayServerUrl,
+                machineId: "", // Target unspecified initially
+                deviceId: draft.deviceId || "unknown",
+                deviceName: "Pocket Code App",
+            });
+
+            // Wait for connection
+            await new Promise<void>((resolve, reject) => {
+                const timeout = setTimeout(() => reject(new Error("连接中继服务器超时")), 5000);
+                client.onopen = () => {
+                    clearTimeout(timeout);
+                    resolve();
+                };
+                client.onerror = () => {
+                    clearTimeout(timeout);
+                    reject(new Error("连接中继服务器失败"));
+                };
+                client.connect();
+            });
+
+            // Send Pair Request
+            const response = await client.pairDevice(pairingCode);
+            
+            if (response.success && response.token && response.machineId) {
+                // Success! Save the token and machine ID to draft
+                updateDraft({
+                    relayToken: response.token,
+                    relayMachineId: response.machineId,
+                });
+                Alert.alert("配对成功", `已连接到机器: ${response.machineName || response.machineId}`);
+                setPairingCode("");
+            } else {
+                Alert.alert("配对失败", response.error || "未知错误");
+            }
+            
+            client.close();
+            
+        } catch (err: any) {
+            Alert.alert("配对失败", err.message);
+        } finally {
+            setIsPairing(false);
+        }
+    };
 
     return (
         <View style={styles.container}>
@@ -173,19 +237,118 @@ export default function SettingsScreen({ settings, onSave, onClose }: Props) {
                 {/* ── Cloud mode settings ─────────────────── */}
                 {!isGeek && (
                     <>
-                        <Text style={styles.sectionTitle}>云端 Server</Text>
+                        <Text style={styles.sectionTitle}>工作区 (云端连接方式)</Text>
                         <View style={styles.card}>
-                            <Text style={styles.inputLabel}>Server 地址</Text>
-                            <TextInput
-                                style={styles.input}
-                                value={draft.cloudServerUrl}
-                                onChangeText={(v) => updateDraft({ cloudServerUrl: v })}
-                                placeholder="ws://your-server:3100"
-                                placeholderTextColor="#636366"
-                                autoCapitalize="none"
-                                autoCorrect={false}
-                            />
+                            <TouchableOpacity
+                                style={[styles.modeOption, isServerWorkspace && styles.modeOptionActive]}
+                                onPress={() => updateDraft({ workspaceMode: "server" })}
+                            >
+                                <View style={styles.modeHeader}>
+                                    <Text style={styles.modeIcon}>🖥️</Text>
+                                    <Text style={[styles.modeLabel, isServerWorkspace && styles.modeLabelActive]}>
+                                        局域网直连 (Server)
+                                    </Text>
+                                    {isServerWorkspace && <Text style={styles.checkmark}>✓</Text>}
+                                </View>
+                                <Text style={styles.modeDesc}>
+                                    直接连接到部署在内网的 Pocket Code Server
+                                </Text>
+                            </TouchableOpacity>
+
+                            <View style={styles.separator} />
+
+                            <TouchableOpacity
+                                style={[styles.modeOption, isRelayWorkspace && styles.modeOptionActive]}
+                                onPress={() => updateDraft({ workspaceMode: "relay" })}
+                            >
+                                <View style={styles.modeHeader}>
+                                    <Text style={styles.modeIcon}>🌍</Text>
+                                    <Text style={[styles.modeLabel, isRelayWorkspace && styles.modeLabelActive]}>
+                                        公网中继 (Relay)
+                                    </Text>
+                                    {isRelayWorkspace && <Text style={styles.checkmark}>✓</Text>}
+                                </View>
+                                <Text style={styles.modeDesc}>
+                                    通过公共中继服务器安全连接到内网机器，无需公网 IP
+                                </Text>
+                            </TouchableOpacity>
                         </View>
+
+                        {/* 直连 Server 地址 */}
+                        {isServerWorkspace && (
+                            <>
+                                <Text style={styles.sectionTitle}>云端 Server</Text>
+                                <View style={styles.card}>
+                                    <Text style={styles.inputLabel}>Server 地址</Text>
+                                    <TextInput
+                                        style={styles.input}
+                                        value={draft.cloudServerUrl}
+                                        onChangeText={(v) => updateDraft({ cloudServerUrl: v })}
+                                        placeholder="ws://your-server:3100"
+                                        placeholderTextColor="#636366"
+                                        autoCapitalize="none"
+                                        autoCorrect={false}
+                                    />
+                                </View>
+                            </>
+                        )}
+
+                        {/* Relay mode settings */}
+                        {isRelayWorkspace && (
+                            <>
+                                <Text style={styles.sectionTitle}>Relay 中继设置</Text>
+                                <View style={styles.card}>
+                                    <Text style={styles.inputLabel}>中继服务器地址</Text>
+                                    <TextInput
+                                        style={styles.input}
+                                        value={draft.relayServerUrl}
+                                        onChangeText={(v) => updateDraft({ relayServerUrl: v })}
+                                        placeholder="wss://relay.your-vps.com"
+                                        placeholderTextColor="#636366"
+                                        autoCapitalize="none"
+                                        autoCorrect={false}
+                                    />
+
+                                    {draft.relayToken ? (
+                                        <View style={styles.pairedContainer}>
+                                            <Text style={styles.pairedText}>✅ 已配对机器</Text>
+                                            <Text style={styles.machineIdText}>{draft.relayMachineId}</Text>
+                                            <TouchableOpacity 
+                                                style={styles.unpairBtn}
+                                                onPress={() => updateDraft({ relayToken: undefined, relayMachineId: undefined })}
+                                            >
+                                                <Text style={styles.unpairBtnText}>解除配对</Text>
+                                            </TouchableOpacity>
+                                        </View>
+                                    ) : (
+                                        <View style={styles.pairingContainer}>
+                                            <Text style={styles.inputLabel}>设备配对码</Text>
+                                            <View style={styles.pairingRow}>
+                                                <TextInput
+                                                    style={[styles.input, styles.pairingInput]}
+                                                    value={pairingCode}
+                                                    onChangeText={setPairingCode}
+                                                    placeholder="8位配对码"
+                                                    placeholderTextColor="#636366"
+                                                    autoCapitalize="characters"
+                                                    maxLength={8}
+                                                />
+                                                <TouchableOpacity 
+                                                    style={[styles.pairBtn, isPairing && styles.pairBtnDisabled]}
+                                                    onPress={handlePairRelay}
+                                                    disabled={isPairing}
+                                                >
+                                                    <Text style={styles.pairBtnText}>{isPairing ? "配对中" : "配对"}</Text>
+                                                </TouchableOpacity>
+                                            </View>
+                                            <Text style={styles.inputHint}>
+                                                在要控制的机器上运行 Daemon 可获取一次性配对码
+                                            </Text>
+                                        </View>
+                                    )}
+                                </View>
+                            </>
+                        )}
                     </>
                 )}
 
@@ -193,18 +356,19 @@ export default function SettingsScreen({ settings, onSave, onClose }: Props) {
                 {isGeek && (
                     <>
                         {/* Workspace mode */}
-                        <Text style={styles.sectionTitle}>工作区</Text>
+                        {/* 工作区 (本地模式配置) */}
+                        <Text style={styles.sectionTitle}>工作区 (本地模式配置)</Text>
                         <View style={styles.card}>
                             <TouchableOpacity
-                                style={[styles.modeOption, !isServerWorkspace && styles.modeOptionActive]}
+                                style={[styles.modeOption, draft.workspaceMode === "local" && styles.modeOptionActive]}
                                 onPress={() => updateDraft({ workspaceMode: "local" })}
                             >
                                 <View style={styles.modeHeader}>
                                     <Text style={styles.modeIcon}>📱</Text>
-                                    <Text style={[styles.modeLabel, !isServerWorkspace && styles.modeLabelActive]}>
+                                    <Text style={[styles.modeLabel, draft.workspaceMode === "local" && styles.modeLabelActive]}>
                                         本地文件
                                     </Text>
-                                    {!isServerWorkspace && <Text style={styles.checkmark}>✓</Text>}
+                                    {draft.workspaceMode === "local" && <Text style={styles.checkmark}>✓</Text>}
                                 </View>
                                 <Text style={styles.modeDesc}>
                                     文件存储在 App 沙盒中
@@ -214,41 +378,45 @@ export default function SettingsScreen({ settings, onSave, onClose }: Props) {
                             <View style={styles.separator} />
 
                             <TouchableOpacity
-                                style={[styles.modeOption, isServerWorkspace && styles.modeOptionActive]}
+                                style={[styles.modeOption, draft.workspaceMode === "server" && styles.modeOptionActive]}
                                 onPress={() => updateDraft({ workspaceMode: "server" })}
                             >
                                 <View style={styles.modeHeader}>
-                                    <Text style={styles.modeIcon}>🖥️</Text>
-                                    <Text style={[styles.modeLabel, isServerWorkspace && styles.modeLabelActive]}>
-                                        Termux / Server
+                                    <Text style={styles.modeIcon}>🚀</Text>
+                                    <Text style={[styles.modeLabel, draft.workspaceMode === "server" && styles.modeLabelActive]}>
+                                        依赖 Termux Server
                                     </Text>
-                                    {isServerWorkspace && <Text style={styles.checkmark}>✓</Text>}
+                                    {draft.workspaceMode === "server" && <Text style={styles.checkmark}>✓</Text>}
                                 </View>
                                 <Text style={styles.modeDesc}>
-                                    文件和命令全走工具 Server（需要运行 Termux）
+                                    所有工具执行依赖本地运行的 Pocket Code Server
                                 </Text>
                             </TouchableOpacity>
                         </View>
 
-                        {/* Tool server URL */}
-                        <Text style={styles.sectionTitle}>工具 Server</Text>
-                        <View style={styles.card}>
-                            <Text style={styles.inputLabel}>Server 地址</Text>
-                            <TextInput
-                                style={styles.input}
-                                value={draft.toolServerUrl}
-                                onChangeText={(v) => updateDraft({ toolServerUrl: v })}
-                                placeholder="ws://localhost:3100"
-                                placeholderTextColor="#636366"
-                                autoCapitalize="none"
-                                autoCorrect={false}
-                            />
-                            <Text style={styles.inputHint}>
-                                {isServerWorkspace
-                                    ? "Termux 模式下所有文件和命令操作都走此 Server"
-                                    : "仅 runCommand 走此 Server，文件操作走本地"}
-                            </Text>
-                        </View>
+
+
+                        {/* Local/Server Tool Server URL */}
+                        {draft.workspaceMode === "server" && (
+                            <>
+                                <Text style={styles.sectionTitle}>工具 Server</Text>
+                                <View style={styles.card}>
+                                    <Text style={styles.inputLabel}>Server 地址</Text>
+                                    <TextInput
+                                        style={styles.input}
+                                        value={draft.toolServerUrl}
+                                        onChangeText={(v) => updateDraft({ toolServerUrl: v })}
+                                        placeholder="ws://localhost:3100"
+                                        placeholderTextColor="#636366"
+                                        autoCapitalize="none"
+                                        autoCorrect={false}
+                                    />
+                                    <Text style={styles.inputHint}>
+                                        极客模式下与 Termux Server 通信的地址
+                                    </Text>
+                                </View>
+                            </>
+                        )}
 
                         <Text style={styles.sectionTitle}>API Keys</Text>
                         <View style={styles.card}>
@@ -498,6 +666,69 @@ const styles = StyleSheet.create({
         fontSize: 12,
         marginTop: -8,
         marginBottom: 4,
+    },
+    // ── Relay Pairing ──
+    pairingContainer: {
+        marginTop: 8,
+        borderTopWidth: 0.5,
+        borderTopColor: "#38383A",
+        paddingTop: 16,
+    },
+    pairingRow: {
+        flexDirection: "row",
+        alignItems: "center",
+        marginBottom: 12,
+    },
+    pairingInput: {
+        flex: 1,
+        marginBottom: 0,
+        marginRight: 12,
+        letterSpacing: 2,
+        fontWeight: "600",
+    },
+    pairBtn: {
+        backgroundColor: "#007AFF",
+        paddingHorizontal: 20,
+        paddingVertical: 12,
+        borderRadius: 8,
+        justifyContent: "center",
+    },
+    pairBtnDisabled: {
+        backgroundColor: "#3A3A3C",
+    },
+    pairBtnText: {
+        color: "#FFFFFF",
+        fontWeight: "600",
+        fontSize: 14,
+    },
+    pairedContainer: {
+        marginTop: 8,
+        borderTopWidth: 0.5,
+        borderTopColor: "#38383A",
+        paddingTop: 16,
+        alignItems: "center",
+    },
+    pairedText: {
+        color: "#30D158",
+        fontSize: 15,
+        fontWeight: "600",
+        marginBottom: 4,
+    },
+    machineIdText: {
+        color: "#8E8E93",
+        fontSize: 13,
+        marginBottom: 16,
+    },
+    unpairBtn: {
+        backgroundColor: "#2C2C2E",
+        paddingHorizontal: 16,
+        paddingVertical: 8,
+        borderRadius: 8,
+    },
+    unpairBtnText: {
+        color: "#FF453A",
+        fontSize: 13,
+        fontWeight: "500",
     },
     // ── GitHub ──
     githubRow: {

@@ -3,7 +3,7 @@ import AsyncStorage from "@react-native-async-storage/async-storage";
 // ── Types ──────────────────────────────────────────────
 
 export type AppMode = "cloud" | "geek";
-export type WorkspaceMode = "local" | "server";
+export type WorkspaceMode = "local" | "server" | "relay";
 
 export interface ApiKeys {
     siliconflow?: string;
@@ -39,6 +39,15 @@ export interface AppSettings {
     /** 极客模式：本地工具 Server 地址 */
     toolServerUrl: string;
 
+    /** 极客模式：Relay 中继服务器地址 */
+    relayServerUrl: string;
+
+    /** 极客模式：配对授权后的 Relay Token */
+    relayToken?: string;
+
+    /** 极客模式：当前配对的机器 ID */
+    relayMachineId?: string;
+
     /** 极客模式：各 AI 厂商 API Key */
     apiKeys: ApiKeys;
 
@@ -73,6 +82,7 @@ export const DEFAULT_SETTINGS: AppSettings = {
     workspaceMode: "local",
     cloudServerUrl: "ws://192.168.1.200:3100",
     toolServerUrl: "ws://localhost:3100",
+    relayServerUrl: "wss://relay.your-vps.com", // Example URL, configurable in UI
     apiKeys: {},
     defaultModel: "deepseek-v3",
     gitCredentials: [],

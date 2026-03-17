@@ -5,7 +5,11 @@
   "description": "Mobile AI coding agent - Claude Code for your phone",
   "scripts": {
     "dev:server": "pnpm --filter @pocket-code/server dev",
+    "dev:relay": "pnpm --filter @pocket-code/relay dev",
+    "dev:daemon": "pnpm --filter @pocket-code/daemon dev",
     "build:server": "pnpm --filter @pocket-code/server build",
+    "build:relay": "pnpm --filter @pocket-code/relay build",
+    "build:daemon": "pnpm --filter @pocket-code/daemon build",
     "dev:app": "pnpm --filter @pocket-code/app start",
     "test": "pnpm --filter @pocket-code/server test",
     "lint": "eslint packages/server/src packages/app/src",

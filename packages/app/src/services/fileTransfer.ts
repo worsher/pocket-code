@@ -2,6 +2,7 @@
 // Handles file upload and download via HTTP to the pocket-code server.
 
 import * as FileSystem from "expo-file-system";
+import { FileSystemUploadType } from "expo-file-system";
 import * as DocumentPicker from "expo-document-picker";
 
 export interface UploadResult {
@@ -75,7 +76,7 @@ export async function uploadFile(
       fileUri,
       {
         httpMethod: "POST",
-        uploadType: FileSystem.FileSystemUploadType.BINARY_CONTENT,
+        uploadType: FileSystemUploadType.BINARY_CONTENT,
         headers: {
           Authorization: `Bearer ${authToken}`,
           "Content-Disposition": `attachment; filename="${fileName}"`,
