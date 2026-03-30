@@ -13,6 +13,8 @@ export interface Project {
   gitUrl?: string;
   lastSessionId?: string;
   customPrompt?: string;
+  lastSyncTime?: number;
+  cloudProjectId?: string;
   createdAt: number;
   updatedAt: number;
 }

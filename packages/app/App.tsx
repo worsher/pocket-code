@@ -24,10 +24,11 @@ import ChatInput from "./src/components/ChatInput";
 import SettingsScreen from "./src/components/Settings/SettingsScreen";
 import SessionDrawer from "./src/components/SessionDrawer";
 import FileExplorer from "./src/components/FileExplorer";
-import { listLocalFiles, readLocalFile } from "./src/services/localFileSystem";
+import { listLocalFiles, readLocalFile, writeLocalFile, getProjectWorkspaceRoot } from "./src/services/localFileSystem";
 import QuickActions from "./src/components/QuickActions";
 import SearchDialog from "./src/components/SearchDialog";
 import TerminalScreen from "./src/components/TerminalScreen";
+import FilesTab from "./src/components/FilesTab";
 import {
   type AppSettings,
   DEFAULT_SETTINGS,
@@ -170,6 +171,9 @@ function MainScreen() {
 
   const selectedModel = AVAILABLE_MODELS.find((m) => m.key === currentModel);
   const isGeek = settings.mode === "geek";
+
+  // Project-specific local workspace root
+  const localWorkspaceRoot = getProjectWorkspaceRoot(currentProject?.id);
 
   // Don't render until settings loaded
   if (!settingsLoaded) {
@@ -320,9 +324,20 @@ function MainScreen() {
 
         {/* ── Files Tab ── */}
         <View style={[styles.flex1, activeTab !== "files" && styles.hidden]}>
-          <View style={styles.emptyState}>
-            <Text style={styles.emptySubtitle}>Files coming soon</Text>
-          </View>
+          <FilesTab
+            requestFileList={isGeek && settings.workspaceMode === "local"
+              ? (path: string) => listLocalFiles(path, localWorkspaceRoot)
+              : requestFileList}
+            requestFileContent={isGeek && settings.workspaceMode === "local"
+              ? (path: string) => readLocalFile(path, localWorkspaceRoot)
+              : requestFileContent}
+            writeFile={isGeek && settings.workspaceMode === "local"
+              ? (path: string, content: string) => writeLocalFile(path, content, localWorkspaceRoot)
+              : undefined}
+            workspaceMode={settings.workspaceMode}
+            settings={settings}
+            projectId={currentProject?.id}
+          />
         </View>
       </View>
 
@@ -357,8 +372,12 @@ function MainScreen() {
       <FileExplorer
         visible={showFileExplorer}
         onClose={() => setShowFileExplorer(false)}
-        requestFileList={isGeek && settings.workspaceMode === "local" ? listLocalFiles : requestFileList}
-        requestFileContent={isGeek && settings.workspaceMode === "local" ? readLocalFile : requestFileContent}
+        requestFileList={isGeek && settings.workspaceMode === "local"
+          ? (path: string) => listLocalFiles(path, localWorkspaceRoot)
+          : requestFileList}
+        requestFileContent={isGeek && settings.workspaceMode === "local"
+          ? (path: string) => readLocalFile(path, localWorkspaceRoot)
+          : requestFileContent}
       />
 
       {/* Model Picker Modal */}

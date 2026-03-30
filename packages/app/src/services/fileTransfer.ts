@@ -4,6 +4,7 @@
 import * as FileSystem from "expo-file-system";
 import { FileSystemUploadType } from "expo-file-system";
 import * as DocumentPicker from "expo-document-picker";
+import { writeLocalFile } from "./localFileSystem";
 
 export interface UploadResult {
   success: boolean;
@@ -134,5 +135,82 @@ export async function downloadFile(
     return null;
   } catch {
     return null;
+  }
+}
+
+// ── Workspace Sync ──────────────────────────────────────
+
+interface SyncFile {
+  path: string;
+  content: string;
+  size: number;
+  encoding: "utf8" | "base64";
+}
+
+interface SyncResult {
+  success: boolean;
+  error?: string;
+  fileCount?: number;
+  totalSize?: number;
+}
+
+/**
+ * Download all files from the server workspace and write to local storage.
+ * Uses the /api/workspace/sync endpoint which returns JSON file list.
+ * @param workspaceRoot - local workspace root for this project (project-isolated)
+ */
+export async function syncWorkspaceFromServer(
+  serverBaseUrl: string,
+  authToken: string,
+  projectId: string,
+  workspaceRoot?: string
+): Promise<SyncResult> {
+  const httpBase = serverBaseUrl
+    .replace(/^ws:\/\//, "http://")
+    .replace(/^wss:\/\//, "https://");
+
+  const url = `${httpBase}/api/workspace/sync?projectId=${encodeURIComponent(projectId)}`;
+
+  try {
+    const response = await fetch(url, {
+      method: "GET",
+      headers: {
+        Authorization: `Bearer ${authToken}`,
+      },
+    });
+
+    if (!response.ok) {
+      const errorBody = await response.json().catch(() => ({}));
+      return {
+        success: false,
+        error: (errorBody as any).error || `HTTP ${response.status}`,
+      };
+    }
+
+    const data = await response.json();
+    const files: SyncFile[] = data.files || [];
+
+    // Write each file to local workspace
+    let written = 0;
+    for (const file of files) {
+      try {
+        const content =
+          file.encoding === "base64"
+            ? atob(file.content)
+            : file.content;
+        const result = await writeLocalFile(file.path, content, workspaceRoot);
+        if (result.success) written++;
+      } catch {
+        // Skip files that fail to write
+      }
+    }
+
+    return {
+      success: true,
+      fileCount: written,
+      totalSize: data.totalSize,
+    };
+  } catch (err: any) {
+    return { success: false, error: err.message };
   }
 }

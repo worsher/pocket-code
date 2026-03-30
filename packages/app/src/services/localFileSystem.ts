@@ -28,6 +28,13 @@ function getWorkspaceDir(workspaceRoot?: string): Directory {
   return new Directory(Paths.document, "workspace");
 }
 
+/** Get the project-specific workspace root URI. */
+export function getProjectWorkspaceRoot(projectId?: string): string | undefined {
+  if (!projectId || projectId === "default") return undefined;
+  const dir = new Directory(Paths.document, "workspace", projectId);
+  return dir.uri;
+}
+
 /** Ensure workspace directory exists */
 function ensureWorkspace(dir: Directory): void {
   if (!dir.exists) {

@@ -1,13 +1,15 @@
 // ── File Upload / Download ──────────────────────────────
 
 import type { IncomingMessage, ServerResponse } from "http";
-import { createReadStream, existsSync, statSync } from "fs";
-import { join, resolve, basename, extname } from "path";
-import { mkdir, writeFile } from "fs/promises";
+import { createReadStream, existsSync, statSync, readdirSync } from "fs";
+import { join, resolve, basename, extname, relative } from "path";
+import { mkdir, writeFile, readFile, stat as fsStat } from "fs/promises";
 import { verifyToken } from "./auth.js";
 import { getSession } from "./db.js";
+import { getWorkspaceRoot } from "./tools.js";
 
 const MAX_UPLOAD_SIZE = parseInt(process.env.MAX_UPLOAD_SIZE || "52428800", 10); // 50MB
+const MAX_SYNC_SIZE = 50 * 1024 * 1024; // 50MB total for workspace sync
 
 // ── Helpers ──────────────────────────────────────────────
 
@@ -20,6 +22,11 @@ function getAuthToken(req: IncomingMessage): string | null {
 function sendJson(res: ServerResponse, status: number, data: unknown) {
   res.writeHead(status, { "Content-Type": "application/json" });
   res.end(JSON.stringify(data));
+}
+
+/** Resolve workspace path from session, using project-aware getWorkspaceRoot */
+function resolveWorkspace(sessionId: string, projectId?: string): string {
+  return getWorkspaceRoot(sessionId, projectId || undefined);
 }
 
 // ── Upload ───────────────────────────────────────────────
@@ -99,10 +106,8 @@ export async function handleFileUpload(
     if (match) fileName = match[1];
   }
 
-  // Resolve target path within workspace (prevent path traversal)
-  // Use a fixed workspace root based on session userId
-  const WORKSPACE_ROOT = process.env.WORKSPACE_ROOT || join(process.cwd(), "workspaces");
-  const workspace = join(WORKSPACE_ROOT, auth.userId, sessionId);
+  // Resolve workspace using project-aware path (consistent with tools.ts)
+  const workspace = resolveWorkspace(sessionId, session.projectId);
   const fullTarget = resolve(workspace, targetPath, fileName);
 
   if (!fullTarget.startsWith(resolve(workspace))) {
@@ -166,8 +171,8 @@ export async function handleFileDownload(
     return;
   }
 
-  const WORKSPACE_ROOT = process.env.WORKSPACE_ROOT || join(process.cwd(), "workspaces");
-  const workspace = join(WORKSPACE_ROOT, auth.userId, sessionId);
+  // Resolve workspace using project-aware path (consistent with tools.ts)
+  const workspace = resolveWorkspace(sessionId, session.projectId);
   const fullPath = resolve(workspace, filePath);
 
   // Prevent path traversal
@@ -181,8 +186,8 @@ export async function handleFileDownload(
     return;
   }
 
-  const stat = statSync(fullPath);
-  if (!stat.isFile()) {
+  const fileStat = statSync(fullPath);
+  if (!fileStat.isFile()) {
     sendJson(res, 400, { error: "Not a file" });
     return;
   }
@@ -206,10 +211,134 @@ export async function handleFileDownload(
 
   res.writeHead(200, {
     "Content-Type": mimeTypes[ext] || "application/octet-stream",
-    "Content-Length": stat.size,
+    "Content-Length": fileStat.size,
     "Content-Disposition": `attachment; filename="${basename(fullPath)}"`,
   });
 
   const stream = createReadStream(fullPath);
   stream.pipe(res);
+}
+
+// ── Workspace Sync ──────────────────────────────────────
+
+/** Binary file extensions that should be base64 encoded */
+const BINARY_EXTS = new Set([
+  ".png", ".jpg", ".jpeg", ".gif", ".bmp", ".ico", ".webp",
+  ".pdf", ".zip", ".gz", ".tar", ".7z", ".rar",
+  ".woff", ".woff2", ".ttf", ".eot", ".otf",
+  ".mp3", ".mp4", ".wav", ".ogg", ".webm",
+  ".exe", ".dll", ".so", ".dylib",
+  ".sqlite", ".db",
+]);
+
+/** Directories to skip during sync */
+const SKIP_DIRS = new Set([
+  "node_modules", ".git", ".next", "dist", "build", ".cache",
+  "__pycache__", ".venv", "venv",
+]);
+
+interface SyncFile {
+  path: string;
+  content: string;
+  size: number;
+  encoding: "utf8" | "base64";
+}
+
+/** Recursively collect files from a directory */
+function collectFiles(
+  dir: string,
+  baseDir: string,
+  files: SyncFile[],
+  sizeAccumulator: { total: number }
+): void {
+  if (!existsSync(dir)) return;
+
+  const entries = readdirSync(dir, { withFileTypes: true });
+  for (const entry of entries) {
+    if (SKIP_DIRS.has(entry.name)) continue;
+    if (entry.name.startsWith(".") && entry.name !== ".env.example") continue;
+
+    const fullPath = join(dir, entry.name);
+    const relPath = relative(baseDir, fullPath);
+
+    if (entry.isDirectory()) {
+      collectFiles(fullPath, baseDir, files, sizeAccumulator);
+    } else if (entry.isFile()) {
+      const fileStat = statSync(fullPath);
+
+      // Skip large individual files (>2MB)
+      if (fileStat.size > 2 * 1024 * 1024) continue;
+
+      // Check total size limit
+      if (sizeAccumulator.total + fileStat.size > MAX_SYNC_SIZE) continue;
+
+      const ext = extname(entry.name).toLowerCase();
+      const isBinary = BINARY_EXTS.has(ext);
+
+      try {
+        const raw = require("fs").readFileSync(fullPath);
+        const content = isBinary
+          ? raw.toString("base64")
+          : raw.toString("utf8");
+
+        sizeAccumulator.total += fileStat.size;
+        files.push({
+          path: relPath,
+          content,
+          size: fileStat.size,
+          encoding: isBinary ? "base64" : "utf8",
+        });
+      } catch {
+        // Skip unreadable files
+      }
+    }
+  }
+}
+
+/**
+ * Handle workspace sync — returns all files in a project workspace as JSON.
+ * GET /api/workspace/sync?projectId=xxx
+ * Headers: Authorization: Bearer <token>
+ */
+export async function handleWorkspaceSync(
+  req: IncomingMessage,
+  res: ServerResponse,
+  url: URL
+): Promise<void> {
+  // Auth check
+  const token = getAuthToken(req);
+  if (!token) {
+    sendJson(res, 401, { error: "Missing authorization" });
+    return;
+  }
+  const auth = verifyToken(token);
+  if (!auth) {
+    sendJson(res, 401, { error: "Invalid token" });
+    return;
+  }
+
+  const projectId = url.searchParams.get("projectId");
+  if (!projectId) {
+    sendJson(res, 400, { error: "projectId is required" });
+    return;
+  }
+
+  // Use project-level workspace (sessionId empty since we want project root)
+  const workspace = getWorkspaceRoot("", projectId);
+
+  if (!existsSync(workspace)) {
+    sendJson(res, 404, { error: "Workspace not found" });
+    return;
+  }
+
+  const files: SyncFile[] = [];
+  const sizeAccumulator = { total: 0 };
+
+  collectFiles(workspace, workspace, files, sizeAccumulator);
+
+  sendJson(res, 200, {
+    files,
+    totalSize: sizeAccumulator.total,
+    fileCount: files.length,
+  });
 }

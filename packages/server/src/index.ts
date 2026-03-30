@@ -1,7 +1,7 @@
 import { WebSocketServer, WebSocket } from "ws";
 import { createServer, type IncomingMessage, type ServerResponse } from "http";
 import { handleOAuthRoute } from "./oauth.js";
-import { handleFileUpload, handleFileDownload } from "./fileTransfer.js";
+import { handleFileUpload, handleFileDownload, handleWorkspaceSync } from "./fileTransfer.js";
 import { isPoolEnabled, initPool } from "./containerPool.js";
 import { initDb } from "./db.js";
 import { createMessageHandler } from "./messageHandler.js";
@@ -52,6 +52,10 @@ const httpServer = createServer(async (req: IncomingMessage, res: ServerResponse
   }
   if (url.pathname === "/api/files/download" && req.method === "GET") {
     await handleFileDownload(req, res, url);
+    return;
+  }
+  if (url.pathname === "/api/workspace/sync" && req.method === "GET") {
+    await handleWorkspaceSync(req, res, url);
     return;
   }
 

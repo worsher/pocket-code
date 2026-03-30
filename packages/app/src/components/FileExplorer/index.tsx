@@ -11,18 +11,10 @@ import {
   ActivityIndicator,
 } from "react-native";
 import FileViewer from "../FileViewer";
+import { useFileTree, type FileItem } from "../../hooks/useFileTree";
 
 const SCREEN_WIDTH = Dimensions.get("window").width;
 const PANEL_WIDTH = SCREEN_WIDTH * 0.85;
-
-interface FileItem {
-  name: string;
-  type: "file" | "directory";
-  path: string;
-  children?: FileItem[];
-  loaded?: boolean;
-  expanded?: boolean;
-}
 
 interface Props {
   visible: boolean;
@@ -37,9 +29,14 @@ export default function FileExplorer({
   requestFileList,
   requestFileContent,
 }: Props) {
-  const [files, setFiles] = useState<FileItem[]>([]);
-  const [loading, setLoading] = useState(false);
-  const [loadError, setLoadError] = useState<string | null>(null);
+  const {
+    flatFiles,
+    loading,
+    loadError,
+    loadRootFiles,
+    toggleDirectory,
+  } = useFileTree({ requestFileList });
+
   const [viewerVisible, setViewerVisible] = useState(false);
   const [viewerPath, setViewerPath] = useState("");
   const [viewerContent, setViewerContent] = useState<string | null>(null);
@@ -63,76 +60,6 @@ export default function FileExplorer({
     }
   }, [visible]);
 
-  const loadRootFiles = async () => {
-    setLoading(true);
-    setLoadError(null);
-    try {
-      const result = await requestFileList(".");
-      if (result.success && result.items) {
-        const items: FileItem[] = result.items
-          .sort((a: any, b: any) => {
-            // Directories first, then by name
-            if (a.type !== b.type) return a.type === "directory" ? -1 : 1;
-            return a.name.localeCompare(b.name);
-          })
-          .map((item: any) => ({
-            name: item.name,
-            type: item.type,
-            path: item.name,
-            loaded: false,
-            expanded: false,
-          }));
-        setFiles(items);
-      }
-    } catch (err: any) {
-      setLoadError(err.message || "无法加载文件列表");
-    } finally {
-      setLoading(false);
-    }
-  };
-
-  const toggleDirectory = async (item: FileItem) => {
-    if (item.expanded) {
-      // Collapse
-      setFiles((prev) => updateFileTree(prev, item.path, { expanded: false }));
-      return;
-    }
-
-    if (!item.loaded) {
-      // Load children
-      try {
-        const result = await requestFileList(item.path);
-        if (result.success && result.items) {
-          const children: FileItem[] = result.items
-            .sort((a: any, b: any) => {
-              if (a.type !== b.type) return a.type === "directory" ? -1 : 1;
-              return a.name.localeCompare(b.name);
-            })
-            .map((child: any) => ({
-              name: child.name,
-              type: child.type,
-              path: `${item.path}/${child.name}`,
-              loaded: false,
-              expanded: false,
-            }));
-          setFiles((prev) =>
-            updateFileTree(prev, item.path, {
-              expanded: true,
-              loaded: true,
-              children,
-            })
-          );
-          return;
-        }
-      } catch (err: any) {
-        console.error("Failed to load directory:", err.message);
-      }
-    }
-
-    // Already loaded, just expand
-    setFiles((prev) => updateFileTree(prev, item.path, { expanded: true }));
-  };
-
   const openFile = async (item: FileItem) => {
     setViewerPath(item.path);
     setViewerContent(null);
@@ -144,26 +71,12 @@ export default function FileExplorer({
       if (result.success) {
         setViewerContent(result.content);
       } else {
-        setViewerError(result.error || "无法读取文件");
+        setViewerError(result.error || "Unable to read file");
       }
     } catch (err: any) {
       setViewerError(err.message);
     }
   };
-
-  // Flatten the tree for FlatList
-  const flattenTree = (items: FileItem[], depth: number = 0): { item: FileItem; depth: number }[] => {
-    const result: { item: FileItem; depth: number }[] = [];
-    for (const item of items) {
-      result.push({ item, depth });
-      if (item.type === "directory" && item.expanded && item.children) {
-        result.push(...flattenTree(item.children, depth + 1));
-      }
-    }
-    return result;
-  };
-
-  const flatFiles = flattenTree(files);
 
   const renderItem = ({ item: { item, depth } }: { item: { item: FileItem; depth: number } }) => {
     const isDir = item.type === "directory";
@@ -255,26 +168,6 @@ export default function FileExplorer({
       />
     </Modal>
   );
-}
-
-/** Recursively update a node in the file tree by path */
-function updateFileTree(
-  items: FileItem[],
-  targetPath: string,
-  updates: Partial<FileItem>
-): FileItem[] {
-  return items.map((item) => {
-    if (item.path === targetPath) {
-      return { ...item, ...updates };
-    }
-    if (item.children && targetPath.startsWith(item.path + "/")) {
-      return {
-        ...item,
-        children: updateFileTree(item.children, targetPath, updates),
-      };
-    }
-    return item;
-  });
 }
 
 const styles = StyleSheet.create({

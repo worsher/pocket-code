@@ -1,6 +1,6 @@
 import { tool } from "ai";
 import { z } from "zod";
-import { readFile, writeFile, readdir, stat, mkdir } from "fs/promises";
+import { readFile, writeFile, readdir, stat, mkdir, access } from "fs/promises";
 import { exec } from "child_process";
 import { promisify } from "util";
 import { join, resolve } from "path";
@@ -93,6 +93,63 @@ export function createTools(workspace: string, containerId?: string) {
       return { HOME: "/workspace", ...common };
     }
     return { ...process.env as Record<string, string>, HOME: workspace, ...common };
+  }
+
+  /**
+   * Resolve the git working directory.
+   * When no explicit `path` is given, check if workspace root is a git repo;
+   * if not, look for a single subdirectory that contains `.git`.
+   * This handles the common case where `gitClone` created a repo in a subdirectory.
+   */
+  async function resolveGitCwd(path?: string): Promise<string | undefined> {
+    if (path) return path;
+
+    // Docker mode: check inside container
+    if (containerId && isDockerEnabled()) {
+      try {
+        await shellExec("test -d /workspace/.git", { workspace, containerId, timeout: 5000 });
+        return undefined; // workspace root is a git repo
+      } catch {
+        // Not a git repo at root — look for single git subdirectory
+        try {
+          const { stdout } = await shellExec(
+            "ls -d /workspace/*/.git 2>/dev/null | head -2",
+            { workspace, containerId, timeout: 5000 }
+          );
+          const matches = stdout.trim().split("\n").filter(Boolean);
+          if (matches.length === 1) {
+            // Extract subdirectory name: /workspace/repo-name/.git → repo-name
+            const match = matches[0].replace(/\/\.git$/, "").replace(/^\/workspace\//, "");
+            return match;
+          }
+        } catch { /* no git dirs found */ }
+      }
+      return undefined;
+    }
+
+    // Host mode: check filesystem directly
+    try {
+      await access(join(workspace, ".git"));
+      return undefined; // workspace root is a git repo
+    } catch {
+      // Not a git repo at root — look for single git subdirectory
+      try {
+        const entries = await readdir(workspace, { withFileTypes: true });
+        const gitDirs: string[] = [];
+        for (const entry of entries) {
+          if (entry.isDirectory()) {
+            try {
+              await access(join(workspace, entry.name, ".git"));
+              gitDirs.push(entry.name);
+            } catch { /* not a git repo */ }
+          }
+        }
+        if (gitDirs.length === 1) {
+          return gitDirs[0];
+        }
+      } catch { /* readdir failed */ }
+    }
+    return undefined;
   }
 
   return {
@@ -299,8 +356,9 @@ export function createTools(workspace: string, containerId?: string) {
       }),
       execute: async ({ path }) => {
         try {
+          const cwd = await resolveGitCwd(path);
           const { stdout } = await shellExec("git status --porcelain", {
-            workspace, containerId, cwd: path, timeout: 10000, env: gitEnv(),
+            workspace, containerId, cwd, timeout: 10000, env: gitEnv(),
           });
           const files = stdout.trim().split("\n").filter(Boolean).map((line) => ({
             status: line.slice(0, 2).trim(),
@@ -321,8 +379,9 @@ export function createTools(workspace: string, containerId?: string) {
       }),
       execute: async ({ filepath, path }) => {
         try {
+          const cwd = await resolveGitCwd(path);
           await shellExec(`git add ${filepath}`, {
-            workspace, containerId, cwd: path, timeout: 10000, env: gitEnv(),
+            workspace, containerId, cwd, timeout: 10000, env: gitEnv(),
           });
           return { success: true };
         } catch (err: any) {
@@ -339,10 +398,11 @@ export function createTools(workspace: string, containerId?: string) {
       }),
       execute: async ({ message, path }) => {
         try {
+          const cwd = await resolveGitCwd(path);
           const safeMsg = message.replace(/'/g, "'\\''");
           const { stdout } = await shellExec(
             `git commit -m '${safeMsg}'`,
-            { workspace, containerId, cwd: path, timeout: 10000, env: gitEnv() }
+            { workspace, containerId, cwd, timeout: 10000, env: gitEnv() }
           );
           return { success: true, output: stdout.slice(0, 2000) };
         } catch (err: any) {
@@ -360,9 +420,10 @@ export function createTools(workspace: string, containerId?: string) {
       }),
       execute: async ({ remote, branch, path }) => {
         try {
+          const cwd = await resolveGitCwd(path);
           const cmd = `git push ${remote || "origin"} ${branch || ""}`.trim();
           const { stdout, stderr } = await shellExec(cmd, {
-            workspace, containerId, cwd: path, timeout: 30000, env: gitEnv(),
+            workspace, containerId, cwd, timeout: 30000, env: gitEnv(),
           });
           return { success: true, stdout: stdout.slice(0, 2000), stderr: stderr.slice(0, 2000) };
         } catch (err: any) {
@@ -380,9 +441,10 @@ export function createTools(workspace: string, containerId?: string) {
       }),
       execute: async ({ remote, branch, path }) => {
         try {
+          const cwd = await resolveGitCwd(path);
           const cmd = `git pull ${remote || "origin"} ${branch || ""}`.trim();
           const { stdout, stderr } = await shellExec(cmd, {
-            workspace, containerId, cwd: path, timeout: 30000, env: gitEnv(),
+            workspace, containerId, cwd, timeout: 30000, env: gitEnv(),
           });
           return { success: true, stdout: stdout.slice(0, 2000), stderr: stderr.slice(0, 2000) };
         } catch (err: any) {
@@ -399,10 +461,11 @@ export function createTools(workspace: string, containerId?: string) {
       }),
       execute: async ({ depth, path }) => {
         try {
+          const cwd = await resolveGitCwd(path);
           const n = depth || 10;
           const { stdout } = await shellExec(
             `git log -${n} --format='%h|%s|%an|%ai'`,
-            { workspace, containerId, cwd: path, timeout: 10000, env: gitEnv() }
+            { workspace, containerId, cwd, timeout: 10000, env: gitEnv() }
           );
           const commits = stdout.trim().split("\n").filter(Boolean).map((line) => {
             const [sha, message, author, date] = line.split("|");
@@ -423,14 +486,15 @@ export function createTools(workspace: string, containerId?: string) {
       }),
       execute: async ({ name, path }) => {
         try {
+          const cwd = await resolveGitCwd(path);
           if (name) {
             await shellExec(`git branch ${name}`, {
-              workspace, containerId, cwd: path, timeout: 10000, env: gitEnv(),
+              workspace, containerId, cwd, timeout: 10000, env: gitEnv(),
             });
             return { success: true };
           }
           const { stdout } = await shellExec("git branch", {
-            workspace, containerId, cwd: path, timeout: 10000, env: gitEnv(),
+            workspace, containerId, cwd, timeout: 10000, env: gitEnv(),
           });
           const branches = stdout.trim().split("\n").map((b) => b.trim());
           const current = branches.find((b) => b.startsWith("* "))?.slice(2);
@@ -453,8 +517,9 @@ export function createTools(workspace: string, containerId?: string) {
       }),
       execute: async ({ ref, path }) => {
         try {
+          const cwd = await resolveGitCwd(path);
           await shellExec(`git checkout ${ref}`, {
-            workspace, containerId, cwd: path, timeout: 10000, env: gitEnv(),
+            workspace, containerId, cwd, timeout: 10000, env: gitEnv(),
           });
           return { success: true };
         } catch (err: any) {
