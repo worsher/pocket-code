@@ -8,6 +8,7 @@ import {
 } from "react-native";
 import * as Clipboard from "expo-clipboard";
 import { subscribeProcesses, killProcess, type ProcessInfo } from "../../services/processManager";
+import { useWorkspace } from "../../contexts/WorkspaceContext";
 
 interface ProcessOutputProps {
     processId: number;
@@ -25,6 +26,8 @@ export default function ProcessOutput({ processId, command }: ProcessOutputProps
         });
     }, [processId]);
 
+    const { navigateToPreview } = useWorkspace();
+
     const handleStop = () => killProcess(processId);
 
     const handleCopy = async () => {
@@ -36,6 +39,17 @@ export default function ProcessOutput({ processId, command }: ProcessOutputProps
 
     const status = info?.status ?? "running";
     const lines = info?.outputLines ?? [];
+
+    // Detect URLs in output (dev server addresses)
+    const detectedUrl = React.useMemo(() => {
+        const output = lines.join("\n");
+        const match = output.match(/https?:\/\/(?:localhost|127\.0\.0\.1|0\.0\.0\.0):\d+/);
+        return match ? match[0].replace("0.0.0.0", "localhost") : null;
+    }, [lines]);
+
+    const handleOpenPreview = () => {
+        if (detectedUrl) navigateToPreview(detectedUrl);
+    };
 
     const statusColor =
         status === "running" ? "#30D158" :
@@ -60,6 +74,11 @@ export default function ProcessOutput({ processId, command }: ProcessOutputProps
                     <TouchableOpacity onPress={handleCopy} style={styles.actionBtn}>
                         <Text style={styles.actionText}>{copied ? "已复制" : "复制"}</Text>
                     </TouchableOpacity>
+                    {detectedUrl && (
+                        <TouchableOpacity onPress={handleOpenPreview} style={[styles.actionBtn, styles.previewBtn]}>
+                            <Text style={styles.previewText}>预览</Text>
+                        </TouchableOpacity>
+                    )}
                     {status === "running" && (
                         <TouchableOpacity onPress={handleStop} style={[styles.actionBtn, styles.stopBtn]}>
                             <Text style={styles.stopText}>停止</Text>
@@ -136,6 +155,15 @@ const styles = StyleSheet.create({
     actionText: {
         color: "#636366",
         fontSize: 11,
+    },
+    previewBtn: {
+        backgroundColor: "#1A2A3A",
+        borderRadius: 4,
+    },
+    previewText: {
+        color: "#007AFF",
+        fontSize: 11,
+        fontWeight: "600",
     },
     stopBtn: {
         backgroundColor: "#3A1A1A",

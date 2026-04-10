@@ -1,4 +1,4 @@
-import React, { useState } from "react";
+import React from "react";
 import {
   View,
   Text,
@@ -14,6 +14,7 @@ interface Props {
   onRefresh: () => void;
   onSync?: () => Promise<void>;
   syncAvailable?: boolean;
+  syncing?: boolean;
   lastSyncTime?: number;
 }
 
@@ -23,18 +24,12 @@ export default function FilesToolbar({
   onRefresh,
   onSync,
   syncAvailable = false,
+  syncing = false,
   lastSyncTime,
 }: Props) {
-  const [syncing, setSyncing] = useState(false);
-
   const handleSync = async () => {
     if (!onSync || syncing) return;
-    setSyncing(true);
-    try {
-      await onSync();
-    } finally {
-      setSyncing(false);
-    }
+    await onSync();
   };
 
   return (

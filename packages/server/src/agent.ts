@@ -148,6 +148,7 @@ export type StreamEvent =
   | { type: "model-selected"; model: string; reason: string }
   | { type: "tool-call"; toolName: string; args: unknown }
   | { type: "tool-result"; toolName: string; result: unknown }
+  | { type: "file-changed"; path: string; action: "created" | "modified" | "deleted" }
   | { type: "usage"; promptTokens: number; completionTokens: number; totalTokens: number }
   | { type: "error"; error: string }
   | { type: "done" };
@@ -246,6 +247,15 @@ export async function runAgent(
 
         case "tool-result":
           onEvent({ type: "tool-result", toolName: part.toolName, result: part.result });
+          // Notify client about file changes for real-time sync
+          if ((part.toolName === "writeFile" || part.toolName === "editFile") && (part.result as any)?.success) {
+            const r = part.result as any;
+            onEvent({
+              type: "file-changed",
+              path: r.path,
+              action: r.isNew ? "created" : "modified",
+            });
+          }
           break;
 
         case "error":

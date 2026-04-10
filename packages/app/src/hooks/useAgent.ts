@@ -12,7 +12,7 @@ import {
   loadChatHistory,
   type StoredMessage,
 } from "../store/chatHistory";
-import { executeLocalTool } from "../services/localFileSystem";
+import { executeLocalTool, writeLocalFile, getProjectWorkspaceRoot } from "../services/localFileSystem";
 import { updateSettings } from "../store/settings";
 import type { StreamingPhase } from "../components/StreamingIndicator";
 import { enqueueMessage, getQueue, dequeueMessage } from "../services/offlineQueue";
@@ -66,11 +66,28 @@ interface UseAgentOptions {
   model?: string;
   customPrompt?: string;
   projectId?: string;
+  /** Called when AI modifies a file (writeFile/editFile). Used by WorkspaceContext for auto-refresh. */
+  onFileChanged?: (path: string, action: "created" | "modified" | "deleted") => void;
+}
+
+// ── Sync filtering ────────────────────────────────────────
+const SYNC_IGNORE_DIRS = ["node_modules", ".git", "dist", "build", ".next", ".cache", "__pycache__", ".tox", "vendor"];
+const SYNC_IGNORE_EXTENSIONS = [".lock", ".log"];
+const SYNC_IGNORE_FILES = [".gitconfig", ".git-credentials"];
+const MAX_SYNC_FILE_SIZE = 512 * 1024; // 512KB
+
+function shouldSyncFile(filePath: string): boolean {
+  const parts = filePath.split("/");
+  if (parts.some((p) => SYNC_IGNORE_DIRS.includes(p))) return false;
+  if (SYNC_IGNORE_EXTENSIONS.some((ext) => filePath.endsWith(ext))) return false;
+  const fileName = parts[parts.length - 1] || "";
+  if (SYNC_IGNORE_FILES.includes(fileName)) return false;
+  return true;
 }
 
 // ── Main Hook ──────────────────────────────────────────
 
-export function useAgent({ settings, model = "deepseek-v3", customPrompt, projectId }: UseAgentOptions) {
+export function useAgent({ settings, model = "deepseek-v3", customPrompt, projectId, onFileChanged }: UseAgentOptions) {
   const [messages, setMessages] = useState<Message[]>([]);
   const [isConnected, setIsConnected] = useState(false);
   const [isStreaming, setIsStreaming] = useState(false);
@@ -89,6 +106,10 @@ export function useAgent({ settings, model = "deepseek-v3", customPrompt, projec
 
   const projectIdRef = useRef(projectId);
   projectIdRef.current = projectId;
+
+  // Ref for onFileChanged callback — avoid stale closure in WS handler
+  const onFileChangedRef = useRef(onFileChanged);
+  onFileChangedRef.current = onFileChanged;
 
   // Ref for workspaceMode — avoid stale closure in executeTool
   const workspaceModeRef = useRef(settings.workspaceMode);
@@ -442,6 +463,31 @@ export function useAgent({ settings, model = "deepseek-v3", customPrompt, projec
             });
           }
           break;
+
+        // ── File change notification (auto-sync) ──
+        case "file-changed": {
+          const changedPath: string = data.path;
+          const changeAction: "created" | "modified" | "deleted" = data.action;
+
+          // 1. Notify WorkspaceContext (triggers FilesTab refresh)
+          onFileChangedRef.current?.(changedPath, changeAction);
+
+          // 2. Auto-sync to local if in local workspace mode
+          if (workspaceModeRef.current === "local" && projectIdRef.current && shouldSyncFile(changedPath)) {
+            const localRoot = getProjectWorkspaceRoot(projectIdRef.current);
+            // Read from remote via existing WS connection, then write locally
+            requestFileContent(changedPath)
+              .then((result: any) => {
+                if (result?.success && result.content != null && result.content.length <= MAX_SYNC_FILE_SIZE) {
+                  writeLocalFile(changedPath, result.content, localRoot);
+                }
+              })
+              .catch(() => {
+                // Sync failure is non-critical — file is still on remote
+              });
+          }
+          break;
+        }
 
         // ── File operations ────────────────────────
         case "file-list":

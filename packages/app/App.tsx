@@ -29,6 +29,7 @@ import QuickActions from "./src/components/QuickActions";
 import SearchDialog from "./src/components/SearchDialog";
 import TerminalScreen from "./src/components/TerminalScreen";
 import FilesTab from "./src/components/FilesTab";
+import PreviewTab from "./src/components/PreviewTab";
 import {
   type AppSettings,
   DEFAULT_SETTINGS,
@@ -36,6 +37,7 @@ import {
   saveSettings,
 } from "./src/store/settings";
 import { ProjectProvider, useProject } from "./src/contexts/ProjectContext";
+import { WorkspaceProvider, useWorkspace } from "./src/contexts/WorkspaceContext";
 import ProjectPromptEditor from "./src/components/ProjectPromptEditor";
 import { requestNotificationPermissions } from "./src/services/notifications";
 
@@ -48,8 +50,9 @@ function MainScreen() {
   const [showFileExplorer, setShowFileExplorer] = useState(false);
   const [showSearch, setShowSearch] = useState(false);
   const [showPromptEditor, setShowPromptEditor] = useState(false);
-  // Bottom tab: "chat" | "terminal" | "files"
-  const [activeTab, setActiveTab] = useState<"chat" | "terminal" | "files">("chat");
+  // Bottom tab
+  const [activeTab, setActiveTab] = useState<"chat" | "terminal" | "files" | "preview">("chat");
+  const [previewUrl, setPreviewUrl] = useState<string | undefined>();
   const [settings, setSettings] = useState<AppSettings>(DEFAULT_SETTINGS);
   const [settingsLoaded, setSettingsLoaded] = useState(false);
   const [keyboardVisible, setKeyboardVisible] = useState(false);
@@ -81,11 +84,32 @@ function MainScreen() {
   }, []);
 
   const { currentProject } = useProject();
+  const { pushFileChange, pendingFilePath, pendingPreviewUrl, clearPendingPreview } = useWorkspace();
+
+  // Auto-switch to Files tab when navigateToFile is called from chat
+  useEffect(() => {
+    if (pendingFilePath) {
+      setActiveTab("files");
+    }
+  }, [pendingFilePath]);
+
+  // Auto-switch to Preview tab when navigateToPreview is called
+  useEffect(() => {
+    if (pendingPreviewUrl) {
+      setPreviewUrl(pendingPreviewUrl);
+      setActiveTab("preview");
+      clearPendingPreview();
+    }
+  }, [pendingPreviewUrl, clearPendingPreview]);
 
   const handleSaveSettings = useCallback(async (newSettings: AppSettings) => {
     setSettings(newSettings);
     await saveSettings(newSettings);
   }, []);
+
+  const handleFileChanged = useCallback((path: string, action: "created" | "modified" | "deleted") => {
+    pushFileChange({ path, action });
+  }, [pushFileChange]);
 
   const {
     messages,
@@ -105,7 +129,7 @@ function MainScreen() {
     requestFileList,
     requestFileContent,
     deleteProjectWorkspace,
-  } = useAgent({ settings, model: currentModel, customPrompt: currentProject?.customPrompt, projectId: currentProject?.id });
+  } = useAgent({ settings, model: currentModel, customPrompt: currentProject?.customPrompt, projectId: currentProject?.id, onFileChanged: handleFileChanged });
 
   const listRef = useRef<FlatList>(null);
   const appStateRef = useRef<AppStateStatus>(AppState.currentState);
@@ -339,6 +363,11 @@ function MainScreen() {
             projectId={currentProject?.id}
           />
         </View>
+
+        {/* ── Preview Tab ── */}
+        <View style={[styles.flex1, activeTab !== "preview" && styles.hidden]}>
+          <PreviewTab initialUrl={previewUrl} />
+        </View>
       </View>
 
       {/* Search Dialog */}
@@ -444,9 +473,9 @@ function MainScreen() {
       {/* Bottom Tab Bar — hidden when keyboard is visible */}
       {!keyboardVisible && (
         <View style={styles.tabBar}>
-          {(["chat", "terminal", "files"] as const).map((tab) => {
-            const icons = { chat: "💬", terminal: "💻", files: "📁" };
-            const labels = { chat: "Chat", terminal: "Terminal", files: "Files" };
+          {(["chat", "terminal", "files", "preview"] as const).map((tab) => {
+            const icons = { chat: "💬", terminal: "💻", files: "📁", preview: "🌐" };
+            const labels = { chat: "Chat", terminal: "Terminal", files: "Files", preview: "Preview" };
             const active = activeTab === tab;
             return (
               <TouchableOpacity
@@ -474,7 +503,9 @@ export default function App() {
   return (
     <SafeAreaProvider>
       <ProjectProvider>
-        <MainScreen />
+        <WorkspaceProvider>
+          <MainScreen />
+        </WorkspaceProvider>
       </ProjectProvider>
     </SafeAreaProvider>
   );

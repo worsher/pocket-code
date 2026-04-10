@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from "react";
+import React, { useState, useEffect, useMemo } from "react";
 import {
   View,
   Text,
@@ -9,7 +9,47 @@ import {
   ActivityIndicator,
   Alert,
 } from "react-native";
+import CodeHighlighter from "react-native-code-highlighter";
 import type { FileItem } from "../../../hooks/useFileTree";
+import { detectLanguage } from "../../../utils/languageDetect";
+
+// Inlined Atom One Dark theme (same as CodeBlock)
+const atomOneDarkReasonable: Record<string, any> = {
+  hljs: { display: "block", overflowX: "auto", padding: "0.5em", color: "#abb2bf", background: "#282c34" },
+  "hljs-keyword": { color: "#F92672" },
+  "hljs-operator": { color: "#F92672" },
+  "hljs-pattern-match": { color: "#F92672" },
+  "hljs-function": { color: "#61aeee" },
+  "hljs-comment": { color: "#b18eb1", fontStyle: "italic" },
+  "hljs-quote": { color: "#b18eb1", fontStyle: "italic" },
+  "hljs-doctag": { color: "#c678dd" },
+  "hljs-section": { color: "#e06c75" },
+  "hljs-name": { color: "#e06c75" },
+  "hljs-selector-tag": { color: "#e06c75" },
+  "hljs-deletion": { color: "#e06c75" },
+  "hljs-subst": { color: "#e06c75" },
+  "hljs-literal": { color: "#56b6c2" },
+  "hljs-string": { color: "#98c379" },
+  "hljs-regexp": { color: "#98c379" },
+  "hljs-addition": { color: "#98c379" },
+  "hljs-attribute": { color: "#98c379" },
+  "hljs-meta-string": { color: "#98c379" },
+  "hljs-built_in": { color: "#e6c07b" },
+  "hljs-attr": { color: "#d19a66" },
+  "hljs-variable": { color: "#d19a66" },
+  "hljs-template-variable": { color: "#d19a66" },
+  "hljs-type": { color: "#d19a66" },
+  "hljs-selector-class": { color: "#d19a66" },
+  "hljs-number": { color: "#d19a66" },
+  "hljs-symbol": { color: "#61aeee" },
+  "hljs-bullet": { color: "#61aeee" },
+  "hljs-link": { color: "#61aeee" },
+  "hljs-meta": { color: "#61aeee" },
+  "hljs-selector-id": { color: "#61aeee" },
+  "hljs-title": { color: "#61aeee" },
+  "hljs-emphasis": { fontStyle: "italic" },
+  "hljs-strong": { fontWeight: "bold" },
+};
 
 interface Props {
   file: FileItem;
@@ -33,6 +73,8 @@ export default function InlineFileViewer({
   const [saving, setSaving] = useState(false);
   const [isEditing, setIsEditing] = useState(false);
   const [hasChanges, setHasChanges] = useState(false);
+
+  const language = useMemo(() => detectLanguage(file.name), [file.name]);
 
   useEffect(() => {
     loadFile();
@@ -82,17 +124,22 @@ export default function InlineFileViewer({
     setHasChanges(text !== content);
   };
 
+  const lineCount = content ? content.split("\n").length : 0;
+
   return (
     <View style={styles.container}>
       {/* Header */}
       <View style={styles.header}>
         <TouchableOpacity onPress={onBack} style={styles.backBtn}>
-          <Text style={styles.backText}>← 返回</Text>
+          <Text style={styles.backText}>{"<-"} 返回</Text>
         </TouchableOpacity>
         <Text style={styles.fileName} numberOfLines={1}>
           {file.name}
         </Text>
         <View style={styles.headerActions}>
+          {!isEditing && content !== null && (
+            <Text style={styles.langBadge}>{language}</Text>
+          )}
           {editable && !isEditing && content !== null && (
             <TouchableOpacity
               onPress={() => setIsEditing(true)}
@@ -102,21 +149,29 @@ export default function InlineFileViewer({
             </TouchableOpacity>
           )}
           {editable && isEditing && (
-            <TouchableOpacity
-              onPress={handleSave}
-              style={[styles.actionBtn, !hasChanges && styles.actionBtnDisabled]}
-              disabled={!hasChanges || saving}
-            >
-              <Text
-                style={[
-                  styles.actionText,
-                  styles.saveText,
-                  !hasChanges && styles.actionTextDisabled,
-                ]}
+            <>
+              <TouchableOpacity
+                onPress={() => { setIsEditing(false); setEditedContent(content || ""); setHasChanges(false); }}
+                style={styles.actionBtn}
               >
-                {saving ? "保存中..." : "保存"}
-              </Text>
-            </TouchableOpacity>
+                <Text style={styles.actionText}>取消</Text>
+              </TouchableOpacity>
+              <TouchableOpacity
+                onPress={handleSave}
+                style={[styles.actionBtn, !hasChanges && styles.actionBtnDisabled]}
+                disabled={!hasChanges || saving}
+              >
+                <Text
+                  style={[
+                    styles.actionText,
+                    styles.saveText,
+                    !hasChanges && styles.actionTextDisabled,
+                  ]}
+                >
+                  {saving ? "保存中..." : "保存"}
+                </Text>
+              </TouchableOpacity>
+            </>
           )}
         </View>
       </View>
@@ -148,12 +203,32 @@ export default function InlineFileViewer({
       ) : (
         <ScrollView
           style={styles.scrollView}
-          contentContainerStyle={styles.scrollContent}
           showsVerticalScrollIndicator
         >
-          <Text style={styles.codeText} selectable>
-            {content}
-          </Text>
+          <ScrollView horizontal showsHorizontalScrollIndicator={false}>
+            <View style={styles.codeContainer}>
+              {/* Line numbers gutter */}
+              <View style={styles.lineNumbers}>
+                {Array.from({ length: lineCount }, (_, i) => (
+                  <Text key={i} style={styles.lineNumber}>
+                    {i + 1}
+                  </Text>
+                ))}
+              </View>
+              {/* Highlighted code */}
+              <View style={styles.codeContent}>
+                {/* @ts-ignore — children prop exists at runtime */}
+                <CodeHighlighter
+                  hljsStyle={atomOneDarkReasonable}
+                  language={language}
+                  textStyle={styles.codeText}
+                  scrollViewProps={{ scrollEnabled: false }}
+                >
+                  {content || ""}
+                </CodeHighlighter>
+              </View>
+            </View>
+          </ScrollView>
         </ScrollView>
       )}
     </View>
@@ -192,6 +267,16 @@ const styles = StyleSheet.create({
   headerActions: {
     flexDirection: "row",
     gap: 8,
+    alignItems: "center",
+  },
+  langBadge: {
+    color: "#636366",
+    fontSize: 11,
+    fontFamily: "monospace",
+    backgroundColor: "#1C1C1E",
+    paddingHorizontal: 6,
+    paddingVertical: 2,
+    borderRadius: 4,
   },
   actionBtn: {
     paddingHorizontal: 12,
@@ -244,13 +329,31 @@ const styles = StyleSheet.create({
   scrollView: {
     flex: 1,
   },
-  scrollContent: {
-    padding: 12,
+  codeContainer: {
+    flexDirection: "row",
+    paddingVertical: 8,
   },
-  codeText: {
-    color: "#E5E5EA",
+  lineNumbers: {
+    paddingLeft: 8,
+    paddingRight: 8,
+    borderRightWidth: 1,
+    borderRightColor: "#38383A",
+    minWidth: 40,
+    alignItems: "flex-end",
+  },
+  lineNumber: {
+    color: "#636366",
     fontSize: 13,
     fontFamily: "monospace",
+    lineHeight: 20,
+  },
+  codeContent: {
+    flex: 1,
+    paddingLeft: 8,
+  },
+  codeText: {
+    fontFamily: "monospace",
+    fontSize: 13,
     lineHeight: 20,
   },
   editor: {

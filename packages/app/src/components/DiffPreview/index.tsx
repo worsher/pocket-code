@@ -1,5 +1,6 @@
 import React, { useState } from "react";
 import { View, Text, StyleSheet, ScrollView, TouchableOpacity } from "react-native";
+import { useWorkspace } from "../../contexts/WorkspaceContext";
 
 interface DiffPreviewProps {
   path: string;
@@ -16,19 +17,22 @@ export default function DiffPreview({
   newContent,
 }: DiffPreviewProps) {
   const [expanded, setExpanded] = useState(false);
+  const { navigateToFile } = useWorkspace();
+
+  const handlePathPress = () => navigateToFile(path);
 
   if (isNew) {
     // New file — show summary only
     const lineCount = newContent.split("\n").length;
     return (
       <View style={styles.container}>
-        <View style={styles.header}>
+        <TouchableOpacity style={styles.header} onPress={handlePathPress} activeOpacity={0.6}>
           <Text style={styles.headerIcon}>+</Text>
           <Text style={styles.headerPath} numberOfLines={1}>
             {path}
           </Text>
           <Text style={styles.headerBadge}>新文件</Text>
-        </View>
+        </TouchableOpacity>
         {expanded ? (
           <>
             <ScrollView horizontal style={styles.codeScroll}>
@@ -67,14 +71,14 @@ export default function DiffPreview({
 
   return (
     <View style={styles.container}>
-      <View style={styles.header}>
+      <TouchableOpacity style={styles.header} onPress={handlePathPress} activeOpacity={0.6}>
         <Text style={styles.headerIcon}>~</Text>
         <Text style={styles.headerPath} numberOfLines={1}>
           {path}
         </Text>
         <Text style={[styles.headerStats, styles.addedText]}>+{addedCount}</Text>
         <Text style={[styles.headerStats, styles.removedText]}>-{removedCount}</Text>
-      </View>
+      </TouchableOpacity>
       {expanded ? (
         <>
           <ScrollView horizontal style={styles.codeScroll}>

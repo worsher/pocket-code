@@ -1,6 +1,7 @@
 import React from "react";
-import { View, Text, StyleSheet } from "react-native";
+import { View, Text, TouchableOpacity, StyleSheet } from "react-native";
 import type { ToolCall } from "../../hooks/useAgent";
+import { useWorkspace } from "../../contexts/WorkspaceContext";
 
 interface FileChange {
   path: string;
@@ -35,20 +36,27 @@ function extractChanges(toolCalls: ToolCall[]): FileChange[] {
 
 export default function FileChangeSummary({ toolCalls }: Props) {
   const changes = extractChanges(toolCalls);
+  const { navigateToFile } = useWorkspace();
   if (changes.length === 0) return null;
 
   return (
     <View style={styles.container}>
       <Text style={styles.title}>文件变更 ({changes.length})</Text>
       {changes.map((change) => (
-        <View key={change.path} style={styles.item}>
+        <TouchableOpacity
+          key={change.path}
+          style={styles.item}
+          onPress={() => navigateToFile(change.path)}
+          activeOpacity={0.6}
+        >
           <Text style={[styles.badge, change.isNew ? styles.badgeNew : styles.badgeModified]}>
             {change.isNew ? "+" : "~"}
           </Text>
           <Text style={styles.path} numberOfLines={1}>
             {change.path}
           </Text>
-        </View>
+          <Text style={styles.arrow}>→</Text>
+        </TouchableOpacity>
       ))}
     </View>
   );
@@ -99,5 +107,10 @@ const styles = StyleSheet.create({
     color: "#E5E5EA",
     fontSize: 12,
     fontFamily: "monospace",
+  },
+  arrow: {
+    color: "#636366",
+    fontSize: 12,
+    marginLeft: 4,
   },
 });
