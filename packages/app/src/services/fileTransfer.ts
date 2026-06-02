@@ -1,8 +1,11 @@
 // ── File Upload / Download Client ────────────────────────
 // Handles file upload and download via HTTP to the pocket-code server.
 
-import * as FileSystem from "expo-file-system";
-import { FileSystemUploadType } from "expo-file-system";
+// expo-file-system 19 (SDK 54) 把经典 API(cacheDirectory/createUploadTask/
+// downloadAsync/FileSystemUploadType)移到 /legacy 子路径，从该路径继续可用。
+// 注：gitService.ts 用的是新 Paths/Directory API，两者可共存。
+import * as FileSystem from "expo-file-system/legacy";
+import { FileSystemUploadType } from "expo-file-system/legacy";
 import * as DocumentPicker from "expo-document-picker";
 import { writeLocalFile } from "./localFileSystem";
 
