@@ -53,3 +53,22 @@ export {
   type ForwardStreamType,
   type RelayStreamType,
 } from "./relay.js";
+
+// Normalized agent event protocol (consumed by the App's render layer)
+export {
+  TextDeltaEvent,
+  ReasoningDeltaEvent,
+  ToolCallEvent,
+  ToolResultEvent,
+  FileChangedEvent,
+  CommandOutputEvent,
+  ProcessStartedEvent,
+  ProcessExitedEvent,
+  PreviewAvailableEvent,
+  ModelSelectedEvent,
+  UsageEvent,
+  DoneEvent,
+  ErrorEvent,
+  AgentEvent,
+  type AgentEventType,
+} from "./agentEvent.js";
