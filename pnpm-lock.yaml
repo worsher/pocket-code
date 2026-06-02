@@ -179,6 +179,9 @@ importers:
       '@anthropic-ai/claude-code':
         specifier: ^1.0.0
         version: 1.0.128
+      '@pocket-code/wire':
+        specifier: workspace:*
+        version: link:../wire
       ai:
         specifier: ^4.3.0
         version: 4.3.19(react@19.2.4)(zod@3.25.76)

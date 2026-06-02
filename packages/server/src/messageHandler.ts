@@ -9,7 +9,7 @@ import { verifyToken, registerAnonymous, type AuthPayload } from "./auth.js";
 import { isDockerEnabled, getContainer } from "./docker.js";
 import { initDb, listUserSessions, deleteSession } from "./db.js";
 import { checkQuota, incrementUsage, getUserQuota } from "./resourceLimits.js";
-import { WsMessage } from "./wsSchemas.js";
+import { WsMessage } from "@pocket-code/wire";
 import { rm } from "fs/promises";
 
 // Shared session store — the same Map is used for all handlers
