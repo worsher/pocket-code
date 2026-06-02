@@ -495,7 +495,7 @@ describe("wire — AgentEvent validation", () => {
 - [ ] **Step 4: 构建 wire 并运行测试**
 
 Run: `pnpm --filter @pocket-code/wire build && pnpm --filter @pocket-code/wire test`
-Expected: 构建成功；测试 PASS —— `src/messages.test.ts`(14) + `src/agentEvent.test.ts`(13) 共 **27 passed**。
+Expected: 构建成功；测试 PASS —— `src/messages.test.ts`(14) + `src/agentEvent.test.ts`(12) 共 **26 passed**。
 
 - [ ] **Step 5: 提交**
 
@@ -545,7 +545,7 @@ git commit -m "feat(wire): 定义归一化 AgentEvent 事件契约(含测试)"
 - [ ] **Step 3: 全链路验证（与 CI 一致）**
 
 Run: `pnpm build && pnpm test:all && pnpm typecheck:app && echo ALL GREEN`
-Expected: 末尾打印 `ALL GREEN`。其中 `test:all` 含 wire(27) + server(去掉 wsSchemas 后的测试) + daemon(14) + relay(10)，且每个包只跑 `src/` 下测试（不再有 dist 副本翻倍）。
+Expected: 末尾打印 `ALL GREEN`。其中 `test:all` 含 wire(26) + server(21，去掉 wsSchemas 后) + daemon(7) + relay(5)，且每个包只跑 `src/` 下测试（这些是去掉 dist 副本翻倍后的真实数；P1 里看到的 daemon 14/relay 10 是被 dist 副本翻倍的旧值）。
 
 - [ ] **Step 4: 提交**
 
