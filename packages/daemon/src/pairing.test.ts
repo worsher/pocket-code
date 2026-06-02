@@ -19,10 +19,10 @@ describe("Daemon Pairing & Security", () => {
     vi.useRealTimers();
   });
 
-  it("should generate a 6-digit pairing code", () => {
+  it("should generate an 8-char alphanumeric pairing code (excludes I/O)", () => {
     const code = generatePairingCode();
-    expect(code).toMatch(/^\d{6}$/);
-    
+    expect(code).toMatch(/^[0-9A-HJ-NP-Z]{8}$/);
+
     const info = getPairingCodeInfo();
     expect(info).not.toBeNull();
     expect(info?.code).toBe(code);
