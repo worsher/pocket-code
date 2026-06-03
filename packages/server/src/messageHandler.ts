@@ -346,7 +346,7 @@ export function createMessageHandler(
               return;
             }
             try {
-              await handleSyncPull(session.workspace, msg.sinceCommit ?? null, send);
+              await handleSyncPull(session.workspace, msg.sinceCommit ?? null, send, msg._reqId);
             } catch (err: any) {
               send({ type: "error", error: `sync-pull failed: ${err.message}` });
             }
@@ -359,7 +359,7 @@ export function createMessageHandler(
               return;
             }
             try {
-              await handleSyncFile(session.workspace, msg.commit, msg.path, send);
+              await handleSyncFile(session.workspace, msg.commit, msg.path, send, msg._reqId);
             } catch (err: any) {
               send({ type: "error", error: `sync-file failed: ${err.message}` });
             }

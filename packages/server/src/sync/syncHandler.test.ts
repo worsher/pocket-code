@@ -93,4 +93,21 @@ describe("syncHandler", () => {
     expect(m.type).toBe("sync-file-content");
     expect(m.error).toBeTruthy();
   });
+
+  it("echoes _reqId in sync-manifest and sync-file-content (for relay-mode correlation)", async () => {
+    writeFileSync(join(ws, "a.txt"), "x\n");
+    await handleSyncPull(ws, null, send, "req-1");
+    expect(sent[0]._reqId).toBe("req-1");
+    const commit = sent[0].commit;
+
+    sent = [];
+    await handleSyncFile(ws, commit, "a.txt", send, "req-2");
+    expect(sent[0]._reqId).toBe("req-2");
+
+    // 失败响应也回显
+    sent = [];
+    await handleSyncFile(ws, commit, "nope.txt", send, "req-3");
+    expect(sent[0]._reqId).toBe("req-3");
+    expect(sent[0].error).toBeTruthy();
+  });
 });

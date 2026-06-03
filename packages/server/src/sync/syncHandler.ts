@@ -29,7 +29,8 @@ export async function ensureGitRepo(workspace: string): Promise<void> {
 export async function handleSyncPull(
   workspace: string,
   sinceCommit: string | null,
-  send: (msg: unknown) => void
+  send: (msg: unknown) => void,
+  reqId?: string
 ): Promise<void> {
   await ensureGitRepo(workspace);
   const snap = await createSnapshot(workspace);
@@ -40,7 +41,8 @@ export async function handleSyncPull(
     // sinceCommit 不可达 → 回退全量
     files = await changedFiles(workspace, null, snap.commit);
   }
-  send({ type: "sync-manifest", commit: snap.commit, parent: snap.parent, files });
+  // _reqId 回显:relay 模式下 RelayClient 拆信封会丢 requestId,响应须自带 _reqId 供客户端关联。
+  send({ type: "sync-manifest", commit: snap.commit, parent: snap.parent, files, _reqId: reqId });
 }
 
 /** 处理 sync-file:返回某快照里某文件的 base64 内容(失败则带 error)。 */
@@ -48,7 +50,8 @@ export async function handleSyncFile(
   workspace: string,
   commit: string,
   path: string,
-  send: (msg: unknown) => void
+  send: (msg: unknown) => void,
+  reqId?: string
 ): Promise<void> {
   try {
     const content = await readSnapshotFile(workspace, commit, path);
@@ -57,8 +60,9 @@ export async function handleSyncFile(
       path,
       encoding: "base64",
       content: content.toString("base64"),
+      _reqId: reqId,
     });
   } catch (err: any) {
-    send({ type: "sync-file-content", path, error: err?.message ?? "read failed" });
+    send({ type: "sync-file-content", path, error: err?.message ?? "read failed", _reqId: reqId });
   }
 }
