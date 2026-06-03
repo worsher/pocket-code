@@ -13,6 +13,14 @@ const exec = promisify(execFile);
 const SNAP_REF = "refs/pocket-code/worktree";
 const MAX_BUFFER = 256 * 1024 * 1024;
 
+// commit-tree 需要提交者身份;注入固定身份,使其在未配 user.name/email 的工作区也能工作。
+const IDENTITY_ENV: NodeJS.ProcessEnv = {
+  GIT_AUTHOR_NAME: "Pocket Code",
+  GIT_AUTHOR_EMAIL: "pocket@local",
+  GIT_COMMITTER_NAME: "Pocket Code",
+  GIT_COMMITTER_EMAIL: "pocket@local",
+};
+
 async function git(repoDir: string, args: string[], env?: NodeJS.ProcessEnv): Promise<string> {
   const { stdout } = await exec("git", args, {
     cwd: repoDir,
@@ -63,7 +71,7 @@ export async function createSnapshot(repoDir: string): Promise<SnapshotResult> {
     const commitArgs = ["commit-tree", tree];
     if (parent) commitArgs.push("-p", parent);
     commitArgs.push("-m", "pocket snapshot");
-    const commit = (await git(repoDir, commitArgs)).trim();
+    const commit = (await git(repoDir, commitArgs, IDENTITY_ENV)).trim();
     await git(repoDir, ["update-ref", SNAP_REF, commit]);
     return { commit, parent: parent || null };
   } finally {

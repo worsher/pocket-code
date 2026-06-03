@@ -112,4 +112,20 @@ describe("shadowSnapshot", () => {
     // branch/HEAD untouched
     expect(git(repo, "rev-parse", "HEAD")).toMatch(/^[0-9a-f]{40}$/);
   });
+
+  it("works on a repo with NO user.name/email configured (injects identity)", async () => {
+    // 新建一个完全未配置身份的仓库
+    const bare = mkdtempSync(join(tmpdir(), "pc-noid-"));
+    try {
+      git(bare, "init", "-q", "-b", "main");
+      writeFileSync(join(bare, "f.txt"), "hi\n");
+      // 注意:不设置 user.email / user.name
+      const snap = await createSnapshot(bare);
+      expect(snap.commit).toMatch(/^[0-9a-f]{40}$/);
+      const tree = git(bare, "ls-tree", "-r", "--name-only", snap.commit);
+      expect(tree).toBe("f.txt");
+    } finally {
+      rmSync(bare, { recursive: true, force: true });
+    }
+  });
 });
