@@ -29,6 +29,13 @@ describe("claudeCodeAdapter.parseLine", () => {
     expect(evs).toEqual([{ type: "reasoning-delta", text: "hmm" }]);
   });
 
+  it("skips empty thinking blocks (signature-only)", () => {
+    const evs = claudeCodeAdapter.parseLine(
+      line({ type: "assistant", message: { content: [{ type: "thinking", thinking: "", signature: "x" }] } })
+    );
+    expect(evs).toEqual([]);
+  });
+
   it("maps tool_use to tool-call with callId/name/args", () => {
     const evs = claudeCodeAdapter.parseLine(
       line({

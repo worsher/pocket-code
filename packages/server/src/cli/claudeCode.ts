@@ -67,7 +67,7 @@ export const claudeCodeAdapter: CliAgentAdapter = {
         for (const block of content) {
           if (block?.type === "text" && typeof block.text === "string") {
             events.push({ type: "text-delta", text: block.text });
-          } else if (block?.type === "thinking" && typeof block.thinking === "string") {
+          } else if (block?.type === "thinking" && typeof block.thinking === "string" && block.thinking.length > 0) {
             events.push({ type: "reasoning-delta", text: block.thinking });
           } else if (block?.type === "tool_use") {
             events.push({
