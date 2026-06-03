@@ -74,3 +74,17 @@ export {
   AgentEvent,
   type AgentEventType,
 } from "./agentEvent.js";
+
+// HTTP 隧道帧(relay ↔ daemon)
+export {
+  TunnelRequest,
+  TunnelResponse,
+  TunnelChunk,
+  TunnelEnd,
+  TunnelFrame,
+  type TunnelRequestType,
+  type TunnelResponseType,
+  type TunnelChunkType,
+  type TunnelEndType,
+  type TunnelFrameType,
+} from "./tunnel.js";
