@@ -48,11 +48,13 @@ const httpServer = createServer(
       return;
     }
 
-    // ── 反向 HTTP 隧道: /t/<machineId>/<port>/<rest> ──
-    const tunnelMatch = url.pathname.match(/^\/t\/([^/]+)\/(\d+)(\/.*)?$/);
-    if (tunnelMatch) {
-      const [, machineId, portStr, rest] = tunnelMatch;
-      const port = parseInt(portStr, 10);
+    // 启动一条隧道:收齐请求体后转给 daemon。
+    const startTunnel = (
+      machineId: string,
+      port: number,
+      path: string,
+      extraHeaders?: Record<string, string>
+    ) => {
       const tunnelId = crypto.randomUUID();
       const headers: Record<string, string> = {};
       for (const [k, v] of Object.entries(req.headers)) {
@@ -63,18 +65,39 @@ const httpServer = createServer(
       req.on("data", (c) => chunks.push(c as Buffer));
       req.on("end", () => {
         const body = chunks.length ? Buffer.concat(chunks).toString("base64") : undefined;
-        tunnelHub.open(tunnelId, res);
+        tunnelHub.open(tunnelId, res, extraHeaders);
         const ok = sendRawToDaemon(machineId, {
           type: "tunnel-request",
           tunnelId,
           port,
           method: req.method || "GET",
-          path: (rest || "/") + (url.search || ""),
+          path,
           headers,
           body,
         });
         if (!ok) tunnelHub.onEnd(tunnelId, `daemon ${machineId} offline`);
       });
+    };
+
+    // ── 显式隧道: /t/<machineId>/<port>/<rest> ──
+    // 顺便下发 pc_tunnel cookie,使该页的「绝对路径子资源」(如 vite 的 /src/x)
+    // 也能被路由回同一隧道(否则绝对路径会丢掉 /t/<id>/<port> 前缀而 404)。
+    const tunnelMatch = url.pathname.match(/^\/t\/([^/]+)\/(\d+)(\/.*)?$/);
+    if (tunnelMatch) {
+      const [, machineId, portStr, rest] = tunnelMatch;
+      const port = parseInt(portStr, 10);
+      startTunnel(machineId, port, (rest || "/") + (url.search || ""), {
+        "Set-Cookie": `pc_tunnel=${machineId}:${port}; Path=/; SameSite=Lax`,
+      });
+      return;
+    }
+
+    // ── 绝对路径子资源:靠 pc_tunnel cookie 路由回同一隧道 ──
+    const cookieMatch = (req.headers.cookie || "").match(
+      /(?:^|;\s*)pc_tunnel=([^:;]+):(\d+)/
+    );
+    if (cookieMatch) {
+      startTunnel(cookieMatch[1], parseInt(cookieMatch[2], 10), url.pathname + (url.search || ""));
       return;
     }
 

@@ -29,6 +29,16 @@ describe("TunnelHub", () => {
     expect(hub.size).toBe(0); // end 后清理
   });
 
+  it("injects extraHeaders (e.g. Set-Cookie) into the response head", () => {
+    const hub = new TunnelHub();
+    const res = mockRes();
+    hub.open("t1", res, { "Set-Cookie": "pc_tunnel=m_abc:5173; Path=/" });
+    hub.onResponse("t1", 200, { "content-type": "text/html" });
+    const [, headers] = res.writeHead.mock.calls[0];
+    expect(headers["content-type"]).toBe("text/html");
+    expect(headers["Set-Cookie"]).toBe("pc_tunnel=m_abc:5173; Path=/");
+  });
+
   it("ignores frames for unknown tunnelId", () => {
     const hub = new TunnelHub();
     expect(() => hub.onChunk("nope", "YWJj")).not.toThrow();

@@ -7,6 +7,8 @@ import type { ServerResponse } from "http";
 interface PendingTunnel {
   res: ServerResponse;
   responded: boolean;
+  /** relay 侧注入的附加响应头(如 Set-Cookie 记忆隧道目标)。 */
+  extraHeaders?: Record<string, string>;
 }
 
 // 逐跳头:不应原样透传(我们用 write/end 隐式 chunked)。
@@ -15,8 +17,8 @@ const HOP_BY_HOP = new Set(["transfer-encoding", "connection", "content-length",
 export class TunnelHub {
   private tunnels = new Map<string, PendingTunnel>();
 
-  open(tunnelId: string, res: ServerResponse): void {
-    this.tunnels.set(tunnelId, { res, responded: false });
+  open(tunnelId: string, res: ServerResponse, extraHeaders?: Record<string, string>): void {
+    this.tunnels.set(tunnelId, { res, responded: false, extraHeaders });
   }
 
   onResponse(tunnelId: string, status: number, headers: Record<string, string>): void {
@@ -27,6 +29,8 @@ export class TunnelHub {
     for (const [k, v] of Object.entries(headers)) {
       if (!HOP_BY_HOP.has(k.toLowerCase())) safe[k] = v;
     }
+    // 注入 relay 附加头(如下发 pc_tunnel cookie,使绝对路径子资源也能路由回本隧道)。
+    if (t.extraHeaders) Object.assign(safe, t.extraHeaders);
     try {
       t.res.writeHead(status, safe);
     } catch {
