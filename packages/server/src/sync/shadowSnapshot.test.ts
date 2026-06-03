@@ -128,4 +128,27 @@ describe("shadowSnapshot", () => {
       rmSync(bare, { recursive: true, force: true });
     }
   });
+
+  it("excludes node_modules/dist by default even when the repo has NO .gitignore", async () => {
+    // 全新 git 仓库,没有 .gitignore(模拟 ensureGitRepo 后的工作区)
+    const fresh = mkdtempSync(join(tmpdir(), "pc-nm-"));
+    try {
+      git(fresh, "init", "-q", "-b", "main");
+      writeFileSync(join(fresh, "src.ts"), "code\n");
+      mkdirSync(join(fresh, "node_modules", "pkg"), { recursive: true });
+      writeFileSync(join(fresh, "node_modules", "pkg", "index.js"), "junk\n");
+      mkdirSync(join(fresh, "dist"));
+      writeFileSync(join(fresh, "dist", "out.js"), "built\n");
+      writeFileSync(join(fresh, "app.log"), "log\n");
+
+      const snap = await createSnapshot(fresh);
+      const files = git(fresh, "ls-tree", "-r", "--name-only", snap.commit).split("\n");
+      expect(files).toContain("src.ts");
+      expect(files.some((f) => f.startsWith("node_modules/"))).toBe(false);
+      expect(files.some((f) => f.startsWith("dist/"))).toBe(false);
+      expect(files).not.toContain("app.log");
+    } finally {
+      rmSync(fresh, { recursive: true, force: true });
+    }
+  });
 });

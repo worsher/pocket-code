@@ -6,12 +6,50 @@
 
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
-import { mkdir, rm } from "node:fs/promises";
+import { mkdir, rm, readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 
 const exec = promisify(execFile);
 const SNAP_REF = "refs/pocket-code/worktree";
 const MAX_BUFFER = 256 * 1024 * 1024;
+
+// 同步默认忽略:即使工作区没有 .gitignore(如 ensureGitRepo 后的 git init 仓库),
+// 也不把 node_modules/dist 等重目录拉进快照,否则 manifest 会有上千文件导致同步卡死。
+// 写入 .git/info/exclude(不碰用户 .gitignore,二者叠加生效)。
+const DEFAULT_EXCLUDES = [
+  "node_modules/",
+  ".git/",
+  "dist/",
+  "build/",
+  ".next/",
+  ".nuxt/",
+  ".cache/",
+  ".expo/",
+  ".turbo/",
+  "coverage/",
+  "__pycache__/",
+  ".venv/",
+  "venv/",
+  "*.log",
+  ".DS_Store",
+];
+const EXCLUDE_MARKER = "# pocket-code shadow-snapshot defaults";
+
+/** 幂等地把默认忽略写入 .git/info/exclude(保留用户已有内容)。 */
+async function ensureDefaultExcludes(repoDir: string): Promise<void> {
+  const infoDir = join(repoDir, ".git", "info");
+  await mkdir(infoDir, { recursive: true });
+  const excludePath = join(infoDir, "exclude");
+  let current = "";
+  try {
+    current = await readFile(excludePath, "utf-8");
+  } catch {
+    /* 文件不存在,首次写入 */
+  }
+  if (current.includes(EXCLUDE_MARKER)) return; // 已注入,避免重复追加
+  const block = `\n${EXCLUDE_MARKER}\n${DEFAULT_EXCLUDES.join("\n")}\n`;
+  await writeFile(excludePath, current + block, "utf-8");
+}
 
 // commit-tree 需要提交者身份;注入固定身份,使其在未配 user.name/email 的工作区也能工作。
 const IDENTITY_ENV: NodeJS.ProcessEnv = {
@@ -56,6 +94,7 @@ export interface ChangedFile {
  * 捕获已跟踪改动 + 未跟踪非忽略文件;遵守 .gitignore。
  */
 export async function createSnapshot(repoDir: string): Promise<SnapshotResult> {
+  await ensureDefaultExcludes(repoDir);
   const snapDir = join(repoDir, ".git", "pocket-code");
   await mkdir(snapDir, { recursive: true });
   const snapIdx = join(snapDir, "snapidx");
