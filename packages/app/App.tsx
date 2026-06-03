@@ -167,6 +167,35 @@ function MainScreen() {
     return () => subscription.remove();
   }, [needsAutoConnect, isConnected, connect]);
 
+  // 连接相关设置变化(尤其 Relay 重新配对后的 machineId/token)→ 重连,
+  // 让运行中的 WS/RelayClient 用新值重建,而不是沿用构造时固化的旧值
+  // (否则配对后当前会话仍用旧 machineId,要新会话才生效)。
+  const connIdentity = [
+    settings.mode,
+    settings.workspaceMode,
+    settings.cloudServerUrl,
+    settings.toolServerUrl,
+    settings.relayServerUrl,
+    settings.relayToken,
+    settings.relayMachineId,
+    settings.authToken,
+  ].join("|");
+  const connIdentityRef = useRef<string | null>(null);
+  useEffect(() => {
+    if (!settingsLoaded) return;
+    if (connIdentityRef.current === null) {
+      // 首次稳定值:只记录,初次连接由上面的 effect 负责
+      connIdentityRef.current = connIdentity;
+      return;
+    }
+    if (connIdentityRef.current === connIdentity) return;
+    connIdentityRef.current = connIdentity;
+    disconnect();
+    if (needsAutoConnect) {
+      setTimeout(() => connect(), 150);
+    }
+  }, [connIdentity, settingsLoaded, needsAutoConnect, connect, disconnect]);
+
   const scrollToEnd = () => {
     if (messages.length > 0) {
       setTimeout(() => listRef.current?.scrollToEnd({ animated: true }), 100);

@@ -151,11 +151,18 @@ export default function SettingsScreen({ settings, onSave, onClose }: Props) {
             const response = await client.pairDevice(pairingCode);
             
             if (response.success && response.token && response.machineId) {
-                // Success! Save the token and machine ID to draft
+                // Success! 立即持久化(不只是 draft),并让运行中的连接刷新:
+                // onSave 会更新上层 settings,App 监听 relay 身份变化后用新 machineId 重连。
+                const merged: AppSettings = {
+                    ...draft,
+                    relayToken: response.token,
+                    relayMachineId: response.machineId,
+                };
                 updateDraft({
                     relayToken: response.token,
                     relayMachineId: response.machineId,
                 });
+                onSave(merged);
                 Alert.alert("配对成功", `已连接到机器: ${response.machineName || response.machineId}`);
                 setPairingCode("");
             } else {
