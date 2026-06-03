@@ -10,6 +10,7 @@ import { isDockerEnabled, getContainer } from "./docker.js";
 import { initDb, listUserSessions, deleteSession } from "./db.js";
 import { checkQuota, incrementUsage, getUserQuota } from "./resourceLimits.js";
 import { WsMessage } from "@pocket-code/wire";
+import { handleSyncPull, handleSyncFile } from "./sync/syncHandler.js";
 import { rm } from "fs/promises";
 
 // Shared session store — the same Map is used for all handlers
@@ -334,6 +335,33 @@ export function createMessageHandler(
                 success: false,
                 error: err.message,
               });
+            }
+            break;
+          }
+
+          // ── Code sync (shadow snapshot) ──
+          case "sync-pull": {
+            if (!session) {
+              send({ type: "error", error: "No session. Send init first." });
+              return;
+            }
+            try {
+              await handleSyncPull(session.workspace, msg.sinceCommit ?? null, send);
+            } catch (err: any) {
+              send({ type: "error", error: `sync-pull failed: ${err.message}` });
+            }
+            break;
+          }
+
+          case "sync-file": {
+            if (!session) {
+              send({ type: "error", error: "No session. Send init first." });
+              return;
+            }
+            try {
+              await handleSyncFile(session.workspace, msg.commit, msg.path, send);
+            } catch (err: any) {
+              send({ type: "error", error: `sync-file failed: ${err.message}` });
             }
             break;
           }
