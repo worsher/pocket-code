@@ -224,8 +224,35 @@ export function useAgent({ settings, model = "deepseek-v3", customPrompt, projec
     }
   }, []);
 
+  // ── Auto-reconnect ─────────────────────────────────────
+  // 掉线后带指数退避自动重连,直到 disconnect() 主动断开。
+  const shouldConnectRef = useRef(false);
+  const reconnectTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const reconnectAttemptRef = useRef(0);
+  const connectRef = useRef<() => void>(() => {});
+
+  const clearReconnect = useCallback(() => {
+    if (reconnectTimerRef.current) {
+      clearTimeout(reconnectTimerRef.current);
+      reconnectTimerRef.current = null;
+    }
+  }, []);
+
+  const scheduleReconnect = useCallback(() => {
+    if (!shouldConnectRef.current) return;
+    clearReconnect();
+    const delay = Math.min(2000 * Math.pow(2, reconnectAttemptRef.current), 30000);
+    reconnectAttemptRef.current += 1;
+    console.log(`[useAgent] Reconnecting in ${(delay / 1000).toFixed(1)}s`);
+    reconnectTimerRef.current = setTimeout(() => {
+      if (shouldConnectRef.current) connectRef.current();
+    }, delay);
+  }, [clearReconnect]);
+
   // ── WebSocket connection (shared between modes) ───────
   const connect = useCallback(() => {
+    shouldConnectRef.current = true;
+    clearReconnect();
     if (wsRef.current?.readyState === WebSocket.OPEN) return;
 
     console.log("[useAgent] Connecting to:", serverUrlRef.current, "mode:", modeRef.current, "workspaceMode:", workspaceModeRef.current);
@@ -251,6 +278,7 @@ export function useAgent({ settings, model = "deepseek-v3", customPrompt, projec
 
     ws.onopen = () => {
       console.log("[useAgent] WebSocket/Relay connected");
+      reconnectAttemptRef.current = 0; // 连上即重置退避
       setIsConnected(true);
 
       // In Relay Mode, auth/handshake is handled differently via pair-request flow (see settings UI).
@@ -510,19 +538,27 @@ export function useAgent({ settings, model = "deepseek-v3", customPrompt, projec
     ws.onclose = (e: any) => {
       console.log("[useAgent] WebSocket/Relay closed");
       setIsConnected(false);
+      // 非主动断开 → 自动重连(退避)
+      if (shouldConnectRef.current) scheduleReconnect();
     };
 
     ws.onerror = (e: any) => {
       console.error("[useAgent] WebSocket error");
       setIsConnected(false);
+      // onerror 后通常会触发 onclose;由 onclose 统一调度重连
     };
-  }, [getDeviceId, sendInit, replayOfflineQueue]);
+  }, [getDeviceId, sendInit, replayOfflineQueue, clearReconnect, scheduleReconnect]);
+
+  // 让重连定时器拿到最新的 connect
+  connectRef.current = connect;
 
   const disconnect = useCallback(() => {
+    shouldConnectRef.current = false; // 主动断开,停止自动重连
+    clearReconnect();
     abortRef.current?.abort();
     wsRef.current?.close();
     wsRef.current = null;
-  }, []);
+  }, [clearReconnect]);
 
   const stopStreaming = useCallback(() => {
     // Geek mode: abort the AI stream
