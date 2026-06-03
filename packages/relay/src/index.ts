@@ -17,6 +17,7 @@ import {
   forwardPairResponse,
   cleanupStaleDaemons,
 } from "./relay.js";
+import { RequestTracker } from "./requestTracker.js";
 
 const PORT = parseInt(process.env.PORT || "3200", 10);
 const RELAY_SECRET = process.env.RELAY_SECRET || "";
@@ -149,17 +150,17 @@ wss.on("connection", (ws: WebSocket) => {
           if (role !== "daemon" || !msg.requestId) return;
           // We need the appSocket — find it by tracking
           // The relay-request handler stores the appSocket per requestId
-          const appSocket = requestMap.get(msg.requestId);
+          const appSocket = requests.get(msg.requestId);
           if (appSocket) {
             forwardToApp(appSocket, "relay-response", msg.requestId, msg.payload);
-            requestMap.delete(msg.requestId);
+            requests.delete(msg.requestId);
           }
           break;
         }
 
         case "forward-stream": {
           if (role !== "daemon" || !msg.requestId) return;
-          const streamAppSocket = requestMap.get(msg.requestId);
+          const streamAppSocket = requests.get(msg.requestId);
           if (streamAppSocket) {
             forwardToApp(
               streamAppSocket,
@@ -167,11 +168,10 @@ wss.on("connection", (ws: WebSocket) => {
               msg.requestId,
               msg.payload
             );
-            // Don't delete from requestMap — stream has multiple chunks
-            // The "done" payload signals end of stream, cleanup happens via
-            // payload inspection or a timeout
+            // 流有多个分片,不在每片删除;"done" 标志流结束才删,
+            // 其余悬挂请求由 TTL 清理兜底。
             if (msg.payload?.type === "done") {
-              requestMap.delete(msg.requestId);
+              requests.delete(msg.requestId);
             }
           }
           break;
@@ -225,7 +225,7 @@ wss.on("connection", (ws: WebSocket) => {
           }
 
           // Track this request so we can route daemon responses back
-          requestMap.set(msg.requestId, ws);
+          requests.track(msg.requestId, ws);
 
           const forwarded = forwardToDaemon(
             msg.machineId,
@@ -235,7 +235,7 @@ wss.on("connection", (ws: WebSocket) => {
           );
 
           if (!forwarded) {
-            requestMap.delete(msg.requestId);
+            requests.delete(msg.requestId);
             sendJSON(ws, {
               type: "relay-response",
               requestId: msg.requestId,
@@ -268,27 +268,17 @@ wss.on("connection", (ws: WebSocket) => {
     }
     // Cleanup any pending requests from this app socket
     if (role === "app") {
-      for (const [reqId, sock] of requestMap) {
-        if (sock === ws) {
-          requestMap.delete(reqId);
-        }
-      }
+      requests.deleteBySocket(ws);
     }
   });
 });
 
 // ── Request tracking ──────────────────────────────────
-// Maps requestId → App WebSocket, so daemon responses can be routed back.
+// Maps requestId → App WebSocket(带 TTL),so daemon responses can be routed back.
 
-const requestMap = new Map<string, WebSocket>();
+const requests = new RequestTracker<WebSocket>();
 
-// Cleanup stale request mappings every 5 minutes
+// 每 60s 清理:已关闭 socket 或超 TTL 的悬挂请求(修复原内存泄漏)。
 setInterval(() => {
-  // We can't easily know which requests are stale without timestamps,
-  // but closed sockets will be caught here
-  for (const [reqId, sock] of requestMap) {
-    if (sock.readyState !== WebSocket.OPEN) {
-      requestMap.delete(reqId);
-    }
-  }
-}, 5 * 60 * 1000);
+  requests.cleanupStale();
+}, 60 * 1000);
