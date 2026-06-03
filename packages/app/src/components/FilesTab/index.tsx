@@ -19,6 +19,8 @@ interface Props {
   /** 影子快照同步(server/relay 模式从开发机拉代码到手机本地工作区)。 */
   requestSyncPull?: (sinceCommit?: string) => Promise<any>;
   requestSyncFile?: (commit: string, path: string) => Promise<any>;
+  /** agent 是否正在流式输出;用于"一轮结束自动增量同步"(活动文件快路径)。 */
+  isStreaming?: boolean;
   workspaceMode: WorkspaceMode;
   settings: AppSettings;
   projectId?: string;
@@ -41,6 +43,7 @@ export default function FilesTab({
   writeFile,
   requestSyncPull,
   requestSyncFile,
+  isStreaming,
   workspaceMode,
   settings,
   projectId,
@@ -182,6 +185,35 @@ export default function FilesTab({
       }
     })();
   }, [syncAvailable, projectId, requestFileList, doSync]);
+
+  // ── 活动文件快路径 ──
+  // agent 一轮结束(isStreaming true→false)后,若已在浏览本地副本,自动增量同步,
+  // 把开发机的改动很快反映到手机本地视图。用 ref 持有最新条件/动作,effect 只
+  // 依赖 isStreaming,从而仅在流式状态切换时触发、且不读到陈旧闭包。
+  const liveSyncRef = useRef<{ enabled: boolean; run: () => void }>({
+    enabled: false,
+    run: () => {},
+  });
+  liveSyncRef.current = {
+    enabled:
+      browseLocal &&
+      !isLocal &&
+      !!requestSyncPull &&
+      !!requestSyncFile &&
+      !!currentProject?.lastSyncedCommit &&
+      !syncing,
+    run: () => {
+      doSync(true);
+    },
+  };
+  const prevStreamingRef = useRef(isStreaming);
+  useEffect(() => {
+    const justFinished = prevStreamingRef.current && !isStreaming;
+    prevStreamingRef.current = isStreaming;
+    if (justFinished && liveSyncRef.current.enabled) {
+      liveSyncRef.current.run();
+    }
+  }, [isStreaming]);
 
   const MAX_OPEN_FILES = 5;
 

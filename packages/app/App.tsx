@@ -391,6 +391,7 @@ function MainScreen() {
               : undefined}
             requestSyncPull={requestSyncPull}
             requestSyncFile={requestSyncFile}
+            isStreaming={isStreaming}
             workspaceMode={settings.workspaceMode}
             settings={settings}
             projectId={currentProject?.id}
