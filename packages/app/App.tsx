@@ -128,6 +128,8 @@ function MainScreen() {
     newSession,
     requestFileList,
     requestFileContent,
+    requestSyncPull,
+    requestSyncFile,
     deleteProjectWorkspace,
   } = useAgent({ settings, model: currentModel, customPrompt: currentProject?.customPrompt, projectId: currentProject?.id, onFileChanged: handleFileChanged });
 
@@ -358,6 +360,8 @@ function MainScreen() {
             writeFile={isGeek && settings.workspaceMode === "local"
               ? (path: string, content: string) => writeLocalFile(path, content, localWorkspaceRoot)
               : undefined}
+            requestSyncPull={requestSyncPull}
+            requestSyncFile={requestSyncFile}
             workspaceMode={settings.workspaceMode}
             settings={settings}
             projectId={currentProject?.id}

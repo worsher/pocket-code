@@ -489,9 +489,11 @@ export function useAgent({ settings, model = "deepseek-v3", customPrompt, projec
           break;
         }
 
-        // ── File operations ────────────────────────
+        // ── File operations + code sync (matched by _reqId) ──
         case "file-list":
-        case "file-content": {
+        case "file-content":
+        case "sync-manifest":
+        case "sync-file-content": {
           const reqId = data._reqId;
           if (reqId) {
             const resolver = fileResolvers.current.get(reqId);
@@ -620,6 +622,51 @@ export function useAgent({ settings, model = "deepseek-v3", customPrompt, projec
         }, 10000);
 
         ws.send(JSON.stringify({ type: "read-file", path, _reqId: reqId }));
+      });
+    },
+    []
+  );
+
+  // ── Code sync (shadow snapshot) via WebSocket ─────────
+  const requestSyncPull = useCallback(
+    (sinceCommit?: string): Promise<any> => {
+      return new Promise((resolve, reject) => {
+        const ws = wsRef.current;
+        if (!ws || ws.readyState !== WebSocket.OPEN) {
+          reject(new Error("WebSocket not connected"));
+          return;
+        }
+        const reqId = `sp_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+        fileResolvers.current.set(reqId, resolve);
+        setTimeout(() => {
+          if (fileResolvers.current.has(reqId)) {
+            fileResolvers.current.delete(reqId);
+            reject(new Error("Sync pull request timed out"));
+          }
+        }, 30000);
+        ws.send(JSON.stringify({ type: "sync-pull", sinceCommit, _reqId: reqId }));
+      });
+    },
+    []
+  );
+
+  const requestSyncFile = useCallback(
+    (commit: string, path: string): Promise<any> => {
+      return new Promise((resolve, reject) => {
+        const ws = wsRef.current;
+        if (!ws || ws.readyState !== WebSocket.OPEN) {
+          reject(new Error("WebSocket not connected"));
+          return;
+        }
+        const reqId = `sf_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+        fileResolvers.current.set(reqId, resolve);
+        setTimeout(() => {
+          if (fileResolvers.current.has(reqId)) {
+            fileResolvers.current.delete(reqId);
+            reject(new Error("Sync file request timed out"));
+          }
+        }, 30000);
+        ws.send(JSON.stringify({ type: "sync-file", commit, path, _reqId: reqId }));
       });
     },
     []
@@ -1103,6 +1150,8 @@ export function useAgent({ settings, model = "deepseek-v3", customPrompt, projec
     newSession,
     requestFileList,
     requestFileContent,
+    requestSyncPull,
+    requestSyncFile,
     deleteProjectWorkspace,
   };
 }

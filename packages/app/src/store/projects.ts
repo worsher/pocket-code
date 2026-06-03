@@ -14,6 +14,8 @@ export interface Project {
   lastSessionId?: string;
   customPrompt?: string;
   lastSyncTime?: number;
+  /** 上次代码同步到的影子快照 commit(增量同步基准)。 */
+  lastSyncedCommit?: string;
   cloudProjectId?: string;
   createdAt: number;
   updatedAt: number;

@@ -129,6 +129,23 @@ export async function writeLocalFile(
   }
 }
 
+/** Delete a file at a given path (idempotent — missing file is a no-op). */
+export async function deleteLocalFile(
+  relativePath: string,
+  workspaceRoot?: string
+): Promise<{ success: boolean; error?: string }> {
+  try {
+    const root = getWorkspaceDir(workspaceRoot);
+    const file = resolveFile(root, relativePath);
+    if (file.exists) {
+      file.delete();
+    }
+    return { success: true };
+  } catch (err: any) {
+    return { success: false, error: err.message };
+  }
+}
+
 /**
  * Execute a tool locally (for geek mode without tool server).
  * Supports: readFile, writeFile, listFiles, and all git tools.
