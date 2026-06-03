@@ -252,6 +252,15 @@ function handleRelayMessage(msg: any) {
       // Pass the payload to the handler
       entry.handler.onMessage(JSON.stringify(payload)).catch((err: any) => {
         console.error("[Daemon] Error handling forwarded message:", err);
+        // 出错时回 error 响应给 App,避免其挂起等待(审计:原先静默)。
+        const sent = connection.send({
+          type: "forward-response",
+          requestId,
+          payload: { type: "error", error: `Daemon handler error: ${err?.message ?? "unknown"}` },
+        });
+        if (!sent) {
+          console.error("[Daemon] Failed to deliver error response (relay disconnected)");
+        }
       });
       break;
     }
