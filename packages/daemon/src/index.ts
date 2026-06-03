@@ -15,6 +15,7 @@ import {
   getPairingCodeInfo,
 } from "./pairing.js";
 import { loadDevices, getDevices } from "./deviceStore.js";
+import { proxyToLocalhost } from "./tunnel.js";
 import { createMessageHandler, type MessageHandler } from "@pocket-code/server/messageHandler";
 import { initDb } from "@pocket-code/server/db";
 
@@ -251,6 +252,24 @@ function handleRelayMessage(msg: any) {
       // Pass the payload to the handler
       entry.handler.onMessage(JSON.stringify(payload)).catch((err: any) => {
         console.error("[Daemon] Error handling forwarded message:", err);
+      });
+      break;
+    }
+
+    // ── 反向 HTTP 隧道请求 ───────────────────────
+    case "tunnel-request": {
+      proxyToLocalhost(
+        {
+          tunnelId: msg.tunnelId,
+          port: msg.port,
+          method: msg.method,
+          path: msg.path,
+          headers: msg.headers || {},
+          body: msg.body,
+        },
+        (frame) => connection.send(frame)
+      ).catch((err: any) => {
+        connection.send({ type: "tunnel-end", tunnelId: msg.tunnelId, error: err?.message ?? "tunnel error" });
       });
       break;
     }

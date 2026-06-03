@@ -122,6 +122,19 @@ export function forwardToDaemon(
 }
 
 /**
+ * Send a raw object directly to a daemon by machineId (used for tunnel frames).
+ * Returns whether an online daemon was found and the message was sent.
+ */
+export function sendRawToDaemon(machineId: string, obj: unknown): boolean {
+  const daemon = daemons.get(machineId);
+  if (!daemon) {
+    console.log(`[Relay] Daemon not found for tunnel machineId: ${machineId}`);
+    return false;
+  }
+  return sendJSON(daemon.socket, obj);
+}
+
+/**
  * Forward a daemon response/stream back to the App.
  * The appSocket must be passed by the caller (tracked per connection).
  */

@@ -16,12 +16,17 @@ import {
   forwardPairRequest,
   forwardPairResponse,
   cleanupStaleDaemons,
+  sendRawToDaemon,
 } from "./relay.js";
 import { RequestTracker } from "./requestTracker.js";
+import { TunnelHub } from "./tunnelHub.js";
 
 const PORT = parseInt(process.env.PORT || "3200", 10);
 const RELAY_SECRET = process.env.RELAY_SECRET || "";
 const HMAC_TIME_WINDOW_MS = 5 * 60 * 1000; // 5 minutes for replay prevention
+
+// ── 反向 HTTP 隧道枢纽(关联 http 请求与 tunnelId) ──
+const tunnelHub = new TunnelHub();
 
 // ── HTTP Server (health check only) ──────────────────
 
@@ -40,6 +45,36 @@ const httpServer = createServer(
           machines: getOnlineMachines().length,
         })
       );
+      return;
+    }
+
+    // ── 反向 HTTP 隧道: /t/<machineId>/<port>/<rest> ──
+    const tunnelMatch = url.pathname.match(/^\/t\/([^/]+)\/(\d+)(\/.*)?$/);
+    if (tunnelMatch) {
+      const [, machineId, portStr, rest] = tunnelMatch;
+      const port = parseInt(portStr, 10);
+      const tunnelId = crypto.randomUUID();
+      const headers: Record<string, string> = {};
+      for (const [k, v] of Object.entries(req.headers)) {
+        if (typeof v === "string") headers[k] = v;
+        else if (Array.isArray(v)) headers[k] = v.join(", ");
+      }
+      const chunks: Buffer[] = [];
+      req.on("data", (c) => chunks.push(c as Buffer));
+      req.on("end", () => {
+        const body = chunks.length ? Buffer.concat(chunks).toString("base64") : undefined;
+        tunnelHub.open(tunnelId, res);
+        const ok = sendRawToDaemon(machineId, {
+          type: "tunnel-request",
+          tunnelId,
+          port,
+          method: req.method || "GET",
+          path: (rest || "/") + (url.search || ""),
+          headers,
+          body,
+        });
+        if (!ok) tunnelHub.onEnd(tunnelId, `daemon ${machineId} offline`);
+      });
       return;
     }
 
@@ -184,6 +219,23 @@ wss.on("connection", (ws: WebSocket) => {
           break;
         }
 
+        // ── Daemon 隧道回帧(route to TunnelHub) ──────
+        case "tunnel-response": {
+          if (role !== "daemon" || !msg.tunnelId) return;
+          tunnelHub.onResponse(msg.tunnelId, msg.status, msg.headers || {});
+          break;
+        }
+        case "tunnel-chunk": {
+          if (role !== "daemon" || !msg.tunnelId) return;
+          tunnelHub.onChunk(msg.tunnelId, msg.data);
+          break;
+        }
+        case "tunnel-end": {
+          if (role !== "daemon" || !msg.tunnelId) return;
+          tunnelHub.onEnd(msg.tunnelId, msg.error);
+          break;
+        }
+
         // ── App: list online machines ────────────────
         case "list-machines": {
           role = "app";
@@ -265,6 +317,8 @@ wss.on("connection", (ws: WebSocket) => {
     console.log(`[Relay] Connection closed (role: ${role})`);
     if (role === "daemon") {
       unregisterDaemon(ws);
+      // 中止该 daemon 相关隧道(简单起见全部中止;精确按 machineId 关联后续优化)。
+      tunnelHub.abortAll(`daemon offline`);
     }
     // Cleanup any pending requests from this app socket
     if (role === "app") {
