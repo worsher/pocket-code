@@ -100,4 +100,19 @@ describe("wire — WsMessage validation", () => {
     const result = WsMessage.safeParse(null);
     expect(result.success).toBe(false);
   });
+
+  it("should accept valid sync-pull (with and without sinceCommit)", () => {
+    expect(WsMessage.safeParse({ type: "sync-pull" }).success).toBe(true);
+    expect(WsMessage.safeParse({ type: "sync-pull", sinceCommit: "abc123" }).success).toBe(true);
+  });
+
+  it("should accept valid sync-file", () => {
+    const r = WsMessage.safeParse({ type: "sync-file", commit: "deadbeef", path: "src/a.ts" });
+    expect(r.success).toBe(true);
+  });
+
+  it("should reject sync-file without commit/path", () => {
+    expect(WsMessage.safeParse({ type: "sync-file", path: "a" }).success).toBe(false);
+    expect(WsMessage.safeParse({ type: "sync-file", commit: "x" }).success).toBe(false);
+  });
 });

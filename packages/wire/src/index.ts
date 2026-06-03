@@ -14,6 +14,8 @@ export {
   DeleteProjectWorkspaceMessage,
   GetQuotaMessage,
   AbortMessage,
+  SyncPullMessage,
+  SyncFileMessage,
   WsMessage,
   type WsMessageType,
 } from "./messages.js";

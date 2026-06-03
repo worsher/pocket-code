@@ -118,6 +118,17 @@ export const AbortMessage = z.object({
   type: z.literal("abort"),
 });
 
+export const SyncPullMessage = z.object({
+  type: z.literal("sync-pull"),
+  sinceCommit: optStr(64),
+});
+
+export const SyncFileMessage = z.object({
+  type: z.literal("sync-file"),
+  commit: z.string().min(1).max(64),
+  path: z.string().min(1).max(2048),
+});
+
 /** Discriminated union of all valid business messages */
 export const WsMessage = z.discriminatedUnion("type", [
   RegisterMessage,
@@ -131,6 +142,8 @@ export const WsMessage = z.discriminatedUnion("type", [
   DeleteProjectWorkspaceMessage,
   GetQuotaMessage,
   AbortMessage,
+  SyncPullMessage,
+  SyncFileMessage,
 ]);
 
 export type WsMessageType = z.infer<typeof WsMessage>;
