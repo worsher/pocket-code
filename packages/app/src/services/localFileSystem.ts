@@ -1,4 +1,5 @@
 import { Paths, File, Directory } from "expo-file-system";
+import * as LegacyFS from "expo-file-system/legacy";
 import { exec as localExec, startBackgroundExec } from "./localExecutor";
 import { killProcess } from "./processManager";
 import type { AppSettings } from "../store/settings";
@@ -123,6 +124,34 @@ export async function writeLocalFile(
       file.create({ intermediates: true, overwrite: true });
     }
     file.write(content);
+    return { success: true };
+  } catch (err: any) {
+    return { success: false, error: err.message };
+  }
+}
+
+/**
+ * Write base64-encoded content to a file, decoding to raw bytes.
+ * 二进制安全(图片等)与文本均正确——直接写解码后的字节,不经 utf-8。
+ * 用于代码同步(sync-file-content 是 base64)。
+ */
+export async function writeLocalFileBase64(
+  relativePath: string,
+  base64: string,
+  workspaceRoot?: string
+): Promise<{ success: boolean; error?: string }> {
+  try {
+    const root = getWorkspaceDir(workspaceRoot);
+    ensureWorkspace(root);
+
+    const file = resolveFile(root, relativePath);
+    const parentDir = file.parentDirectory;
+    if (!parentDir.exists) {
+      parentDir.create({ idempotent: true });
+    }
+    await LegacyFS.writeAsStringAsync(file.uri, base64, {
+      encoding: LegacyFS.EncodingType.Base64,
+    });
     return { success: true };
   } catch (err: any) {
     return { success: false, error: err.message };

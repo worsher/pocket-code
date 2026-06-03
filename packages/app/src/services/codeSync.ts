@@ -3,9 +3,8 @@
 // base64 内容写入,对 D 文件删除。requestSyncPull/requestSyncFile 由 useAgent
 // 提供(内部走 WS 直连或 relay,按 _reqId 关联响应),本服务只做编排,便于复用。
 
-import { Buffer } from "buffer";
 import {
-  writeLocalFile,
+  writeLocalFileBase64,
   deleteLocalFile,
   getProjectWorkspaceRoot,
   getDefaultWorkspace,
@@ -75,9 +74,8 @@ export async function pullFromDevMachine(deps: PullDeps): Promise<PullResult> {
         failed.push(f.path);
         continue;
       }
-      // sync-file-content 为 base64;解码为 utf-8 文本(源码场景)后写入。
-      const text = Buffer.from(res.content, "base64").toString("utf-8");
-      const w = await writeLocalFile(f.path, text, workspaceRoot);
+      // sync-file-content 为 base64;直接写解码字节(文本+二进制均正确)。
+      const w = await writeLocalFileBase64(f.path, res.content, workspaceRoot);
       if (w.success) {
         applied++;
         onProgress?.(`✓ ${f.path}`);

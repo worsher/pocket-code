@@ -7,7 +7,7 @@ import FileTabBar from "./components/FileTabBar";
 import type { FileItem } from "../../hooks/useFileTree";
 import type { WorkspaceMode, AppSettings } from "../../store/settings";
 import { syncRemoteToLocal } from "../../services/workspaceSync";
-import { getProjectWorkspaceRoot } from "../../services/localFileSystem";
+import { getProjectWorkspaceRoot, listLocalFiles, readLocalFile } from "../../services/localFileSystem";
 import { pullFromDevMachine } from "../../services/codeSync";
 import { useWorkspace } from "../../contexts/WorkspaceContext";
 import { useProject } from "../../contexts/ProjectContext";
@@ -54,6 +54,8 @@ export default function FilesTab({
   const [refreshKey, setRefreshKey] = useState(0);
   const [syncing, setSyncing] = useState(false);
   const [syncMessage, setSyncMessage] = useState<string | undefined>();
+  // 影子同步成功后浏览手机本地副本(而非远端),让同步的文件在 UI 可见。
+  const [browseLocal, setBrowseLocal] = useState(false);
 
   // Track which projects have already been auto-sync checked
   const autoSyncChecked = useRef<Set<string>>(new Set());
@@ -82,6 +84,18 @@ export default function FilesTab({
     [projectId]
   );
 
+  // 浏览源:browseLocal(影子同步后)用手机本地副本,否则用传入的远端/本地函数。
+  const effectiveRequestFileList = useCallback(
+    (path: string) =>
+      browseLocal ? listLocalFiles(path, localWorkspaceRoot) : requestFileList(path),
+    [browseLocal, localWorkspaceRoot, requestFileList]
+  );
+  const effectiveRequestFileContent = useCallback(
+    (path: string) =>
+      browseLocal ? readLocalFile(path, localWorkspaceRoot) : requestFileContent(path),
+    [browseLocal, localWorkspaceRoot, requestFileContent]
+  );
+
   const doSync = useCallback(async (silent: boolean = false) => {
     if (!projectId) return false;
     setSyncing(true);
@@ -102,6 +116,7 @@ export default function FilesTab({
             lastSyncTime: Date.now(),
           });
           setLastSyncTime(Date.now());
+          setBrowseLocal(true); // 同步后浏览本地副本
           setRefreshKey((k) => k + 1);
         }
         if (!silent) {
@@ -248,7 +263,7 @@ export default function FilesTab({
           />
           <FileTreeView
             key={refreshKey}
-            requestFileList={requestFileList}
+            requestFileList={effectiveRequestFileList}
             onFilePress={handleFilePress}
             searchQuery={searchQuery || undefined}
           />
@@ -263,7 +278,7 @@ export default function FilesTab({
           />
           <InlineFileViewer
             file={selectedFile}
-            requestFileContent={requestFileContent}
+            requestFileContent={effectiveRequestFileContent}
             onBack={handleBack}
             editable={isEditable}
             onSave={writeFile}
