@@ -69,8 +69,6 @@ export interface TunnelWsOpenRequest {
 
 /** tunnelId → 本地 ws 连接 */
 const wsTunnels = new Map<string, WebSocket>();
-/** tunnelId → 对应的 emit 函数 */
-const wsEmits = new Map<string, (frame: unknown) => void>();
 
 /** ws.close() 只接受合法关闭码;帧里的原始码在调用前夹紧。 */
 export function clampCloseCode(code?: number): number {
@@ -92,7 +90,6 @@ export function openLocalWebSocket(
 
   const ws = new WebSocket(`ws://127.0.0.1:${req.port}${req.path}`, protocols, { headers });
   wsTunnels.set(req.tunnelId, ws);
-  wsEmits.set(req.tunnelId, emit);
 
   ws.on("open", () => {
     emit({ type: "tunnel-ws-opened", tunnelId: req.tunnelId, protocol: ws.protocol || undefined });
@@ -105,8 +102,8 @@ export function openLocalWebSocket(
     );
   });
   ws.on("close", (code: number, reason: Buffer) => {
+    // relay 主动关闭(onWsTunnelClose 已先删条目)时 delete 返回 false → 不回发,防回环帧
     if (wsTunnels.delete(req.tunnelId)) {
-      wsEmits.delete(req.tunnelId);
       emit({
         type: "tunnel-ws-close",
         tunnelId: req.tunnelId,
@@ -132,26 +129,15 @@ export function onWsTunnelData(tunnelId: string, data: string, binary?: boolean)
   ws.send(binary ? Buffer.from(data, "base64") : data);
 }
 
-/** relay 来的关闭指令(浏览器侧已关) */
+/** relay 来的关闭指令(浏览器侧已关):先删后关,不回发 close 帧(防回环) */
 export function onWsTunnelClose(tunnelId: string, code?: number, reason?: string): void {
   const ws = wsTunnels.get(tunnelId);
   if (!ws) return;
   wsTunnels.delete(tunnelId);
-  const emit = wsEmits.get(tunnelId);
-  wsEmits.delete(tunnelId);
   try {
     ws.close(clampCloseCode(code), reason);
   } catch {
     ws.terminate();
-  }
-  // 发送 close 帧,避免依赖异步 close 事件的时序
-  if (emit) {
-    emit({
-      type: "tunnel-ws-close",
-      tunnelId,
-      code: clampCloseCode(code),
-      reason: reason ? reason.slice(0, 512) : undefined,
-    });
   }
 }
 
