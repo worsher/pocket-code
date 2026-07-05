@@ -100,3 +100,20 @@ export {
   type RelayInboundType,
   type DaemonInboundType,
 } from "./inbound.js";
+
+// Server outbound responses (P6b: control-response contracts)
+export {
+  AuthMsg,
+  SessionMsg,
+  QuotaMsg,
+  FileListMsg,
+  FileContentMsg,
+  SyncManifestMsg,
+  SyncFileContentMsg,
+  SessionsListMsg,
+  SessionDeletedMsg,
+  ProjectWorkspaceDeletedMsg,
+  ServerErrorMsg,
+  ServerOutbound,
+  type ServerOutboundType,
+} from "./serverOutbound.js";
