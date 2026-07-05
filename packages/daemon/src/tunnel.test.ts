@@ -130,7 +130,7 @@ function collectFrames() {
 describe("WS tunnel (daemon side)", () => {
   it("opens local ws, emits opened, round-trips text and binary", async () => {
     const srv = await startEchoServer();
-    const { emit, waitFor } = collectFrames();
+    const { frames, emit, waitFor } = collectFrames();
     try {
       openLocalWebSocket({ tunnelId: "ws_t1", port: srv.port, path: "/", headers: {} }, emit);
       await waitFor((f) => f.type === "tunnel-ws-opened" && f.tunnelId === "ws_t1");
@@ -143,8 +143,17 @@ describe("WS tunnel (daemon side)", () => {
       const echoBin = await waitFor((f) => f.type === "tunnel-ws-data" && f.binary === true);
       expect(Buffer.from(echoBin.data, "base64")).toEqual(Buffer.from([1, 2, 3]));
 
+      // relay 主动关闭:本地连接关闭且不回发 close 帧(先删后关,防回环)
       onWsTunnelClose("ws_t1", 1000, "bye");
-      await waitFor((f) => f.type === "tunnel-ws-close" && f.tunnelId === "ws_t1");
+      await new Promise<void>((resolve, reject) => {
+        const t0 = Date.now();
+        const iv = setInterval(() => {
+          if (srv.wss.clients.size === 0) { clearInterval(iv); resolve(); }
+          else if (Date.now() - t0 > 3000) { clearInterval(iv); reject(new Error("server client not closed")); }
+        }, 10);
+      });
+      await new Promise((r) => setTimeout(r, 50)); // 留出误发帧的窗口
+      expect(frames.some((f: any) => f.type === "tunnel-ws-close")).toBe(false);
     } finally {
       srv.close();
     }

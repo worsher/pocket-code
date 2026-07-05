@@ -147,5 +147,4 @@ export function closeAllWsTunnels(): void {
     try { ws.terminate(); } catch { /* ignore */ }
   }
   wsTunnels.clear();
-  wsEmits.clear();
 }
