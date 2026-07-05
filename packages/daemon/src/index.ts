@@ -19,7 +19,7 @@ import { proxyToLocalhost } from "./tunnel.js";
 import { createMessageHandler, type MessageHandler } from "@pocket-code/server/messageHandler";
 import { initDb } from "@pocket-code/server/db";
 import { requireRelaySecret } from "./config.js";
-import type { DaemonInboundType } from "@pocket-code/wire";
+import type { DaemonInboundType, ServerOutboundType } from "@pocket-code/wire";
 
 // ── Configuration ─────────────────────────────────────
 
@@ -236,7 +236,7 @@ function handleRelayMessage(msg: DaemonInboundType) {
           currentRequestId: requestId,
         };
 
-        const sendFn = (data: any) => {
+        const sendFn = (data: ServerOutboundType) => {
           // Dynamically use the current requestId from the entry
           connection.send({
             type: "forward-stream",

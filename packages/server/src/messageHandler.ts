@@ -43,10 +43,12 @@ export interface MessageHandlerOptions {
  *
  * @param send - Callback to send a response back to the client.
  *               The handler doesn't care if this goes to a direct WS or through a relay.
+ *               Typed as ServerOutboundType so every construction site is checked
+ *               against the wire contract at compile time.
  * @param options - Optional configuration including pre-injected auth.
  */
 export function createMessageHandler(
-  send: (data: unknown) => void,
+  send: (data: ServerOutboundType) => void,
   options?: MessageHandlerOptions
 ): MessageHandler {
   let session: AgentSession | null = null;
@@ -198,7 +200,7 @@ export function createMessageHandler(
             if (auth) {
               const quotaCheck = checkQuota(auth.userId, "api_call");
               if (!quotaCheck.allowed) {
-                send({ type: "error", error: quotaCheck.reason });
+                send({ type: "error", error: quotaCheck.reason || "Quota exceeded." });
                 send({ type: "done" });
                 return;
               }
@@ -237,7 +239,13 @@ export function createMessageHandler(
               return;
             }
             const quota = getUserQuota(auth.userId);
-            send({ type: "quota", ...quota });
+            send({
+              type: "quota",
+              userId: quota.userId,
+              tier: quota.tier,
+              limits: quota.limits as unknown as Record<string, unknown>,
+              usage: quota.usage as unknown as Record<string, unknown>,
+            });
             break;
           }
 
@@ -285,8 +293,8 @@ export function createMessageHandler(
                 type: "file-list",
                 path: msg.path || ".",
                 _reqId: msg._reqId,
-                ...result,
-              });
+                ...(result as Record<string, unknown>),
+              } as ServerOutboundType);
             } catch (err: any) {
               send({
                 type: "file-list",
@@ -316,8 +324,8 @@ export function createMessageHandler(
                 type: "file-content",
                 path: msg.path,
                 _reqId: msg._reqId,
-                ...result,
-              });
+                ...(result as Record<string, unknown>),
+              } as ServerOutboundType);
             } catch (err: any) {
               send({
                 type: "file-content",
@@ -370,7 +378,10 @@ export function createMessageHandler(
               msg.limit || 50,
               projectFilter
             );
-            send({ type: "sessions-list", sessions: userSessions });
+            send({
+              type: "sessions-list",
+              sessions: userSessions as unknown as Record<string, unknown>[],
+            });
             break;
           }
 

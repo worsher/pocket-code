@@ -30,7 +30,7 @@ export async function ensureGitRepo(workspace: string): Promise<void> {
 export async function handleSyncPull(
   workspace: string,
   sinceCommit: string | null,
-  send: (msg: unknown) => void,
+  send: (msg: ServerOutboundType) => void,
   reqId?: string
 ): Promise<void> {
   await ensureGitRepo(workspace);
@@ -51,7 +51,7 @@ export async function handleSyncFile(
   workspace: string,
   commit: string,
   path: string,
-  send: (msg: unknown) => void,
+  send: (msg: ServerOutboundType) => void,
   reqId?: string
 ): Promise<void> {
   try {
