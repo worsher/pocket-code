@@ -187,4 +187,15 @@ describe("WS tunnel (daemon side)", () => {
     expect(clampCloseCode(undefined)).toBe(1000);
     expect(clampCloseCode(99)).toBe(1000);
   });
+
+  it("onWsTunnelClose deletes the tunnel entry immediately (repeat call is a no-op)", async () => {
+    const srv = await startEchoServer();
+    const { emit, waitFor } = collectFrames();
+    openLocalWebSocket({ tunnelId: "ws_t5", port: srv.port, path: "/", headers: {} }, emit);
+    await waitFor((f) => f.type === "tunnel-ws-opened");
+    onWsTunnelClose("ws_t5", 1000);
+    expect(() => onWsTunnelClose("ws_t5", 1000)).not.toThrow(); // 条目已删,直接 return
+    expect(() => onWsTunnelData("ws_t5", "x")).not.toThrow();
+    srv.close();
+  });
 });
