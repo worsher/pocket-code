@@ -250,7 +250,9 @@ export function useAgent({ settings, model = "deepseek-v3", customPrompt, projec
         const localResult = await executeLocalTool(toolName, args, settingsRef.current);
         if (localResult !== null) return localResult;
       }
-      return conn.execTool(toolName, args); // Termux 或 runCommand 回退
+      const result = await conn.execTool(toolName, args); // Termux 或 runCommand 回退
+      if (toolName === "runCommand") notifyRunCommand(result);
+      return result;
     },
     [conn]
   );
