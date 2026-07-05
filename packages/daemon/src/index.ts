@@ -18,6 +18,8 @@ import { loadDevices, getDevices } from "./deviceStore.js";
 import { proxyToLocalhost } from "./tunnel.js";
 import { createMessageHandler, type MessageHandler } from "@pocket-code/server/messageHandler";
 import { initDb } from "@pocket-code/server/db";
+import { requireRelaySecret } from "./config.js";
+import type { DaemonInboundType } from "@pocket-code/wire";
 
 // ── Configuration ─────────────────────────────────────
 
@@ -50,6 +52,14 @@ function loadOrGenerateMachineId(): string {
 }
 
 const MACHINE_ID = loadOrGenerateMachineId();
+
+let RELAY_SECRET: string;
+try {
+  RELAY_SECRET = requireRelaySecret();
+} catch (err: any) {
+  console.error(`[Daemon] 启动失败:${err.message}`);
+  process.exit(1);
+}
 
 // ── Initialize ────────────────────────────────────────
 
@@ -109,6 +119,7 @@ const connection = new RelayConnection({
   relayUrl: RELAY_URL,
   machineId: MACHINE_ID,
   machineName: MACHINE_NAME,
+  relaySecret: RELAY_SECRET,
 
   onConnected() {
     console.log("[Daemon] Registered with relay. Waiting for connections...");
@@ -118,7 +129,7 @@ const connection = new RelayConnection({
     console.log("[Daemon] Lost connection to relay.");
   },
 
-  onMessage(msg: any) {
+  onMessage(msg: DaemonInboundType) {
     handleRelayMessage(msg);
   },
 });
@@ -152,7 +163,7 @@ setInterval(() => {
 
 // ── Message Handler ───────────────────────────────────
 
-function handleRelayMessage(msg: any) {
+function handleRelayMessage(msg: DaemonInboundType) {
   switch (msg.type) {
     case "daemon-registered": {
       console.log("[Daemon] Registration confirmed by relay");
@@ -289,7 +300,8 @@ function handleRelayMessage(msg: any) {
     }
 
     default: {
-      console.log("[Daemon] Unknown message from relay:", msg.type);
+      // DaemonInbound 已穷尽;此分支仅为将来 wire 扩展时的兜底日志
+      console.log("[Daemon] Unhandled message from relay:", (msg as { type: string }).type);
     }
   }
 }

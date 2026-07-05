@@ -4,12 +4,16 @@
 
 import { WebSocket } from "ws";
 import crypto from "crypto";
+import type { DaemonInboundType } from "@pocket-code/wire";
+import { parseRelayMessage } from "./inbound.js";
 
 export interface ConnectionOptions {
   relayUrl: string;
   machineId: string;
   machineName: string;
-  onMessage: (msg: any) => void;
+  /** 与 relay 共享的注册密钥(必填,启动时已校验) */
+  relaySecret: string;
+  onMessage: (msg: DaemonInboundType) => void;
   onConnected: () => void;
   onDisconnected: () => void;
 }
@@ -69,25 +73,19 @@ export class RelayConnection {
       console.log("[Daemon] Connected to relay");
       this.reconnectAttempt = 0;
 
-      // Register with the relay (include HMAC if RELAY_SECRET is configured)
-      const registerMsg: Record<string, unknown> = {
+      // Register with the relay (HMAC computed with the shared relay secret)
+      const timestamp = Date.now();
+      const hmac = crypto
+        .createHmac("sha256", this.opts.relaySecret)
+        .update(this.opts.machineId + timestamp)
+        .digest("hex");
+      this.send({
         type: "daemon-register",
         machineId: this.opts.machineId,
         machineName: this.opts.machineName,
-      };
-
-      const relaySecret = process.env.RELAY_SECRET;
-      if (relaySecret) {
-        const timestamp = Date.now();
-        const hmac = crypto
-          .createHmac("sha256", relaySecret)
-          .update(this.opts.machineId + timestamp)
-          .digest("hex");
-        registerMsg.authToken = hmac;
-        registerMsg.timestamp = timestamp;
-      }
-
-      this.send(registerMsg);
+        authToken: hmac,
+        timestamp,
+      });
 
       // Start heartbeat
       this.heartbeatTimer = setInterval(() => {
@@ -102,12 +100,8 @@ export class RelayConnection {
     });
 
     this.ws.on("message", (raw: Buffer) => {
-      try {
-        const msg = JSON.parse(raw.toString());
-        this.opts.onMessage(msg);
-      } catch (err: any) {
-        console.error("[Daemon] Failed to parse relay message:", err.message);
-      }
+      const msg = parseRelayMessage(raw.toString());
+      if (msg) this.opts.onMessage(msg);
     });
 
     this.ws.on("close", (code: number, reason: Buffer) => {
