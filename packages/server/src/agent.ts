@@ -8,6 +8,8 @@ import { mkdir } from "fs/promises";
 import { saveSession, getSession } from "./db.js";
 import { analyzePrompt } from "./modelRouter.js";
 import { runClaudeCodeAgent, runGeminiCliAgent } from "./cliRunner.js";
+import type { AgentEventType } from "@pocket-code/wire";
+import { mapAiSdkPart, type AiStreamPartLike } from "./aiSdkEvents.js";
 
 export type ModelProvider = "anthropic" | "openai" | "google" | "siliconflow" | "iflow" | "cli-claude" | "cli-gemini";
 
@@ -142,17 +144,6 @@ export async function createSession(
   };
 }
 
-export type StreamEvent =
-  | { type: "text-delta"; text: string }
-  | { type: "reasoning-delta"; text: string }
-  | { type: "model-selected"; model: string; reason: string }
-  | { type: "tool-call"; toolName: string; args: unknown }
-  | { type: "tool-result"; toolName: string; result: unknown }
-  | { type: "file-changed"; path: string; action: "created" | "modified" | "deleted" }
-  | { type: "usage"; promptTokens: number; completionTokens: number; totalTokens: number }
-  | { type: "error"; error: string }
-  | { type: "done" };
-
 export interface ImageData {
   base64: string;
   mimeType: string;
@@ -161,7 +152,7 @@ export interface ImageData {
 export async function runAgent(
   session: AgentSession,
   userMessage: string,
-  onEvent: (event: StreamEvent) => void,
+  onEvent: (event: AgentEventType) => void,
   signal?: AbortSignal,
   images?: ImageData[]
 ): Promise<void> {
@@ -201,7 +192,7 @@ export async function runAgent(
   if (session.modelKey === "auto") {
     const analysis = analyzePrompt(userMessage, session.messages, !!images?.length);
     effectiveModelKey = analysis.suggestedModel;
-    onEvent({ type: "model-selected", model: effectiveModelKey, reason: analysis.reason });
+    onEvent({ type: "model-selected", modelKey: effectiveModelKey, reason: analysis.reason });
     console.log(`[Router] auto → ${effectiveModelKey} (${analysis.reason})`);
   }
 
@@ -231,37 +222,8 @@ export async function runAgent(
     let fullText = "";
 
     for await (const part of result.fullStream) {
-      switch (part.type) {
-        case "text-delta":
-          fullText += part.textDelta;
-          onEvent({ type: "text-delta", text: part.textDelta });
-          break;
-
-        case "reasoning":
-          onEvent({ type: "reasoning-delta", text: (part as any).textDelta || "" });
-          break;
-
-        case "tool-call":
-          onEvent({ type: "tool-call", toolName: part.toolName, args: part.args });
-          break;
-
-        case "tool-result":
-          onEvent({ type: "tool-result", toolName: part.toolName, result: part.result });
-          // Notify client about file changes for real-time sync
-          if ((part.toolName === "writeFile" || part.toolName === "editFile") && (part.result as any)?.success) {
-            const r = part.result as any;
-            onEvent({
-              type: "file-changed",
-              path: r.path,
-              action: r.isNew ? "created" : "modified",
-            });
-          }
-          break;
-
-        case "error":
-          onEvent({ type: "error", error: String(part.error) });
-          break;
-      }
+      if (part.type === "text-delta") fullText += part.textDelta;
+      for (const ev of mapAiSdkPart(part as AiStreamPartLike)) onEvent(ev);
     }
 
     // Use the SDK's response messages which include tool calls and results,
@@ -283,9 +245,8 @@ export async function runAgent(
       if (usage) {
         onEvent({
           type: "usage",
-          promptTokens: usage.promptTokens || 0,
-          completionTokens: usage.completionTokens || 0,
-          totalTokens: (usage.promptTokens || 0) + (usage.completionTokens || 0),
+          inputTokens: usage.promptTokens || 0,
+          outputTokens: usage.completionTokens || 0,
         });
       }
     } catch {
@@ -297,7 +258,7 @@ export async function runAgent(
     console.error("[Agent] Error:", err.message);
     // Still persist what we have
     saveSession(session.sessionId, session.userId, session.messages, session.modelKey, session.projectId);
-    onEvent({ type: "error", error: err.message });
+    onEvent({ type: "error", message: err.message });
     onEvent({ type: "done" });
   }
 }

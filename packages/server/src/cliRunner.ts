@@ -3,39 +3,34 @@
  * 通过已安装的 CLI 工具（Claude Code / Gemini CLI）运行 AI Agent。
  * 适用于在服务器上使用 Pro 订阅额度、无需消耗 API Key 的场景。
  *
- * claude 路径已重构为复用 cli/ 下的 CliAgentAdapter + runCliAgent + 桥接;
- * gemini 路径暂保持原样(后续接入适配器)。
+ * claude 路径复用 cli/ 下的 CliAgentAdapter + runCliAgent,直接产出归一化 AgentEvent;
+ * gemini 路径在本文件内解析 stream-json 并同样归一化为 AgentEvent。
  */
 import { spawn } from "child_process";
-import type { AgentSession, StreamEvent } from "./agent.js";
+import type { AgentSession } from "./agent.js";
 import { claudeCodeAdapter } from "./cli/claudeCode.js";
 import { runCliAgent, killProcessTree } from "./cli/runner.js";
-import { createAgentEventToStreamEvent } from "./cli/bridge.js";
+import type { AgentEventType } from "@pocket-code/wire";
 
 // ── Claude Code CLI Runner ────────────────────────────────
 
 /**
- * 使用 claude CLI 运行:经 claudeCodeAdapter 解析为归一化 AgentEvent,
- * 再桥接回旧 StreamEvent 发给调用方(messageHandler/App 暂不变)。
+ * 使用 claude CLI 运行:经 claudeCodeAdapter 解析为归一化 AgentEvent,直接透传给调用方。
  * 服务器上需全局安装并认证:npm install -g @anthropic-ai/claude-code
  */
 export async function runClaudeCodeAgent(
   session: AgentSession,
   userMessage: string,
-  onEvent: (event: StreamEvent) => void,
+  onEvent: (event: AgentEventType) => void,
   signal?: AbortSignal
 ): Promise<void> {
   console.log(`[CLI] Claude Code: workspace=${session.workspace}, msg="${userMessage.slice(0, 80)}"`);
 
-  const toStream = createAgentEventToStreamEvent();
   const fullText = await runCliAgent(
     claudeCodeAdapter,
     userMessage,
     { workspace: session.workspace, customPrompt: session.customPrompt },
-    (ev) => {
-      const se = toStream(ev);
-      if (se) onEvent(se);
-    },
+    onEvent,
     signal
   );
 
@@ -77,7 +72,7 @@ interface GeminiStreamLine {
 export async function runGeminiCliAgent(
   session: AgentSession,
   userMessage: string,
-  onEvent: (event: StreamEvent) => void,
+  onEvent: (event: AgentEventType) => void,
   signal?: AbortSignal
 ): Promise<void> {
   const geminiPath = process.env.GEMINI_CLI_PATH || "gemini";
@@ -131,6 +126,7 @@ export async function runGeminiCliAgent(
 
   let fullText = "";
   let lineBuffer = "";
+  const parseLine = createGeminiLineParser();
 
   return new Promise<void>((resolve) => {
     proc.stdout.on("data", (chunk: Buffer) => {
@@ -155,7 +151,7 @@ export async function runGeminiCliAgent(
       }
       if (code !== 0 && !signal?.aborted) {
         console.error(`[CLI] Gemini CLI exited with code ${code}`);
-        onEvent({ type: "error", error: `Gemini CLI 进程异常退出 (code=${code})` });
+        onEvent({ type: "error", message: `Gemini CLI 进程异常退出 (code=${code})` });
       }
       session.messages.push({ role: "assistant", content: fullText || "(Gemini CLI completed)" });
       onEvent({ type: "done" });
@@ -166,7 +162,7 @@ export async function runGeminiCliAgent(
       console.error("[CLI] Failed to start Gemini CLI:", err.message);
       onEvent({
         type: "error",
-        error: `无法启动 Gemini CLI: ${err.message}。请确认已安装: npm install -g @google/gemini-cli`,
+        message: `无法启动 Gemini CLI: ${err.message}。请确认已安装: npm install -g @google/gemini-cli`,
       });
       onEvent({ type: "done" });
       resolve();
@@ -174,49 +170,59 @@ export async function runGeminiCliAgent(
   });
 }
 
-function parseLine(
+/** gemini stream-json 行解析器(工厂:内部维护合成 callId 计数)。 */
+export function createGeminiLineParser(): (
   line: string,
-  onEvent: (e: StreamEvent) => void,
+  onEvent: (e: AgentEventType) => void,
   appendText: (t: string) => void
-) {
-  const trimmed = line.trim();
-  if (!trimmed) return;
-  let evt: GeminiStreamLine;
-  try {
-    evt = JSON.parse(trimmed);
-  } catch {
-    // 非 JSON 行（如 ANSI 彩色文本）直接忽略
-    return;
-  }
-  switch (evt.type) {
-    case "init":
-      console.log(`[CLI] Gemini session=${evt.session_id}, model=${evt.model}`);
-      break;
-    case "message":
-      if (evt.role === "assistant" && evt.content) {
-        appendText(evt.content);
-        onEvent({ type: "text-delta", text: evt.content });
-      }
-      break;
-    case "tool_use":
-      if (evt.tool_name) {
-        onEvent({ type: "tool-call", toolName: evt.tool_name, args: evt.parameters ?? {} });
-      }
-      break;
-    case "tool_result":
-      if (evt.tool_id) {
-        onEvent({ type: "tool-result", toolName: evt.tool_id, result: evt.output ?? {} });
-      }
-      break;
-    case "result":
-      if (evt.status === "error" && evt.error) {
-        const errMsg = typeof evt.error === "string" ? evt.error : (evt.error.message ?? "Gemini CLI 执行失败");
-        onEvent({ type: "error", error: errMsg });
-      }
-      // status === "success" 无需额外处理，proc.on("close") 会发出 done
-      break;
-    case "error":
-      onEvent({ type: "error", error: typeof evt.error === "string" ? evt.error : "Gemini CLI 未知错误" });
-      break;
-  }
+) => void {
+  let synthCount = 0;
+  return (line, onEvent, appendText) => {
+    const trimmed = line.trim();
+    if (!trimmed) return;
+    let evt: GeminiStreamLine;
+    try {
+      evt = JSON.parse(trimmed);
+    } catch {
+      return; // 非 JSON 行(ANSI 等)忽略
+    }
+    switch (evt.type) {
+      case "init":
+        console.log(`[CLI] Gemini session=${evt.session_id}, model=${evt.model}`);
+        break;
+      case "message":
+        if (evt.role === "assistant" && evt.content) {
+          appendText(evt.content);
+          onEvent({ type: "text-delta", text: evt.content });
+        }
+        break;
+      case "tool_use":
+        if (evt.tool_name) {
+          onEvent({
+            type: "tool-call",
+            callId: evt.tool_id ?? `gm_${++synthCount}`,
+            name: evt.tool_name,
+            args: (evt.parameters as Record<string, unknown>) ?? {},
+          });
+        }
+        break;
+      case "tool_result":
+        onEvent({
+          type: "tool-result",
+          callId: evt.tool_id ?? `gm_${synthCount}`,
+          result: evt.output ?? {},
+          ...(evt.status === "error" ? { isError: true } : {}),
+        });
+        break;
+      case "result":
+        if (evt.status === "error" && evt.error) {
+          const errMsg = typeof evt.error === "string" ? evt.error : (evt.error.message ?? "Gemini CLI 执行失败");
+          onEvent({ type: "error", message: errMsg });
+        }
+        break;
+      case "error":
+        onEvent({ type: "error", message: typeof evt.error === "string" ? evt.error : "Gemini CLI 未知错误" });
+        break;
+    }
+  };
 }

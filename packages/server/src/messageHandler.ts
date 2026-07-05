@@ -9,7 +9,7 @@ import { verifyToken, registerAnonymous, type AuthPayload } from "./auth.js";
 import { isDockerEnabled, getContainer } from "./docker.js";
 import { initDb, listUserSessions, deleteSession } from "./db.js";
 import { checkQuota, incrementUsage, getUserQuota } from "./resourceLimits.js";
-import { WsMessage } from "@pocket-code/wire";
+import { WsMessage, type ServerOutboundType } from "@pocket-code/wire";
 import { handleSyncPull, handleSyncFile } from "./sync/syncHandler.js";
 import { rm } from "fs/promises";
 
@@ -97,7 +97,7 @@ export function createMessageHandler(
               type: "auth",
               token: result.token,
               userId: result.userId,
-            });
+            } satisfies ServerOutboundType);
             break;
           }
 
@@ -185,7 +185,7 @@ export function createMessageHandler(
               sessionId: session.sessionId,
               projectId: session.projectId,
               workspace: session.workspace,
-            });
+            } satisfies ServerOutboundType);
             break;
           }
 
@@ -247,31 +247,22 @@ export function createMessageHandler(
               send({ type: "error", error: "No session. Send init first." });
               return;
             }
-            const { toolName, args, callId } = msg;
+            const { toolName, args } = msg;
+            const callId = msg.callId ?? "";
             const tools = createTools(
               session.workspace,
               session.containerId
             );
             const toolFn = (tools as Record<string, any>)[toolName];
             if (!toolFn) {
-              send({
-                type: "tool-result",
-                callId,
-                toolName,
-                result: { success: false, error: `Unknown tool: ${toolName}` },
-              });
+              send({ type: "tool-result", callId, result: { success: false, error: `Unknown tool: ${toolName}` } } satisfies ServerOutboundType);
               break;
             }
             try {
               const result = await toolFn.execute(args);
-              send({ type: "tool-result", callId, toolName, result });
+              send({ type: "tool-result", callId, result } satisfies ServerOutboundType);
             } catch (err: any) {
-              send({
-                type: "tool-result",
-                callId,
-                toolName,
-                result: { success: false, error: err.message },
-              });
+              send({ type: "tool-result", callId, result: { success: false, error: err.message } } satisfies ServerOutboundType);
             }
             break;
           }
@@ -393,7 +384,7 @@ export function createMessageHandler(
               type: "session-deleted",
               sessionId: msg.sessionId,
               success: deleted,
-            });
+            } satisfies ServerOutboundType);
             break;
           }
 
@@ -418,7 +409,7 @@ export function createMessageHandler(
                 projectId: delProjectId,
                 success: false,
                 error: "No sessions found for this project.",
-              });
+              } satisfies ServerOutboundType);
               return;
             }
             const workspacePath = getWorkspaceRoot("", delProjectId);
@@ -428,14 +419,14 @@ export function createMessageHandler(
                 type: "project-workspace-deleted",
                 projectId: delProjectId,
                 success: true,
-              });
+              } satisfies ServerOutboundType);
             } catch (err: any) {
               send({
                 type: "project-workspace-deleted",
                 projectId: delProjectId,
                 success: false,
                 error: err.message,
-              });
+              } satisfies ServerOutboundType);
             }
             break;
           }

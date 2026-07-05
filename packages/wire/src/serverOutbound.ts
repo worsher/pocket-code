@@ -53,7 +53,7 @@ export const SyncManifestMsg = z.object({
   type: z.literal("sync-manifest"),
   commit: z.string(),
   parent: z.string().nullable().optional(),
-  files: z.array(z.object({ path: z.string(), status: z.string() }).passthrough()),
+  files: z.array(z.object({ path: z.string(), status: z.enum(["A", "M", "D"]) })),
   _reqId: z.string().optional(),
 });
 

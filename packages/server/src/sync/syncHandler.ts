@@ -6,6 +6,7 @@ import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import { existsSync } from "node:fs";
 import { join } from "node:path";
+import type { ServerOutboundType } from "@pocket-code/wire";
 import {
   createSnapshot,
   changedFiles,
@@ -42,7 +43,7 @@ export async function handleSyncPull(
     files = await changedFiles(workspace, null, snap.commit);
   }
   // _reqId 回显:relay 模式下 RelayClient 拆信封会丢 requestId,响应须自带 _reqId 供客户端关联。
-  send({ type: "sync-manifest", commit: snap.commit, parent: snap.parent, files, _reqId: reqId });
+  send({ type: "sync-manifest", commit: snap.commit, parent: snap.parent, files, _reqId: reqId } satisfies ServerOutboundType);
 }
 
 /** 处理 sync-file:返回某快照里某文件的 base64 内容(失败则带 error)。 */
@@ -61,8 +62,8 @@ export async function handleSyncFile(
       encoding: "base64",
       content: content.toString("base64"),
       _reqId: reqId,
-    });
+    } satisfies ServerOutboundType);
   } catch (err: any) {
-    send({ type: "sync-file-content", path, error: err?.message ?? "read failed", _reqId: reqId });
+    send({ type: "sync-file-content", path, error: err?.message ?? "read failed", _reqId: reqId } satisfies ServerOutboundType);
   }
 }
