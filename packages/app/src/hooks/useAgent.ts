@@ -94,6 +94,8 @@ export function useAgent({ settings, model = "deepseek-v3", customPrompt, projec
   const [sessionId, setSessionId] = useState<string | null>(null);
   const [streamingPhase, setStreamingPhase] = useState<StreamingPhase>("idle");
   const [currentToolName, setCurrentToolName] = useState<string | undefined>();
+  // 设备授权失效(token 被 daemon 拒绝)时的提示;非空表示需要重新配对
+  const [authError, setAuthError] = useState<string | null>(null);
 
   const wsRef = useRef<WebSocket | RelayClient | null>(null);
   const currentAssistantRef = useRef<Message | null>(null);
@@ -280,6 +282,7 @@ export function useAgent({ settings, model = "deepseek-v3", customPrompt, projec
       console.log("[useAgent] WebSocket/Relay connected");
       reconnectAttemptRef.current = 0; // 连上即重置退避
       setIsConnected(true);
+      setAuthError(null); // 连上即清除授权失效提示
 
       // In Relay Mode, auth/handshake is handled differently via pair-request flow (see settings UI).
       // Once paired, we just send init normally. It will be wrapped.
@@ -477,6 +480,16 @@ export function useAgent({ settings, model = "deepseek-v3", customPrompt, projec
           setStreamingPhase("idle");
           setCurrentToolName(undefined);
           currentAssistantRef.current = null;
+          // 设备 token 被 daemon 拒绝(未授权/已撤销):重试同一个死 token 永远不会成功,
+          // 只会刷屏 daemon 日志。停止自动重连,提示用户重新配对。
+          // 重新配对会更新 relayToken → App 的 connIdentity effect 会自动重连。
+          if (typeof data.error === "string" && data.error.includes("Unauthorized")) {
+            shouldConnectRef.current = false;
+            clearReconnect();
+            setAuthError("设备未授权或配对已失效,请在设置中重新配对");
+            try { wsRef.current?.close(); } catch { /* ignore */ }
+            break;
+          }
           if (settings.mode === "cloud") {
             setMessages((prev) => {
               const updated = [...prev];
@@ -1176,6 +1189,7 @@ export function useAgent({ settings, model = "deepseek-v3", customPrompt, projec
     streamingPhase,
     currentToolName,
     sessionId,
+    authError,
     needsAutoConnect,
     connect,
     disconnect,

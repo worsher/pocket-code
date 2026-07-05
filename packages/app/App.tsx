@@ -11,6 +11,7 @@ import {
   Modal,
   TextInput,
   Keyboard,
+  Alert,
   type AppStateStatus,
 } from "react-native";
 import { StatusBar } from "expo-status-bar";
@@ -118,6 +119,7 @@ function MainScreen() {
     streamingPhase,
     currentToolName,
     sessionId,
+    authError,
     needsAutoConnect,
     connect,
     disconnect,
@@ -135,6 +137,15 @@ function MainScreen() {
 
   const listRef = useRef<FlatList>(null);
   const appStateRef = useRef<AppStateStatus>(AppState.currentState);
+
+  // 设备授权失效(token 被开发机拒绝):提示用户重新配对,避免静默断开
+  useEffect(() => {
+    if (!authError) return;
+    Alert.alert("需要重新配对", authError, [
+      { text: "稍后", style: "cancel" },
+      { text: "去配对", onPress: () => setShowSettings(true) },
+    ]);
+  }, [authError]);
 
   // Connect on mount (after settings loaded) and reconnect when settings change.
   // In geek+local mode, skip auto-connect (WS only needed for runCommand fallback).
