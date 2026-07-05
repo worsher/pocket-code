@@ -13,7 +13,7 @@ describe("TunnelHub", () => {
   it("writes response head, chunks, and ends to the registered res", () => {
     const hub = new TunnelHub();
     const res = mockRes();
-    hub.open("t1", res);
+    hub.open("t1", res, "m_A");
     hub.onResponse("t1", 200, { "content-type": "text/html", "transfer-encoding": "chunked" });
     hub.onChunk("t1", Buffer.from("hi").toString("base64"));
     hub.onEnd("t1");
@@ -32,7 +32,7 @@ describe("TunnelHub", () => {
   it("injects extraHeaders (e.g. Set-Cookie) into the response head", () => {
     const hub = new TunnelHub();
     const res = mockRes();
-    hub.open("t1", res, { "Set-Cookie": "pc_tunnel=m_abc:5173; Path=/" });
+    hub.open("t1", res, "m_A", { "Set-Cookie": "pc_tunnel=m_abc:5173; Path=/" });
     hub.onResponse("t1", 200, { "content-type": "text/html" });
     const [, headers] = res.writeHead.mock.calls[0];
     expect(headers["content-type"]).toBe("text/html");
@@ -48,7 +48,7 @@ describe("TunnelHub", () => {
   it("on error end without prior response writes a 502", () => {
     const hub = new TunnelHub();
     const res = mockRes();
-    hub.open("t2", res);
+    hub.open("t2", res, "m_A");
     hub.onEnd("t2", "upstream down");
     expect(res.writeHead).toHaveBeenCalledWith(502);
     expect(res.end).toHaveBeenCalled();
@@ -58,11 +58,40 @@ describe("TunnelHub", () => {
     const hub = new TunnelHub();
     const r1 = mockRes();
     const r2 = mockRes();
-    hub.open("a", r1);
-    hub.open("b", r2);
+    hub.open("a", r1, "m_A");
+    hub.open("b", r2, "m_A");
     hub.abortAll();
     expect(r1.end).toHaveBeenCalled();
     expect(r2.end).toHaveBeenCalled();
     expect(hub.size).toBe(0);
+  });
+
+  it("drops frames whose senderMachineId does not own the tunnel (防伪造)", () => {
+    const hub = new TunnelHub();
+    const res = mockRes();
+    hub.open("t1", res, "m_A");
+    hub.onResponse("t1", 200, {}, "m_B");
+    hub.onChunk("t1", Buffer.from("x").toString("base64"), "m_B");
+    hub.onEnd("t1", undefined, "m_B");
+    expect(res.writeHead).not.toHaveBeenCalled();
+    expect(res.write).not.toHaveBeenCalled();
+    expect(res.end).not.toHaveBeenCalled();
+    expect(hub.size).toBe(1); // 仍挂起,未被恶意 end
+    // 正主来了照常工作
+    hub.onResponse("t1", 200, {}, "m_A");
+    hub.onEnd("t1", undefined, "m_A");
+    expect(res.end).toHaveBeenCalled();
+  });
+
+  it("abortByMachine only ends that machine's tunnels", () => {
+    const hub = new TunnelHub();
+    const rA = mockRes();
+    const rB = mockRes();
+    hub.open("tA", rA, "m_A");
+    hub.open("tB", rB, "m_B");
+    hub.abortByMachine("m_A");
+    expect(rA.end).toHaveBeenCalled();
+    expect(rB.end).not.toHaveBeenCalled();
+    expect(hub.size).toBe(1);
   });
 });

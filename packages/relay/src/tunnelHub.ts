@@ -7,6 +7,8 @@ import type { ServerResponse } from "http";
 interface PendingTunnel {
   res: ServerResponse;
   responded: boolean;
+  /** 该隧道归属的 daemon(P6a:回帧必须来自它) */
+  machineId: string;
   /** relay 侧注入的附加响应头(如 Set-Cookie 记忆隧道目标)。 */
   extraHeaders?: Record<string, string>;
 }
@@ -17,12 +19,30 @@ const HOP_BY_HOP = new Set(["transfer-encoding", "connection", "content-length",
 export class TunnelHub {
   private tunnels = new Map<string, PendingTunnel>();
 
-  open(tunnelId: string, res: ServerResponse, extraHeaders?: Record<string, string>): void {
-    this.tunnels.set(tunnelId, { res, responded: false, extraHeaders });
+  open(
+    tunnelId: string,
+    res: ServerResponse,
+    machineId: string,
+    extraHeaders?: Record<string, string>
+  ): void {
+    this.tunnels.set(tunnelId, { res, responded: false, machineId, extraHeaders });
   }
 
-  onResponse(tunnelId: string, status: number, headers: Record<string, string>): void {
+  /** 归属校验:senderMachineId 传入且与归属不符 → 返回 undefined(丢弃)。 */
+  private owned(tunnelId: string, senderMachineId?: string): PendingTunnel | undefined {
     const t = this.tunnels.get(tunnelId);
+    if (!t) return undefined;
+    if (senderMachineId !== undefined && t.machineId !== senderMachineId) {
+      console.warn(
+        `[Relay] Dropped tunnel frame for ${tunnelId} from non-owner ${senderMachineId}`
+      );
+      return undefined;
+    }
+    return t;
+  }
+
+  onResponse(tunnelId: string, status: number, headers: Record<string, string>, senderMachineId?: string): void {
+    const t = this.owned(tunnelId, senderMachineId);
     if (!t || t.responded) return;
     t.responded = true;
     const safe: Record<string, string> = {};
@@ -38,8 +58,8 @@ export class TunnelHub {
     }
   }
 
-  onChunk(tunnelId: string, dataBase64: string): void {
-    const t = this.tunnels.get(tunnelId);
+  onChunk(tunnelId: string, dataBase64: string, senderMachineId?: string): void {
+    const t = this.owned(tunnelId, senderMachineId);
     if (!t) return;
     try {
       t.res.write(Buffer.from(dataBase64, "base64"));
@@ -48,8 +68,8 @@ export class TunnelHub {
     }
   }
 
-  onEnd(tunnelId: string, error?: string): void {
-    const t = this.tunnels.get(tunnelId);
+  onEnd(tunnelId: string, error?: string, senderMachineId?: string): void {
+    const t = this.owned(tunnelId, senderMachineId);
     if (!t) return;
     this.tunnels.delete(tunnelId);
     try {
@@ -59,6 +79,13 @@ export class TunnelHub {
       t.res.end();
     } catch {
       /* ignore */
+    }
+  }
+
+  /** 中止某台 daemon 的全部挂起隧道(该 daemon 掉线时)。 */
+  abortByMachine(machineId: string, error = "daemon offline"): void {
+    for (const [id, t] of this.tunnels) {
+      if (t.machineId === machineId) this.onEnd(id, error);
     }
   }
 
