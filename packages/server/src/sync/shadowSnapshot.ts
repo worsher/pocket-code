@@ -134,19 +134,36 @@ export async function changedFiles(
       .filter(Boolean)
       .map((path) => ({ path, status: "A" as const }));
   }
-  // -z: NUL 分隔,稳健处理含空格/特殊字符的路径
-  const out = await git(repoDir, ["diff", "--name-status", "-z", fromCommit, toCommit]);
+  // -z: NUL 分隔,稳健处理含空格/特殊字符的路径。
+  // --no-renames: 现代 git 默认对 --name-status 开启 rename/copy 检测,R<score>/C<score>
+  // 记录在 -z 格式下是三段(status\0oldpath\0newpath),会破坏下面按二元组消费的解析循环。
+  // 关掉后 rename 恒被拆成 D+A 两条两段式记录,与手机端按 A/M/D 三态 apply 的语义天然等价。
+  const out = await git(repoDir, [
+    "diff",
+    "--name-status",
+    "-z",
+    "--no-renames",
+    fromCommit,
+    toCommit,
+  ]);
   const parts = out.split("\0").filter(Boolean);
   const result: ChangedFile[] = [];
-  // 格式: <status>\0<path>\0<status>\0<path>... (重命名会有两段路径,这里按 add/del 处理)
+  // 格式: <status>\0<path>\0<status>\0<path>...
   for (let i = 0; i + 1 < parts.length; i += 2) {
     const code = parts[i];
     const path = parts[i + 1];
-    const status: ChangeStatus = code.startsWith("A")
-      ? "A"
-      : code.startsWith("D")
-        ? "D"
-        : "M";
+    let status: ChangeStatus;
+    if (code.startsWith("A")) {
+      status = "A";
+    } else if (code.startsWith("D")) {
+      status = "D";
+    } else if (code.startsWith("M")) {
+      status = "M";
+    } else {
+      // 防御未来 git 行为变化(如 T 类型变更等未知状态码):跳过而非静默错位。
+      console.warn(`changedFiles: 未知的 git diff 状态码 "${code}",已跳过 path="${path}"`);
+      continue;
+    }
     result.push({ path, status });
   }
   return result;

@@ -82,6 +82,39 @@ describe("shadowSnapshot", () => {
     expect(Object.keys(byPath).sort()).toEqual(["a.txt", "new.txt", "sub/b.txt"]);
   });
 
+  it("treats a git-detected rename as D(old)+A(new), no corrupted entries", async () => {
+    // rename 检测需要相似度:写入 >=50 行相同内容,保证 git 判定为 rename 而非 add+delete
+    const bigContent = Array.from({ length: 60 }, (_, i) => `line ${i}`).join("\n") + "\n";
+    writeFileSync(join(repo, "big-old.txt"), bigContent);
+    // 需要先入真实索引/HEAD,"git mv" 才能识别该文件受版本控制(快照用的是独立 GIT_INDEX_FILE)
+    git(repo, "add", "big-old.txt");
+    git(repo, "commit", "-qm", "add big-old.txt");
+    const s1 = await createSnapshot(repo);
+
+    // git mv 触发 rename 检测(工作区文件移动 + git 侧识别相似度)
+    git(repo, "mv", "big-old.txt", "big-new.txt");
+    const s2 = await createSnapshot(repo);
+
+    // 确认底层 git diff 确实检测到了 rename(验证测试前提有效)
+    const rawDiff = git(repo, "diff", "--name-status", s1.commit, s2.commit);
+    expect(rawDiff).toMatch(/^R\d+\s/);
+
+    const changes = await changedFiles(repo, s1.commit, s2.commit);
+    const byPath = Object.fromEntries(changes.map((c) => [c.path, c.status]));
+
+    expect(byPath["big-old.txt"]).toBe("D");
+    expect(byPath["big-new.txt"]).toBe("A");
+    expect(Object.keys(byPath).sort()).toEqual(["big-new.txt", "big-old.txt"]);
+    expect(changes.length).toBe(2);
+
+    // 无假条目:所有 path 都应真实存在于两快照之一
+    const s1Tree = git(repo, "ls-tree", "-r", "--name-only", s1.commit).split("\n");
+    const s2Tree = git(repo, "ls-tree", "-r", "--name-only", s2.commit).split("\n");
+    for (const c of changes) {
+      expect(s1Tree.includes(c.path) || s2Tree.includes(c.path)).toBe(true);
+    }
+  });
+
   it("lists all files as added when fromCommit is null", async () => {
     const s1 = await createSnapshot(repo);
     const all = await changedFiles(repo, null, s1.commit);
