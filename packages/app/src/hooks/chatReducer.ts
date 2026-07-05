@@ -38,8 +38,11 @@ function updateLastAssistant(
 ): Message[] {
   const last = messages[messages.length - 1];
   if (!last || last.role !== "assistant") return messages;
+  const updated = update(last);
+  // 若 update 返回原引用(无变化),直接返回原数组
+  if (updated === last) return messages;
   const next = messages.slice(0, -1);
-  next.push(update(last));
+  next.push(updated);
   return next;
 }
 

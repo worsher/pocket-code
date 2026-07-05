@@ -52,6 +52,19 @@ describe("applyAgentEvent", () => {
     const userOnly: Message[] = [{ id: "1", role: "user", content: "x", timestamp: 1 }];
     expect(applyAgentEvent(userOnly, { type: "text-delta", text: "y" })).toBe(userOnly);
   });
+
+  it("returns same reference when tool-result finds no unresolved call", () => {
+    let msgs = applyAgentEvent(
+      [
+        { id: "1", role: "user", content: "hi", timestamp: 1 },
+        { id: "2", role: "assistant", content: "", toolCalls: [], timestamp: 2 },
+      ],
+      { type: "tool-call", callId: "c1", name: "x", args: {} }
+    );
+    msgs = applyAgentEvent(msgs, { type: "tool-result", callId: "c1", result: 1 });
+    const after = applyAgentEvent(msgs, { type: "tool-result", callId: "c9", result: 2 });
+    expect(after).toBe(msgs); // 全部已完成,落空 → 原引用
+  });
 });
 
 describe("phaseFor", () => {
