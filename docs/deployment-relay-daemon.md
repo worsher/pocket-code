@@ -149,10 +149,12 @@ server {
         proxy_send_timeout  3600s;
     }
 
-    # 反向 HTTP 隧道(远程预览):关闭缓冲以支持流式
+    # 反向隧道(远程预览):关闭缓冲以支持流式;Upgrade 头支持 HMR WebSocket
     location /t/ {
         proxy_pass http://127.0.0.1:3200;
         proxy_http_version 1.1;
+        proxy_set_header Upgrade $http_upgrade;
+        proxy_set_header Connection "upgrade";
         proxy_set_header Host $host;
         proxy_set_header X-Real-IP $remote_addr;
         proxy_buffering off;          # 隧道是分片流,不要缓冲
