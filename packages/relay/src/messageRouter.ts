@@ -84,6 +84,12 @@ export function handleRelayInbound(
         sendJSON(ws, { type: "error", error: auth.error });
         return;
       }
+      // I-2:同一连接换 machineId 重复注册会在 daemons Map 里留下僵尸记录,拒绝之
+      // (同 machineId 重复注册仍允许,属无害的重连语义)
+      if (state.role === "daemon" && state.machineId && state.machineId !== msg.machineId) {
+        sendJSON(ws, { type: "error", error: "Connection already registered as a different machine" });
+        return;
+      }
       state.role = "daemon";
       state.machineId = msg.machineId;
       registerDaemon(ws, msg.machineId, msg.machineName);
@@ -152,6 +158,12 @@ export function handleRelayInbound(
 
     // ── App:发现在线机器 ─────────────────────────
     case "list-machines": {
+      // I-1:已注册的 daemon 连接不得被 app 消息降级角色,否则断开时逃过清理
+      if (state.role === "daemon") {
+        console.warn(`[Relay] Dropped list-machines from registered daemon ${state.machineId}`);
+        sendJSON(ws, { type: "error", error: "Daemon connection cannot send app messages" });
+        return;
+      }
       state.role = "app";
       sendJSON(ws, { type: "machines-list", machines: getOnlineMachines() });
       return;
@@ -159,6 +171,11 @@ export function handleRelayInbound(
 
     // ── App:配对请求 ─────────────────────────────
     case "pair-request": {
+      if (state.role === "daemon") {
+        console.warn(`[Relay] Dropped pair-request from registered daemon ${state.machineId}`);
+        sendJSON(ws, { type: "error", error: "Daemon connection cannot send app messages" });
+        return;
+      }
       state.role = "app";
       forwardPairRequest(ws, msg.pairingCode, msg.deviceId, msg.deviceName, msg.machineId);
       return;
@@ -166,6 +183,11 @@ export function handleRelayInbound(
 
     // ── App:业务请求(记录归属 machineId) ─────────
     case "relay-request": {
+      if (state.role === "daemon") {
+        console.warn(`[Relay] Dropped relay-request from registered daemon ${state.machineId}`);
+        sendJSON(ws, { type: "error", error: "Daemon connection cannot send app messages" });
+        return;
+      }
       state.role = "app";
       deps.requests.track(msg.requestId, ws, msg.machineId);
       const forwarded = forwardToDaemon(msg.machineId, msg.requestId, msg.token, msg.payload);

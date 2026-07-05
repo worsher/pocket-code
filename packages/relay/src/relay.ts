@@ -57,11 +57,12 @@ export function registerDaemon(
 }
 
 export function unregisterDaemon(socket: WebSocket): void {
+  // I-2:同一 socket 可能因换 machineId 重复注册而在 Map 里留有多条记录,
+  // 必须全部清理,而非命中首条就 return。
   for (const [id, conn] of daemons) {
     if (conn.socket === socket) {
       daemons.delete(id);
       console.log(`[Relay] Daemon disconnected: ${conn.machineName} (${id}). Total: ${daemons.size}`);
-      return;
     }
   }
 }

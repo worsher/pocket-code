@@ -217,3 +217,89 @@ describe("boundary validation (safeParse)", () => {
     expect(deps.requests.get("r10")).toBeUndefined(); // 离线时清理跟踪
   });
 });
+
+describe("daemon role lock (防止 daemon 连接被 app 消息降级角色, I-1)", () => {
+  it("rejects relay-request from an already-registered daemon and keeps role as daemon", () => {
+    const deps = makeDeps();
+    const { ws, state } = registerDaemonVia(deps, "m_lock1");
+    cleanups.push(ws);
+
+    handleRelayInbound(asWs(ws), JSON.stringify({
+      type: "relay-request", token: "jwt", machineId: "m_lock1", requestId: "r_lock1",
+      payload: { type: "abort" },
+    }), state, deps);
+
+    expect(ws.sent.at(-1)).toEqual({
+      type: "error",
+      error: "Daemon connection cannot send app messages",
+    });
+    expect(state.role).toBe("daemon");
+    expect(deps.requests.get("r_lock1")).toBeUndefined();
+  });
+
+  it("rejects list-machines from an already-registered daemon and keeps role as daemon", () => {
+    const deps = makeDeps();
+    const { ws, state } = registerDaemonVia(deps, "m_lock2");
+    cleanups.push(ws);
+
+    handleRelayInbound(asWs(ws), JSON.stringify({ type: "list-machines" }), state, deps);
+
+    expect(ws.sent.at(-1)).toEqual({
+      type: "error",
+      error: "Daemon connection cannot send app messages",
+    });
+    expect(state.role).toBe("daemon");
+  });
+
+  it("rejects pair-request from an already-registered daemon and keeps role as daemon", () => {
+    const deps = makeDeps();
+    const { ws, state } = registerDaemonVia(deps, "m_lock3");
+    cleanups.push(ws);
+
+    handleRelayInbound(asWs(ws), JSON.stringify({
+      type: "pair-request", pairingCode: "ABCD2345", deviceId: "d", deviceName: "P",
+    }), state, deps);
+
+    expect(ws.sent.at(-1)).toEqual({
+      type: "error",
+      error: "Daemon connection cannot send app messages",
+    });
+    expect(state.role).toBe("daemon");
+  });
+});
+
+describe("daemon re-registration guard (防止同 socket 换 machineId 留僵尸记录, I-2)", () => {
+  it("rejects re-registration with a different machineId on the same connection", () => {
+    const deps = makeDeps();
+    const { ws, state } = registerDaemonVia(deps, "m_orig");
+    cleanups.push(ws);
+
+    const ts = Date.now();
+    handleRelayInbound(asWs(ws), JSON.stringify({
+      type: "daemon-register", machineId: "m_other", machineName: "Other",
+      authToken: hmac("m_other", ts), timestamp: ts,
+    }), state, deps);
+
+    expect(ws.sent.at(-1)).toEqual({
+      type: "error",
+      error: "Connection already registered as a different machine",
+    });
+    expect(state.machineId).toBe("m_orig");
+    expect(getOnlineMachines().some((m) => m.machineId === "m_other")).toBe(false);
+  });
+
+  it("allows idempotent re-registration with the same machineId (reconnect semantics)", () => {
+    const deps = makeDeps();
+    const { ws, state } = registerDaemonVia(deps, "m_same");
+    cleanups.push(ws);
+
+    const ts = Date.now();
+    handleRelayInbound(asWs(ws), JSON.stringify({
+      type: "daemon-register", machineId: "m_same", machineName: "M-m_same",
+      authToken: hmac("m_same", ts), timestamp: ts,
+    }), state, deps);
+
+    expect(ws.sent.at(-1)).toEqual({ type: "daemon-registered", machineId: "m_same" });
+    expect(state.machineId).toBe("m_same");
+  });
+});
