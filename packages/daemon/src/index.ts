@@ -15,7 +15,7 @@ import {
   getPairingCodeInfo,
 } from "./pairing.js";
 import { loadDevices, getDevices } from "./deviceStore.js";
-import { proxyToLocalhost } from "./tunnel.js";
+import { proxyToLocalhost, openLocalWebSocket, onWsTunnelData, onWsTunnelClose, closeAllWsTunnels } from "./tunnel.js";
 import { createMessageHandler, type MessageHandler } from "@pocket-code/server/messageHandler";
 import { initDb } from "@pocket-code/server/db";
 import { requireRelaySecret } from "./config.js";
@@ -127,6 +127,7 @@ const connection = new RelayConnection({
 
   onDisconnected() {
     console.log("[Daemon] Lost connection to relay.");
+    closeAllWsTunnels();
   },
 
   onMessage(msg: DaemonInboundType) {
@@ -291,6 +292,23 @@ function handleRelayMessage(msg: DaemonInboundType) {
       ).catch((err: any) => {
         connection.send({ type: "tunnel-end", tunnelId: msg.tunnelId, error: err?.message ?? "tunnel error" });
       });
+      break;
+    }
+
+    // ── WS 隧道(P7 HMR) ──────────────────────────
+    case "tunnel-ws-open": {
+      openLocalWebSocket(
+        { tunnelId: msg.tunnelId, port: msg.port, path: msg.path, headers: msg.headers },
+        (frame) => connection.send(frame)
+      );
+      break;
+    }
+    case "tunnel-ws-data": {
+      onWsTunnelData(msg.tunnelId, msg.data, msg.binary);
+      break;
+    }
+    case "tunnel-ws-close": {
+      onWsTunnelClose(msg.tunnelId, msg.code, msg.reason);
       break;
     }
 
