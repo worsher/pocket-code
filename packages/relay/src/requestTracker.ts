@@ -12,6 +12,8 @@ interface MinimalSocket {
 
 interface Entry<S> {
   ws: S;
+  /** 该请求发往的目标 daemon(P6a 身份绑定:回帧必须来自它) */
+  machineId: string;
   ts: number;
 }
 
@@ -21,14 +23,15 @@ export class RequestTracker<S extends MinimalSocket = MinimalSocket> {
   /** @param ttlMs 悬挂请求的最大存活时间(默认 2 分钟)。 */
   constructor(private readonly ttlMs: number = 2 * 60 * 1000) {}
 
-  /** 记录一条请求(requestId → 发起的 App socket)。 */
-  track(requestId: string, ws: S, now: number = Date.now()): void {
-    this.map.set(requestId, { ws, ts: now });
+  /** 记录一条请求(requestId → 发起的 App socket + 目标 daemon)。 */
+  track(requestId: string, ws: S, machineId: string, now: number = Date.now()): void {
+    this.map.set(requestId, { ws, machineId, ts: now });
   }
 
-  /** 取某请求对应的 App socket。 */
-  get(requestId: string): S | undefined {
-    return this.map.get(requestId)?.ws;
+  /** 取某请求的 App socket 与归属 daemon。 */
+  get(requestId: string): { ws: S; machineId: string } | undefined {
+    const e = this.map.get(requestId);
+    return e ? { ws: e.ws, machineId: e.machineId } : undefined;
   }
 
   /** 删除某请求(收到 final 响应或 stream done 时)。 */
