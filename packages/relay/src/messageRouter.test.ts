@@ -4,6 +4,7 @@ import type { WebSocket } from "ws";
 import { createConnState, handleRelayInbound, type RouterDeps } from "./messageRouter.js";
 import { RequestTracker } from "./requestTracker.js";
 import { TunnelHub } from "./tunnelHub.js";
+import { WsTunnelHub } from "./wsTunnelHub.js";
 import { unregisterDaemon, getOnlineMachines } from "./relay.js";
 
 const SECRET = "test-secret";
@@ -17,7 +18,7 @@ class MockWs {
 const asWs = (m: MockWs) => m as unknown as WebSocket;
 
 function makeDeps(): RouterDeps {
-  return { relaySecret: SECRET, requests: new RequestTracker(), tunnelHub: new TunnelHub() };
+  return { relaySecret: SECRET, requests: new RequestTracker(), tunnelHub: new TunnelHub(), wsTunnelHub: new WsTunnelHub(() => true) };
 }
 
 function hmac(machineId: string, ts: number, secret = SECRET) {
@@ -301,5 +302,27 @@ describe("daemon re-registration guard (防止同 socket 换 machineId 留僵尸
 
     expect(ws.sent.at(-1)).toEqual({ type: "daemon-registered", machineId: "m_same" });
     expect(state.machineId).toBe("m_same");
+  });
+});
+
+describe("WS tunnel frames (P7 HMR body ownership)", () => {
+  it("routes ws-tunnel frames only from the owning daemon", () => {
+    const deps = makeDeps();
+    const a = registerDaemonVia(deps, "m_WA");
+    const b = registerDaemonVia(deps, "m_WB");
+    cleanups.push(a.ws, b.ws);
+    const browser = { readyState: 1, sent: [] as any[], on() {}, send(d: any) { this.sent.push(d); }, close() {} };
+    deps.wsTunnelHub.open("ws_r1", browser as any, "m_WA");
+    deps.wsTunnelHub.onOpened("ws_r1", "m_WA");
+
+    handleRelayInbound(asWs(b.ws), JSON.stringify({
+      type: "tunnel-ws-data", tunnelId: "ws_r1", data: "evil",
+    }), b.state, deps);
+    expect(browser.sent).toHaveLength(0); // 伪造者被 hub 归属校验丢弃
+
+    handleRelayInbound(asWs(a.ws), JSON.stringify({
+      type: "tunnel-ws-data", tunnelId: "ws_r1", data: "legit",
+    }), a.state, deps);
+    expect(browser.sent[0]).toBe("legit");
   });
 });

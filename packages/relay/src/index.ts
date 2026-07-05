@@ -14,6 +14,7 @@ import {
 } from "./relay.js";
 import { RequestTracker } from "./requestTracker.js";
 import { TunnelHub } from "./tunnelHub.js";
+import { WsTunnelHub } from "./wsTunnelHub.js";
 import { requireRelaySecret } from "./config.js";
 import { createConnState, handleRelayInbound } from "./messageRouter.js";
 
@@ -29,6 +30,11 @@ try {
 
 // ── 反向 HTTP 隧道枢纽(关联 http 请求与 tunnelId) ──
 const tunnelHub = new TunnelHub();
+
+// ── WS 隧道枢纽(P7 HMR,关联浏览器 ws 与 tunnelId) ──
+const wsTunnelHub = new WsTunnelHub((machineId, frame) => {
+  return sendRawToDaemon(machineId, frame);
+});
 
 // ── HTTP Server (health check only) ──────────────────
 
@@ -130,6 +136,7 @@ wss.on("connection", (ws: WebSocket) => {
       relaySecret: RELAY_SECRET,
       requests,
       tunnelHub,
+      wsTunnelHub,
     });
   });
 
@@ -138,7 +145,10 @@ wss.on("connection", (ws: WebSocket) => {
     if (state.role === "daemon") {
       unregisterDaemon(ws);
       // 只中止该 daemon 的隧道(原 abortAll 全断)
-      if (state.machineId) tunnelHub.abortByMachine(state.machineId);
+      if (state.machineId) {
+        tunnelHub.abortByMachine(state.machineId);
+        wsTunnelHub.abortByMachine(state.machineId);
+      }
     }
     if (state.role === "app") {
       requests.deleteBySocket(ws);

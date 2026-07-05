@@ -7,6 +7,7 @@ import { RelayInbound } from "@pocket-code/wire";
 import { verifyDaemonAuth } from "./config.js";
 import type { RequestTracker } from "./requestTracker.js";
 import type { TunnelHub } from "./tunnelHub.js";
+import { WsTunnelHub } from "./wsTunnelHub.js";
 import {
   registerDaemon,
   updateHeartbeat,
@@ -31,6 +32,7 @@ export interface RouterDeps {
   relaySecret: string;
   requests: RequestTracker<WebSocket>;
   tunnelHub: TunnelHub;
+  wsTunnelHub: WsTunnelHub;
   /** 可注入时钟(测试用) */
   now?: () => number;
 }
@@ -153,6 +155,23 @@ export function handleRelayInbound(
     case "tunnel-end": {
       if (state.role !== "daemon" || !state.machineId) return;
       deps.tunnelHub.onEnd(msg.tunnelId, msg.error, state.machineId);
+      return;
+    }
+
+    // ── Daemon WS 隧道回帧(P7 HMR,归属校验在 WsTunnelHub 内) ──
+    case "tunnel-ws-opened": {
+      if (state.role !== "daemon" || !state.machineId) return;
+      deps.wsTunnelHub.onOpened(msg.tunnelId, state.machineId);
+      return;
+    }
+    case "tunnel-ws-data": {
+      if (state.role !== "daemon" || !state.machineId) return;
+      deps.wsTunnelHub.onData(msg.tunnelId, msg.data, msg.binary, state.machineId);
+      return;
+    }
+    case "tunnel-ws-close": {
+      if (state.role !== "daemon" || !state.machineId) return;
+      deps.wsTunnelHub.onClose(msg.tunnelId, msg.code, msg.reason, state.machineId);
       return;
     }
 
