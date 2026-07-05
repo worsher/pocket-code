@@ -1,66 +1,29 @@
+// ── useAgent:瘦组合层 ─────────────────────────────────────
+// P6b:传输交给 ServerConnection,UI 更新交给 chatReducer(applyAgentEvent
+// /phaseFor)。云端与 geek 共用同一 reducer,对外 API 面保持不变。
 import { useState, useRef, useCallback, useEffect } from "react";
 import { AppState } from "react-native";
-import {
-  streamChat,
-  type ChatMessage,
-  type ToolCallRequest,
-} from "../services/aiClient";
-import { getModelConfig, getApiKeyField, MODELS, type ModelConfig } from "../services/modelConfig";
-import type { AppSettings } from "../store/settings";
-import {
-  saveChatHistory,
-  loadChatHistory,
-  type StoredMessage,
-} from "../store/chatHistory";
+import { getModelConfig, getApiKeyField, MODELS } from "../services/modelConfig";
+import { updateSettings, type AppSettings } from "../store/settings";
+import { saveChatHistory, loadChatHistory, type StoredMessage } from "../store/chatHistory";
 import { executeLocalTool, writeLocalFile, getProjectWorkspaceRoot } from "../services/localFileSystem";
-import { updateSettings } from "../store/settings";
 import type { StreamingPhase } from "../components/StreamingIndicator";
 import { enqueueMessage, getQueue, dequeueMessage } from "../services/offlineQueue";
 import { sendLocalNotification } from "../services/notifications";
-import { RelayClient } from "../services/relayClient";
+import { ServerConnection, type ConnectionConfig, type ConnectionHandlers } from "../services/serverConnection";
+import { applyAgentEvent, phaseFor } from "./chatReducer";
+import type { Message, ImageAttachment } from "./chatReducer";
+import { runGeekLoop, buildChatHistory } from "./geekLoop";
+import type { AgentEventType } from "@pocket-code/wire";
 
-// ── Public Types ───────────────────────────────────────
-
+// ── Public Types(re-export) ───────────────────────────────
 export type { StreamingPhase } from "../components/StreamingIndicator";
+export type { Message, ToolCall, ImageAttachment } from "./chatReducer";
 
-export interface ImageAttachment {
-  uri: string;
-  base64: string;
-  mimeType: "image/jpeg" | "image/png";
-}
-
-export interface Message {
-  id: string;
-  role: "user" | "assistant";
-  content: string;
-  thinking?: string;
-  toolCalls?: ToolCall[];
-  images?: ImageAttachment[];
-  timestamp: number;
-  pending?: boolean;
-  modelUsed?: string;
-}
-
-export interface ToolCall {
-  toolName: string;
-  args: Record<string, unknown>;
-  result?: unknown;
-}
-
-export interface ModelInfo {
-  key: string;
-  label: string;
-  description: string;
-}
-
-export const AVAILABLE_MODELS: ModelInfo[] = MODELS.map((m) => ({
-  key: m.key,
-  label: m.label,
-  description: m.description,
-}));
+export interface ModelInfo { key: string; label: string; description: string; }
+export const AVAILABLE_MODELS: ModelInfo[] = MODELS.map((m) => ({ key: m.key, label: m.label, description: m.description }));
 
 // ── Hook Options ───────────────────────────────────────
-
 interface UseAgentOptions {
   settings: AppSettings;
   model?: string;
@@ -85,8 +48,23 @@ function shouldSyncFile(filePath: string): boolean {
   return true;
 }
 
-// ── Main Hook ──────────────────────────────────────────
+/** 后台(App 非 active)runCommand 完成通知 */
+function notifyRunCommand(result: unknown) {
+  if (AppState.currentState === "active") return;
+  const res = result as { success?: boolean; stdout?: string; stderr?: string; error?: string };
+  const ok = res?.success !== false;
+  const firstLine = (res?.stdout || res?.stderr || res?.error || "").trim().split("\n")[0].slice(0, 80);
+  sendLocalNotification(ok ? "命令执行完成 ✓" : "命令执行失败 ✗", firstLine || (ok ? "命令已完成" : "命令执行失败"));
+}
 
+const mkUserMsg = (content: string, images?: ImageAttachment[]): Message => ({
+  id: Date.now().toString(), role: "user", content, images, timestamp: Date.now(),
+});
+const mkAssistantMsg = (): Message => ({
+  id: (Date.now() + 1).toString(), role: "assistant", content: "", toolCalls: [], timestamp: Date.now(),
+});
+
+// ── Main Hook ──────────────────────────────────────────
 export function useAgent({ settings, model = "deepseek-v3", customPrompt, projectId, onFileChanged }: UseAgentOptions) {
   const [messages, setMessages] = useState<Message[]>([]);
   const [isConnected, setIsConnected] = useState(false);
@@ -94,706 +72,223 @@ export function useAgent({ settings, model = "deepseek-v3", customPrompt, projec
   const [sessionId, setSessionId] = useState<string | null>(null);
   const [streamingPhase, setStreamingPhase] = useState<StreamingPhase>("idle");
   const [currentToolName, setCurrentToolName] = useState<string | undefined>();
-  // 设备授权失效(token 被 daemon 拒绝)时的提示;非空表示需要重新配对
+  // 设备授权失效(token 被 daemon 拒绝):非空表示需要重新配对
   const [authError, setAuthError] = useState<string | null>(null);
-
-  const wsRef = useRef<WebSocket | RelayClient | null>(null);
-  const currentAssistantRef = useRef<Message | null>(null);
-  const modelRef = useRef(model);
+  // 最新值 refs(避免 handler/闭包中的 stale closure)
   const abortRef = useRef<AbortController | null>(null);
-  modelRef.current = model;
+  const modelRef = useRef(model); modelRef.current = model;
+  const customPromptRef = useRef(customPrompt); customPromptRef.current = customPrompt;
+  const projectIdRef = useRef(projectId); projectIdRef.current = projectId;
+  const onFileChangedRef = useRef(onFileChanged); onFileChangedRef.current = onFileChanged;
+  const workspaceModeRef = useRef(settings.workspaceMode); workspaceModeRef.current = settings.workspaceMode;
+  const settingsRef = useRef(settings); settingsRef.current = settings;
+  const gitCredentialsRef = useRef(settings.gitCredentials); gitCredentialsRef.current = settings.gitCredentials;
+  const sessionIdRef = useRef(sessionId); sessionIdRef.current = sessionId;
+  const messagesRef = useRef(messages); messagesRef.current = messages;
+  const modeRef = useRef(settings.mode); modeRef.current = settings.mode;
+  const authTokenRef = useRef(settings.authToken); authTokenRef.current = settings.authToken;
+  const deviceIdRef = useRef(settings.deviceId); deviceIdRef.current = settings.deviceId;
+  // callId → toolName(runCommand 后台通知需知道工具名)
+  const callNamesRef = useRef(new Map<string, string>());
 
-  const customPromptRef = useRef(customPrompt);
-  customPromptRef.current = customPrompt;
+  const serverUrl = settings.mode === "geek"
+    ? settings.toolServerUrl
+    : (settings.workspaceMode === "relay" ? (settings.relayServerUrl || "wss://relay.your-vps.com") : settings.cloudServerUrl);
+  const serverUrlRef = useRef(serverUrl); serverUrlRef.current = serverUrl;
 
-  const projectIdRef = useRef(projectId);
-  projectIdRef.current = projectId;
+  // 需自动连接:cloud 恒真;geek+server(Termux)恒真;geek+local 否(runCommand 惰性回退)
+  const needsAutoConnect = settings.mode === "cloud" || settings.workspaceMode === "server";
 
-  // Ref for onFileChanged callback — avoid stale closure in WS handler
-  const onFileChangedRef = useRef(onFileChanged);
-  onFileChangedRef.current = onFileChanged;
+  /** Generate or retrieve a persistent deviceId */
+  const getDeviceId = useCallback((): string => {
+    if (deviceIdRef.current) return deviceIdRef.current;
+    const id = `dev_${Date.now()}_${Math.random().toString(36).slice(2, 10)}`;
+    updateSettings({ deviceId: id }); // Persist (fire-and-forget)
+    deviceIdRef.current = id;
+    return id;
+  }, []);
 
-  // Ref for workspaceMode — avoid stale closure in executeTool
-  const workspaceModeRef = useRef(settings.workspaceMode);
-  workspaceModeRef.current = settings.workspaceMode;
-
-  // Ref for full settings — needed by executeLocalTool (git auth)
-  const settingsRef = useRef(settings);
-  settingsRef.current = settings;
-
-  // Ref for gitCredentials — avoid stale closure in connect
-  const gitCredentialsRef = useRef(settings.gitCredentials);
-  gitCredentialsRef.current = settings.gitCredentials;
-
-  // Refs for save — avoid stale closure
-  const sessionIdRef = useRef(sessionId);
-  sessionIdRef.current = sessionId;
-  const messagesRef = useRef(messages);
-  messagesRef.current = messages;
-
-  // Pending tool result resolvers (geek mode)
-  const toolResolvers = useRef<
-    Map<string, (result: unknown) => void>
-  >(new Map());
-
-  // File operation resolvers
-  const fileResolvers = useRef<
-    Map<string, (result: unknown) => void>
-  >(new Map());
-
-  // ── Save helper (debounced, avoids high-frequency saves) ──
   const saveMessages = useCallback((msgs: Message[], sid: string | null) => {
     if (!sid || msgs.length === 0) return;
     saveChatHistory(sid, msgs as StoredMessage[], projectIdRef.current || '').catch(() => { });
   }, []);
 
-  // ── Determine the Server URL based on mode ────────────
-  const serverUrl =
-    settings.mode === "geek" 
-      ? settings.toolServerUrl
-      : (settings.workspaceMode === "relay" ? (settings.relayServerUrl || "wss://relay.your-vps.com") : settings.cloudServerUrl);
+  // ── done 收敛(云端 & geek 共用) ─────────────────────
+  const finalizeStreaming = useCallback(() => {
+    setIsStreaming(false);
+    setStreamingPhase("idle");
+    setCurrentToolName(undefined);
+    saveMessages(messagesRef.current, sessionIdRef.current);
+    if (AppState.currentState !== "active") {
+      const lastMsg = messagesRef.current[messagesRef.current.length - 1];
+      const summary = lastMsg?.content?.slice(0, 100) || "任务已完成";
+      sendLocalNotification("Pocket Code", summary);
+    }
+  }, [saveMessages]);
 
-  // Refs for connect — avoid stale closure and prevent unnecessary re-creation
-  const serverUrlRef = useRef(serverUrl);
-  serverUrlRef.current = serverUrl;
-  const modeRef = useRef(settings.mode);
-  modeRef.current = settings.mode;
-
-  // Whether auto-connect is needed:
-  // - Cloud mode (direct server): always
-  // - Cloud mode (relay): always
-  // - Geek + server (Termux): always (all tools go through WS)
-  // - Geek + local: no (runCommand falls back lazily)
-  const needsAutoConnect =
-    settings.mode === "cloud" || settings.workspaceMode === "server";
-
-  // ── Auth helpers ─────────────────────────────────────
-  const authTokenRef = useRef(settings.authToken);
-  authTokenRef.current = settings.authToken;
-  const deviceIdRef = useRef(settings.deviceId);
-  deviceIdRef.current = settings.deviceId;
-
-  /** Generate or retrieve a persistent deviceId */
-  const getDeviceId = useCallback((): string => {
-    if (deviceIdRef.current) return deviceIdRef.current;
-    
-    // We derive the name from the platform if possible, defaulting to 'React Native App'
-    const name = "Pocket Code App";
-    
-    const id = `dev_${Date.now()}_${Math.random().toString(36).slice(2, 10)}`;
-    // Persist deviceId (fire-and-forget)
-    updateSettings({ deviceId: id });
-    deviceIdRef.current = id;
-    
-    return id;
-  }, []);
-
-  /** Send init message with token */
-  const sendInit = useCallback((ws: WebSocket | RelayClient, token: string) => {
-    ws.send(
-      JSON.stringify({
-        type: "init",
-        token,
+  // ── 单例 ServerConnection(惰性创建) ───────────────────
+  const connRef = useRef<ServerConnection | null>(null);
+  if (!connRef.current) {
+    const config: ConnectionConfig = {
+      getServerUrl: () => serverUrlRef.current,
+      isRelayMode: () => workspaceModeRef.current === "relay",
+      getRelayOptions: () => ({
+        machineId: settingsRef.current.relayMachineId || "",
+        deviceId: getDeviceId(),
+        token: settingsRef.current.relayToken,
+      }),
+      getAuthToken: () => authTokenRef.current,
+      getDeviceId,
+      buildInitPayload: () => ({
         sessionId: sessionIdRef.current,
         projectId: projectIdRef.current || undefined,
         model: modelRef.current,
         gitCredentials: gitCredentialsRef.current?.filter((c) => c.token) || [],
-      })
-    );
-  }, []);
-
-  // Replay offline queue when connection is established
-  const replayOfflineQueue = useCallback(async () => {
-    const queue = await getQueue();
-    for (const msg of queue) {
-      if (wsRef.current?.readyState === WebSocket.OPEN) {
-        
-        // Inline sendCloudMessage logic to avoid use-before-def issues
-        const content = msg.content;
-        const reqId = `msg_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
-        wsRef.current.send(
-          JSON.stringify({
-            type: "chat",
-            payload: { message: content },
-            requestId: reqId,
-          })
-        );
-        
-        await dequeueMessage(msg.id);
-        // Small delay between replayed messages
-        await new Promise((r) => setTimeout(r, 500));
-      }
-    }
-  }, []);
-
-  // ── Auto-reconnect ─────────────────────────────────────
-  // 掉线后带指数退避自动重连,直到 disconnect() 主动断开。
-  const shouldConnectRef = useRef(false);
-  const reconnectTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const reconnectAttemptRef = useRef(0);
-  const connectRef = useRef<() => void>(() => {});
-
-  const clearReconnect = useCallback(() => {
-    if (reconnectTimerRef.current) {
-      clearTimeout(reconnectTimerRef.current);
-      reconnectTimerRef.current = null;
-    }
-  }, []);
-
-  const scheduleReconnect = useCallback(() => {
-    if (!shouldConnectRef.current) return;
-    clearReconnect();
-    const delay = Math.min(2000 * Math.pow(2, reconnectAttemptRef.current), 30000);
-    reconnectAttemptRef.current += 1;
-    console.log(`[useAgent] Reconnecting in ${(delay / 1000).toFixed(1)}s`);
-    reconnectTimerRef.current = setTimeout(() => {
-      if (shouldConnectRef.current) connectRef.current();
-    }, delay);
-  }, [clearReconnect]);
-
-  // ── WebSocket connection (shared between modes) ───────
-  const connect = useCallback(() => {
-    shouldConnectRef.current = true;
-    clearReconnect();
-    if (wsRef.current?.readyState === WebSocket.OPEN) return;
-
-    console.log("[useAgent] Connecting to:", serverUrlRef.current, "mode:", modeRef.current, "workspaceMode:", workspaceModeRef.current);
-    
-    let ws: WebSocket | RelayClient;
-
-    if (workspaceModeRef.current === "relay") {
-      // Use the Relay Wrapper
-      ws = new RelayClient({
-        relayUrl: serverUrlRef.current,
-        machineId: settingsRef.current.relayMachineId || "",
-        deviceId: getDeviceId(),
-        deviceName: "Pocket Code App",
-        token: settingsRef.current.relayToken,
-      });
-      ws.connect();
-    } else {
-      // Use raw WebSocket for Cloud or Server(Termux) modes
-      ws = new WebSocket(serverUrlRef.current);
-    }
-    
-    wsRef.current = ws;
-
-    ws.onopen = () => {
-      console.log("[useAgent] WebSocket/Relay connected");
-      reconnectAttemptRef.current = 0; // 连上即重置退避
-      setIsConnected(true);
-      setAuthError(null); // 连上即清除授权失效提示
-
-      // In Relay Mode, auth/handshake is handled differently via pair-request flow (see settings UI).
-      // Once paired, we just send init normally. It will be wrapped.
-      // But if we are in missing-auth state for Relay, do NOT send init yet. The Settings screen handles pairing.
-      if (workspaceModeRef.current === "relay") {
-          if (settingsRef.current.relayToken && settingsRef.current.relayMachineId) {
-             // Relay mode: auth is handled by Daemon (preAuth), so init without token
-             ws.send(
-               JSON.stringify({
-                 type: "init",
-                 sessionId: sessionIdRef.current,
-                 projectId: projectIdRef.current || undefined,
-                 model: modelRef.current,
-                 gitCredentials: gitCredentialsRef.current?.filter((c) => c.token) || [],
-               })
-             );
-             replayOfflineQueue();
-          } else {
-             // Let the settings UI handle pairing. We are connected to relay but not to daemon yet.
-             console.log("[useAgent] Connected to relay but not paired yet.");
-          }
-      } else {
-        // Normal Cloud / Termux mode auth
-        if (authTokenRef.current) {
-          sendInit(ws, authTokenRef.current);
-        } else {
-          // Register anonymously first
-          const deviceId = getDeviceId();
-          ws.send(JSON.stringify({ type: "register", deviceId }));
-        }
-        replayOfflineQueue();
-      }
+      }),
+      isRelayPaired: () =>
+        !!(settingsRef.current.relayToken && settingsRef.current.relayMachineId),
     };
 
-    ws.onmessage = (event: MessageEvent<any> | { data: string }) => {
-      const data = typeof event.data === "string" ? JSON.parse(event.data) : JSON.parse(event.data.toString());
+    const handlers: ConnectionHandlers = {
+      onAgentEvent: (ev: AgentEventType) => {
+        // geek 模式的事件由本地适配层 emitGeek 产生,忽略来自服务器的流式事件
+        if (modeRef.current === "geek") return;
 
-      switch (data.type) {
-        // ── Auth response (anonymous registration) ──
-        case "auth": {
-          const token = data.token;
-          const userId = data.userId;
-          // Persist token (fire-and-forget)
-          updateSettings({ authToken: token, userId });
-          authTokenRef.current = token;
-          // Now send init
-          sendInit(ws, token);
-          break;
-        }
+        setMessages((prev) => applyAgentEvent(prev, ev));
+        const p = phaseFor(ev);
+        if (p) setStreamingPhase(p);
 
-        case "session":
-          setSessionId(data.sessionId);
-          break;
-
-        // ── Cloud mode events ────────────────────────
-        case "text-delta":
-          if (settings.mode === "cloud" && currentAssistantRef.current) {
-            setStreamingPhase("generating");
-            setMessages((prev) => {
-              const updated = [...prev];
-              const last = updated[updated.length - 1];
-              if (last?.role === "assistant") {
-                updated[updated.length - 1] = {
-                  ...last,
-                  content: last.content + data.text,
-                };
-              }
-              return updated;
-            });
-          }
-          break;
-
-        case "reasoning-delta":
-          if (settings.mode === "cloud" && currentAssistantRef.current) {
-            setStreamingPhase("thinking");
-            setMessages((prev) => {
-              const updated = [...prev];
-              const last = updated[updated.length - 1];
-              if (last?.role === "assistant") {
-                updated[updated.length - 1] = {
-                  ...last,
-                  thinking: (last.thinking || "") + data.text,
-                };
-              }
-              return updated;
-            });
-          }
-          break;
-
-        case "model-selected":
-          if (settings.mode === "cloud") {
-            setMessages((prev) => {
-              const updated = [...prev];
-              const last = updated[updated.length - 1];
-              if (last?.role === "assistant") {
-                updated[updated.length - 1] = {
-                  ...last,
-                  modelUsed: data.model,
-                };
-              }
-              return updated;
-            });
-          }
-          break;
-
-        case "tool-call":
-          if (settings.mode === "cloud") {
-            setStreamingPhase("tool-calling");
-            setCurrentToolName(data.toolName);
-            setMessages((prev) => {
-              const updated = [...prev];
-              const last = updated[updated.length - 1];
-              if (last?.role === "assistant") {
-                const toolCalls = [
-                  ...(last.toolCalls || []),
-                  { toolName: data.toolName, args: data.args },
-                ];
-                updated[updated.length - 1] = { ...last, toolCalls };
-              }
-              return updated;
-            });
-            // Transition to tool-running after a brief delay
+        switch (ev.type) {
+          case "tool-call":
+            setCurrentToolName(ev.name);
+            callNamesRef.current.set(ev.callId, ev.name);
+            // cloud 模式既有延迟转换:tool-call 后短暂进入 tool-running
             setTimeout(() => setStreamingPhase("tool-running"), 100);
-          }
-          break;
-
-        case "tool-result":
-          if (settings.mode === "cloud") {
-            setStreamingPhase("generating");
+            break;
+          case "tool-result": {
             setCurrentToolName(undefined);
-            setMessages((prev) => {
-              const updated = [...prev];
-              const last = updated[updated.length - 1];
-              if (last?.role === "assistant" && last.toolCalls) {
-                const toolCalls = [...last.toolCalls];
-                const tc = toolCalls.find(
-                  (t) => t.toolName === data.toolName && !t.result
-                );
-                if (tc) tc.result = data.result;
-                updated[updated.length - 1] = { ...last, toolCalls };
-              }
-              return updated;
-            });
-            // Notify when runCommand completes in background
-            if (data.toolName === "runCommand" && AppState.currentState !== "active") {
-              const res = data.result as { success?: boolean; stdout?: string; stderr?: string; error?: string };
-              const ok = res?.success !== false;
-              const output = (res?.stdout || res?.stderr || res?.error || "").trim();
-              const firstLine = output.split("\n")[0].slice(0, 80);
-              sendLocalNotification(
-                ok ? "命令执行完成 ✓" : "命令执行失败 ✗",
-                firstLine || (ok ? "命令已完成" : "命令执行失败")
-              );
-            }
-          } else {
-            // Geek mode: notify when runCommand completes in background
-            if (data.toolName === "runCommand" && AppState.currentState !== "active") {
-              const res = data.result as { success?: boolean; stdout?: string; stderr?: string; error?: string };
-              const ok = res?.success !== false;
-              const output = (res?.stdout || res?.stderr || res?.error || "").trim();
-              const firstLine = output.split("\n")[0].slice(0, 80);
-              sendLocalNotification(
-                ok ? "命令执行完成 ✓" : "命令执行失败 ✗",
-                firstLine || (ok ? "命令已完成" : "命令执行失败")
-              );
-            }
-            // Resolve the pending tool execution
-            const resolver = toolResolvers.current.get(data.callId);
-            if (resolver) {
-              resolver(data.result);
-              toolResolvers.current.delete(data.callId);
-            }
+            const name = callNamesRef.current.get(ev.callId);
+            if (name === "runCommand") notifyRunCommand(ev.result);
+            callNamesRef.current.delete(ev.callId);
+            break;
           }
-          break;
-
-        case "done":
-          if (settings.mode === "cloud") {
+          case "done":
+            callNamesRef.current.clear();
+            finalizeStreaming();
+            break;
+          case "error":
+            // reducer 已追加错误文案,这里只收敛 streaming 状态
             setIsStreaming(false);
             setStreamingPhase("idle");
             setCurrentToolName(undefined);
-            currentAssistantRef.current = null;
-            // Save after cloud mode round completes
-            saveMessages(messagesRef.current, sessionIdRef.current);
-            // Background notification
-            if (AppState.currentState !== "active") {
-              const lastMsg = messagesRef.current[messagesRef.current.length - 1];
-              const summary = lastMsg?.content?.slice(0, 100) || "任务已完成";
-              sendLocalNotification("Pocket Code", summary);
-            }
-          }
-          break;
-
-        case "error":
-          setIsStreaming(false);
-          setStreamingPhase("idle");
-          setCurrentToolName(undefined);
-          currentAssistantRef.current = null;
-          // 设备 token 被 daemon 拒绝(未授权/已撤销):重试同一个死 token 永远不会成功,
-          // 只会刷屏 daemon 日志。停止自动重连,提示用户重新配对。
-          // 重新配对会更新 relayToken → App 的 connIdentity effect 会自动重连。
-          if (typeof data.error === "string" && data.error.includes("Unauthorized")) {
-            shouldConnectRef.current = false;
-            clearReconnect();
-            setAuthError("设备未授权或配对已失效,请在设置中重新配对");
-            try { wsRef.current?.close(); } catch { /* ignore */ }
             break;
-          }
-          if (settings.mode === "cloud") {
-            setMessages((prev) => {
-              const updated = [...prev];
-              const last = updated[updated.length - 1];
-              if (last?.role === "assistant") {
-                updated[updated.length - 1] = {
-                  ...last,
-                  content: last.content + `\n\nError: ${data.error}`,
-                };
-              }
-              return updated;
-            });
-          }
-          break;
-
-        // ── File change notification (auto-sync) ──
-        case "file-changed": {
-          const changedPath: string = data.path;
-          const changeAction: "created" | "modified" | "deleted" = data.action;
-
-          // 1. Notify WorkspaceContext (triggers FilesTab refresh)
-          onFileChangedRef.current?.(changedPath, changeAction);
-
-          // 2. Auto-sync to local if in local workspace mode
-          if (workspaceModeRef.current === "local" && projectIdRef.current && shouldSyncFile(changedPath)) {
-            const localRoot = getProjectWorkspaceRoot(projectIdRef.current);
-            // Read from remote via existing WS connection, then write locally
-            requestFileContent(changedPath)
-              .then((result: any) => {
-                if (result?.success && result.content != null && result.content.length <= MAX_SYNC_FILE_SIZE) {
-                  writeLocalFile(changedPath, result.content, localRoot);
-                }
-              })
-              .catch(() => {
-                // Sync failure is non-critical — file is still on remote
-              });
-          }
-          break;
         }
-
-        // ── File operations + code sync (matched by _reqId) ──
-        case "file-list":
-        case "file-content":
-        case "sync-manifest":
-        case "sync-file-content": {
-          const reqId = data._reqId;
-          if (reqId) {
-            const resolver = fileResolvers.current.get(reqId);
-            if (resolver) {
-              resolver(data);
-              fileResolvers.current.delete(reqId);
+      },
+      onAuth: (token: string, userId: string) => {
+        updateSettings({ authToken: token, userId });
+        authTokenRef.current = token;
+      },
+      onSession: (sid: string) => setSessionId(sid),
+      onConnected: () => {
+        setIsConnected(true);
+        setAuthError(null);
+        replayOfflineQueue();
+      },
+      onDisconnected: () => setIsConnected(false),
+      onAuthError: (msg: string) => setAuthError(msg),
+      onFileChanged: (path: string, changeType: "created" | "modified" | "deleted") => {
+        onFileChangedRef.current?.(path, changeType);
+        // local 模式:自动同步到本地(读取失败非致命,文件仍在远端)
+        if (workspaceModeRef.current === "local" && projectIdRef.current && shouldSyncFile(path)) {
+          const localRoot = getProjectWorkspaceRoot(projectIdRef.current);
+          connRef.current?.readFile(path).then((result: any) => {
+            if (result?.success && result.content != null && result.content.length <= MAX_SYNC_FILE_SIZE) {
+              writeLocalFile(path, result.content, localRoot);
             }
-          }
-          break;
+          }).catch(() => { /* non-critical */ });
         }
-      }
+      },
     };
 
-    ws.onclose = (e: any) => {
-      console.log("[useAgent] WebSocket/Relay closed");
-      setIsConnected(false);
-      // 非主动断开 → 自动重连(退避)
-      if (shouldConnectRef.current) scheduleReconnect();
-    };
+    connRef.current = new ServerConnection(config, handlers);
+  }
+  const conn = connRef.current;
 
-    ws.onerror = (e: any) => {
-      console.error("[useAgent] WebSocket error");
-      setIsConnected(false);
-      // onerror 后通常会触发 onclose;由 onclose 统一调度重连
-    };
-  }, [getDeviceId, sendInit, replayOfflineQueue, clearReconnect, scheduleReconnect]);
+  // ── Offline queue replay(连接建立后) ─────────────────
+  const replayOfflineQueue = useCallback(async () => {
+    const queue = await getQueue();
+    for (const msg of queue) {
+      if (!conn.isOpen) break;
+      conn.sendRaw({ type: "message", content: msg.content, model: modelRef.current });
+      await dequeueMessage(msg.id);
+      await new Promise((r) => setTimeout(r, 500));
+    }
+  }, [conn]);
 
-  // 让重连定时器拿到最新的 connect
-  connectRef.current = connect;
+  // ── 连接控制 ──────────────────────────────────────────
+  const connect = useCallback(() => conn.connect(), [conn]);
 
   const disconnect = useCallback(() => {
-    shouldConnectRef.current = false; // 主动断开,停止自动重连
-    clearReconnect();
     abortRef.current?.abort();
-    wsRef.current?.close();
-    wsRef.current = null;
-  }, [clearReconnect]);
+    conn.disconnect();
+  }, [conn]);
 
   const stopStreaming = useCallback(() => {
-    // Geek mode: abort the AI stream
-    abortRef.current?.abort();
+    abortRef.current?.abort(); // geek:中断 AI 流
     abortRef.current = null;
-
-    // Cloud mode: send abort message to server
-    if (settings.mode === "cloud" && wsRef.current?.readyState === WebSocket.OPEN) {
-      wsRef.current.send(JSON.stringify({ type: "abort" }));
-    }
-
+    if (settings.mode === "cloud") conn.sendRaw({ type: "abort" }); // cloud:通知服务器
     setIsStreaming(false);
     setStreamingPhase("idle");
     setCurrentToolName(undefined);
-    currentAssistantRef.current = null;
-  }, [settings.mode]);
+  }, [settings.mode, conn]);
 
   // ── Execute a tool (geek mode) ──────────────────────
-  // workspaceMode=server: all tools go through WebSocket (Termux mode)
-  // workspaceMode=local: file tools run locally, runCommand falls back to WS
+  // server: 全部走 WS(Termux);local: 文件工具本地执行,runCommand 回退 WS
   const executeTool = useCallback(
     async (toolName: string, args: Record<string, unknown>): Promise<unknown> => {
-      // When workspaceMode is "local", try local execution first
       if (workspaceModeRef.current !== "server") {
         const localResult = await executeLocalTool(toolName, args, settingsRef.current);
-        if (localResult !== null) {
-          console.log("[useAgent] Tool executed locally:", toolName);
-          return localResult;
-        }
+        if (localResult !== null) return localResult;
       }
-
-      // WebSocket execution (Termux mode or runCommand fallback)
-      return new Promise((resolve, reject) => {
-        const ws = wsRef.current;
-        if (!ws || ws.readyState !== WebSocket.OPEN) {
-          reject(new Error("Tool server not connected. Cannot execute: " + toolName));
-          return;
-        }
-        const callId = `tc_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
-        toolResolvers.current.set(callId, resolve);
-
-        // Timeout after 30s
-        setTimeout(() => {
-          if (toolResolvers.current.has(callId)) {
-            toolResolvers.current.delete(callId);
-            reject(new Error(`Tool ${toolName} timed out`));
-          }
-        }, 30000);
-
-        ws.send(JSON.stringify({ type: "tool-exec", callId, toolName, args }));
-      });
+      return conn.execTool(toolName, args); // Termux 或 runCommand 回退
     },
-    []
+    [conn]
   );
 
-  // ── File operations via WebSocket ─────────────────────
-  const requestFileList = useCallback(
-    (path: string = "."): Promise<any> => {
-      return new Promise((resolve, reject) => {
-        const ws = wsRef.current;
-        if (!ws || ws.readyState !== WebSocket.OPEN) {
-          reject(new Error("WebSocket not connected"));
-          return;
-        }
-        const reqId = `fr_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
-        fileResolvers.current.set(reqId, resolve);
+  // ── File / sync RPC(透传 ServerConnection) ────────────
+  const requestFileList = useCallback((path: string = ".") => conn.listFiles(path), [conn]);
+  const requestFileContent = useCallback((path: string) => conn.readFile(path), [conn]);
+  const requestSyncPull = useCallback((sinceCommit?: string) => conn.syncPull(sinceCommit), [conn]);
+  const requestSyncFile = useCallback((commit: string, path: string) => conn.syncFile(commit, path), [conn]);
 
-        setTimeout(() => {
-          if (fileResolvers.current.has(reqId)) {
-            fileResolvers.current.delete(reqId);
-            reject(new Error("File list request timed out"));
-          }
-        }, 10000);
-
-        ws.send(JSON.stringify({ type: "list-files", path, _reqId: reqId }));
-      });
-    },
-    []
+  const deleteProjectWorkspace = useCallback(
+    (pid: string) => { conn.sendRaw({ type: "delete-project-workspace", projectId: pid }); },
+    [conn]
   );
 
-  const requestFileContent = useCallback(
-    (path: string): Promise<any> => {
-      return new Promise((resolve, reject) => {
-        const ws = wsRef.current;
-        if (!ws || ws.readyState !== WebSocket.OPEN) {
-          reject(new Error("WebSocket not connected"));
-          return;
-        }
-        const reqId = `fr_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
-        fileResolvers.current.set(reqId, resolve);
-
-        setTimeout(() => {
-          if (fileResolvers.current.has(reqId)) {
-            fileResolvers.current.delete(reqId);
-            reject(new Error("File read request timed out"));
-          }
-        }, 10000);
-
-        ws.send(JSON.stringify({ type: "read-file", path, _reqId: reqId }));
-      });
-    },
-    []
-  );
-
-  // ── Code sync (shadow snapshot) via WebSocket ─────────
-  const requestSyncPull = useCallback(
-    (sinceCommit?: string): Promise<any> => {
-      return new Promise((resolve, reject) => {
-        const ws = wsRef.current;
-        if (!ws || ws.readyState !== WebSocket.OPEN) {
-          reject(new Error("WebSocket not connected"));
-          return;
-        }
-        const reqId = `sp_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
-        fileResolvers.current.set(reqId, resolve);
-        setTimeout(() => {
-          if (fileResolvers.current.has(reqId)) {
-            fileResolvers.current.delete(reqId);
-            reject(new Error("Sync pull request timed out"));
-          }
-        }, 30000);
-        ws.send(JSON.stringify({ type: "sync-pull", sinceCommit, _reqId: reqId }));
-      });
-    },
-    []
-  );
-
-  const requestSyncFile = useCallback(
-    (commit: string, path: string): Promise<any> => {
-      return new Promise((resolve, reject) => {
-        const ws = wsRef.current;
-        if (!ws || ws.readyState !== WebSocket.OPEN) {
-          reject(new Error("WebSocket not connected"));
-          return;
-        }
-        const reqId = `sf_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
-        fileResolvers.current.set(reqId, resolve);
-        setTimeout(() => {
-          if (fileResolvers.current.has(reqId)) {
-            fileResolvers.current.delete(reqId);
-            reject(new Error("Sync file request timed out"));
-          }
-        }, 30000);
-        ws.send(JSON.stringify({ type: "sync-file", commit, path, _reqId: reqId }));
-      });
-    },
-    []
-  );
-
-  // ── Send message ──────────────────────────────────────
-  const sendMessage = useCallback(
-    async (content: string, images?: ImageAttachment[]) => {
-      if (settings.mode === "cloud") {
-        // If WebSocket is not connected, queue the message for later
-        if (!wsRef.current || wsRef.current.readyState !== WebSocket.OPEN) {
-          await enqueueMessage(sessionIdRef.current || "", content);
-          // Add user message locally so it's visible
-          const offlineMsg: Message = {
-            id: Date.now().toString(),
-            role: "user",
-            content,
-            images,
-            timestamp: Date.now(),
-            pending: true,
-          };
-          setMessages((prev) => [...prev, offlineMsg]);
-          return;
-        }
-        sendCloudMessage(content, images);
-      } else {
-        sendGeekMessage(content, images);
-      }
-    },
-    [settings.mode]
-  );
-
-
-
-  // ── Cloud mode: forward to Server (existing logic) ───
+  // ── 云端发送 ──────────────────────────────────────────
   const sendCloudMessage = useCallback(
     (content: string, images?: ImageAttachment[]) => {
-      if (!wsRef.current || wsRef.current.readyState !== WebSocket.OPEN) return;
-
-      const userMsg: Message = {
-        id: Date.now().toString(),
-        role: "user",
-        content,
-        images,
-        timestamp: Date.now(),
-      };
-
-      const assistantMsg: Message = {
-        id: (Date.now() + 1).toString(),
-        role: "assistant",
-        content: "",
-        toolCalls: [],
-        timestamp: Date.now(),
-      };
-
-      currentAssistantRef.current = assistantMsg;
-      setMessages((prev) => [...prev, userMsg, assistantMsg]);
+      setMessages((prev) => [...prev, mkUserMsg(content, images), mkAssistantMsg()]);
       setIsStreaming(true);
       setStreamingPhase("connecting");
 
-      const payload: Record<string, unknown> = {
-        type: "message",
-        content,
-        model: modelRef.current,
-      };
+      const payload: Record<string, unknown> = { type: "message", content, model: modelRef.current };
       if (images?.length) {
-        payload.images = images.map((img) => ({
-          base64: img.base64,
-          mimeType: img.mimeType,
-        }));
+        payload.images = images.map((img) => ({ base64: img.base64, mimeType: img.mimeType }));
       }
-      if (customPromptRef.current) {
-        payload.customPrompt = customPromptRef.current;
-      }
-      wsRef.current.send(JSON.stringify(payload));
+      if (customPromptRef.current) payload.customPrompt = customPromptRef.current;
+      conn.sendRaw(payload);
     },
-    []
+    [conn]
   );
+
+  // ── geek 模式:reducer 喂事件 ──────────────────────────
+  const emitGeek = useCallback((ev: AgentEventType) => {
+    setMessages((prev) => applyAgentEvent(prev, ev));
+    const p = phaseFor(ev);
+    if (p) setStreamingPhase(p);
+  }, []);
 
   // ── Geek mode: App drives the agent loop ─────────────
   const sendGeekMessage = useCallback(
@@ -809,250 +304,46 @@ export function useAgent({ settings, model = "deepseek-v3", customPrompt, projec
       const apiKeyField = getApiKeyField(modelConfig.provider);
       const apiKey = apiKeyField ? (settings.apiKeys[apiKeyField] || "") : "";
 
-      const userMsg: Message = {
-        id: Date.now().toString(),
-        role: "user",
-        content,
-        images,
-        timestamp: Date.now(),
-      };
-
-      const assistantMsg: Message = {
-        id: (Date.now() + 1).toString(),
-        role: "assistant",
-        content: "",
-        toolCalls: [],
-        timestamp: Date.now(),
-      };
-
-      setMessages((prev) => [...prev, userMsg, assistantMsg]);
+      const userMsg = mkUserMsg(content, images);
+      setMessages((prev) => [...prev, userMsg, mkAssistantMsg()]);
       setIsStreaming(true);
       setStreamingPhase("connecting");
 
-      // Build conversation history for the AI
-      const chatHistory: ChatMessage[] = [];
-      const allMsgs = [...messages, userMsg];
-      for (const msg of allMsgs) {
-        if (msg.role === "user") {
-          if (msg.images?.length) {
-            // Multi-modal message: build content parts (OpenAI image_url format)
-            // Anthropic conversion is handled in aiClient.ts streamChatAnthropic
-            const contentParts: any[] = [
-              { type: "text", text: msg.content },
-            ];
-            for (const img of msg.images) {
-              contentParts.push({
-                type: "image_url",
-                image_url: {
-                  url: `data:${img.mimeType};base64,${img.base64}`,
-                },
-              });
-            }
-            chatHistory.push({ role: "user", content: contentParts } as any);
-          } else {
-            chatHistory.push({ role: "user", content: msg.content });
-          }
-        } else if (msg.role === "assistant") {
-          if (msg.toolCalls?.length) {
-            const toolCalls: ToolCallRequest[] = msg.toolCalls.map((tc, i) => ({
-              id: `tc_hist_${msg.id}_${i}`,
-              type: "function" as const,
-              function: {
-                name: tc.toolName,
-                arguments: JSON.stringify(tc.args),
-              },
-            }));
-            chatHistory.push({
-              role: "assistant",
-              content: msg.content,
-              tool_calls: toolCalls,
-            });
-            for (let i = 0; i < msg.toolCalls.length; i++) {
-              const tc = msg.toolCalls[i];
-              if (tc.result !== undefined) {
-                chatHistory.push({
-                  role: "tool",
-                  content: JSON.stringify(tc.result),
-                  tool_call_id: `tc_hist_${msg.id}_${i}`,
-                });
-              }
-            }
-          } else {
-            chatHistory.push({ role: "assistant", content: msg.content });
-          }
-        }
-      }
-
+      const chatHistory = buildChatHistory([...messages, userMsg]);
       const abortController = new AbortController();
       abortRef.current = abortController;
-
-      const MAX_STEPS = 10;
-      let step = 0;
-
       try {
-        while (step < MAX_STEPS) {
-          step++;
-          let pendingToolCalls: {
-            id: string;
-            name: string;
-            args: Record<string, unknown>;
-          }[] = [];
-          let stepText = "";
-
-          await streamChat({
-            model: modelConfig,
-            apiKey,
-            messages: chatHistory,
-            signal: abortController.signal,
-            settings,
-            customPrompt: customPromptRef.current,
-            callbacks: {
-              onTextDelta: (text) => {
-                setStreamingPhase("generating");
-                stepText += text;
-                setMessages((prev) => {
-                  const updated = [...prev];
-                  const last = updated[updated.length - 1];
-                  if (last?.role === "assistant") {
-                    updated[updated.length - 1] = {
-                      ...last,
-                      content: last.content + text,
-                    };
-                  }
-                  return updated;
-                });
-              },
-              onThinking: (text) => {
-                setStreamingPhase("thinking");
-                setMessages((prev) => {
-                  const updated = [...prev];
-                  const last = updated[updated.length - 1];
-                  if (last?.role === "assistant") {
-                    updated[updated.length - 1] = {
-                      ...last,
-                      thinking: (last.thinking || "") + text,
-                    };
-                  }
-                  return updated;
-                });
-              },
-              onToolCall: (id, name, args) => {
-                setStreamingPhase("tool-calling");
-                setCurrentToolName(name);
-                pendingToolCalls.push({ id, name, args });
-                setMessages((prev) => {
-                  const updated = [...prev];
-                  const last = updated[updated.length - 1];
-                  if (last?.role === "assistant") {
-                    const toolCalls = [
-                      ...(last.toolCalls || []),
-                      { toolName: name, args },
-                    ];
-                    updated[updated.length - 1] = { ...last, toolCalls };
-                  }
-                  return updated;
-                });
-              },
-              onDone: () => { },
-              onError: (error) => {
-                setMessages((prev) => {
-                  const updated = [...prev];
-                  const last = updated[updated.length - 1];
-                  if (last?.role === "assistant") {
-                    updated[updated.length - 1] = {
-                      ...last,
-                      content: last.content + `\n\nError: ${error}`,
-                    };
-                  }
-                  return updated;
-                });
-              },
-            },
-          });
-
-          if (pendingToolCalls.length === 0) {
-            break;
-          }
-
-          const assistantToolCalls: ToolCallRequest[] = pendingToolCalls.map(
-            (tc) => ({
-              id: tc.id,
-              type: "function" as const,
-              function: {
-                name: tc.name,
-                arguments: JSON.stringify(tc.args),
-              },
-            })
-          );
-          chatHistory.push({
-            role: "assistant",
-            content: stepText,
-            tool_calls: assistantToolCalls,
-          });
-
-          for (const tc of pendingToolCalls) {
-            try {
-              setStreamingPhase("tool-running");
-              setCurrentToolName(tc.name);
-              const result = await executeTool(tc.name, tc.args);
-              chatHistory.push({
-                role: "tool",
-                content: JSON.stringify(result),
-                tool_call_id: tc.id,
-              });
-              setMessages((prev) => {
-                const updated = [...prev];
-                const last = updated[updated.length - 1];
-                if (last?.role === "assistant" && last.toolCalls) {
-                  const toolCalls = [...last.toolCalls];
-                  const existing = toolCalls.find(
-                    (t) => t.toolName === tc.name && !t.result
-                  );
-                  if (existing) existing.result = result;
-                  updated[updated.length - 1] = { ...last, toolCalls };
-                }
-                return updated;
-              });
-            } catch (err: any) {
-              const errorResult = { success: false, error: err.message };
-              chatHistory.push({
-                role: "tool",
-                content: JSON.stringify(errorResult),
-                tool_call_id: tc.id,
-              });
-            }
-          }
-        }
+        await runGeekLoop({
+          modelConfig, apiKey, chatHistory, signal: abortController.signal, settings,
+          customPrompt: customPromptRef.current,
+          emitGeek, executeTool, setCurrentToolName, setStreamingPhase,
+        });
       } catch (err: any) {
-        if (err.name !== "AbortError") {
-          setMessages((prev) => {
-            const updated = [...prev];
-            const last = updated[updated.length - 1];
-            if (last?.role === "assistant") {
-              updated[updated.length - 1] = {
-                ...last,
-                content: last.content + `\n\nError: ${err.message}`,
-              };
-            }
-            return updated;
-          });
-        }
+        if (err.name !== "AbortError") emitGeek({ type: "error", message: String(err.message) });
       } finally {
-        setIsStreaming(false);
-        setStreamingPhase("idle");
-        setCurrentToolName(undefined);
         abortRef.current = null;
-        // Save after geek mode round completes
-        saveMessages(messagesRef.current, sessionIdRef.current);
-        // Background notification
-        if (AppState.currentState !== "active") {
-          const lastMsg = messagesRef.current[messagesRef.current.length - 1];
-          const summary = lastMsg?.content?.slice(0, 100) || "任务已完成";
-          sendLocalNotification("Pocket Code", summary);
-        }
+        finalizeStreaming();
       }
     },
-    [messages, settings.apiKeys, executeTool, saveMessages]
+    [messages, settings, executeTool, emitGeek, finalizeStreaming]
+  );
+
+  // ── Send message ──────────────────────────────────────
+  const sendMessage = useCallback(
+    async (content: string, images?: ImageAttachment[]) => {
+      if (settings.mode === "cloud") {
+        if (!conn.isOpen) {
+          // 未连接:入队待重放,并本地插入 pending 用户消息以可见
+          await enqueueMessage(sessionIdRef.current || "", content);
+          setMessages((prev) => [...prev, { ...mkUserMsg(content, images), pending: true }]);
+          return;
+        }
+        sendCloudMessage(content, images);
+      } else {
+        sendGeekMessage(content, images);
+      }
+    },
+    [settings.mode, conn, sendCloudMessage, sendGeekMessage]
   );
 
   // ── Edit & Resend (conversation branching) ────────────
@@ -1061,125 +352,76 @@ export function useAgent({ settings, model = "deepseek-v3", customPrompt, projec
       const idx = messagesRef.current.findIndex((m) => m.id === messageId);
       if (idx === -1) return;
 
-      // Truncate messages to before the target message
+      // 截断到目标消息之前;立即更新 ref 供后续构建历史使用
       const truncated = messagesRef.current.slice(0, idx);
       setMessages(truncated);
-      // Update ref immediately so sendMessage uses truncated history
       messagesRef.current = truncated;
 
-      // For cloud mode, include rewindTo index
       if (settings.mode === "cloud") {
-        // Wait a tick for state to settle, then send with rewindTo
         await new Promise((r) => setTimeout(r, 50));
-        if (!wsRef.current || wsRef.current.readyState !== WebSocket.OPEN) return;
-
-        const userMsg: Message = {
-          id: Date.now().toString(),
-          role: "user",
-          content: newContent,
-          timestamp: Date.now(),
-        };
-        const assistantMsg: Message = {
-          id: (Date.now() + 1).toString(),
-          role: "assistant",
-          content: "",
-          toolCalls: [],
-          timestamp: Date.now(),
-        };
-
-        currentAssistantRef.current = assistantMsg;
-        setMessages((prev) => [...prev, userMsg, assistantMsg]);
+        if (!conn.isOpen) return;
+        setMessages((prev) => [...prev, mkUserMsg(newContent), mkAssistantMsg()]);
         setIsStreaming(true);
         setStreamingPhase("connecting");
 
         const payload: Record<string, unknown> = {
-          type: "message",
-          content: newContent,
-          model: modelRef.current,
-          rewindTo: idx,
+          type: "message", content: newContent, model: modelRef.current, rewindTo: idx,
         };
-        if (customPromptRef.current) {
-          payload.customPrompt = customPromptRef.current;
-        }
-        wsRef.current.send(JSON.stringify(payload));
+        if (customPromptRef.current) payload.customPrompt = customPromptRef.current;
+        conn.sendRaw(payload);
       } else {
-        // Geek mode: just send with truncated history
         await new Promise((r) => setTimeout(r, 50));
         sendGeekMessage(newContent);
       }
     },
-    [settings.mode]
+    [settings.mode, conn, sendGeekMessage]
   );
 
   // ── Session management ────────────────────────────────
-
   /** Load a previous session's messages and reconnect */
   const loadSession = useCallback(
     async (targetSessionId: string) => {
-      // Disconnect current
       abortRef.current?.abort();
-      wsRef.current?.close();
-      wsRef.current = null;
+      conn.disconnect();
       setIsConnected(false);
-
-      // Load messages
       const loaded = await loadChatHistory(targetSessionId);
       setMessages(loaded as Message[]);
       setSessionId(targetSessionId);
-      // Update ref immediately so connect() uses the new sessionId
-      sessionIdRef.current = targetSessionId;
+      sessionIdRef.current = targetSessionId; // 立即更新,供 connect() 使用
       setIsStreaming(false);
-
-      // Reconnect — connect() reads sessionIdRef.current
-      if (needsAutoConnect) {
-        setTimeout(() => connect(), 50);
-      }
+      if (needsAutoConnect) setTimeout(() => connect(), 50); // loadSession 断开后延迟重连
     },
-    [serverUrl, connect, needsAutoConnect]
+    [conn, connect, needsAutoConnect]
   );
 
   /** Start a new empty session */
   const newSession = useCallback(() => {
-    // Disconnect current
     abortRef.current?.abort();
-    wsRef.current?.close();
-    wsRef.current = null;
-
-    // Clear state
+    conn.disconnect();
     setMessages([]);
     setSessionId(null);
     setIsStreaming(false);
-  }, []);
+  }, [conn]);
 
   // ── Reset session when project changes ───────────────
-  // When the user switches projects, disconnect and start a new session
-  // so the server creates the workspace for the new project.
   useEffect(() => {
     if (!projectId) return;
     abortRef.current?.abort();
-    wsRef.current?.close();
-    wsRef.current = null;
+    conn.disconnect();
     setMessages([]);
     setSessionId(null);
     sessionIdRef.current = null;
     setIsStreaming(false);
     setIsConnected(false);
-  }, [projectId]);
+  }, [projectId, conn]);
 
   // ── Cleanup ───────────────────────────────────────────
   useEffect(() => {
     return () => {
       abortRef.current?.abort();
-      wsRef.current?.close();
+      conn.disconnect();
     };
-  }, []);
-
-  /** Send a request to delete a project's workspace directory on the server */
-  const deleteProjectWorkspace = useCallback((pid: string) => {
-    const ws = wsRef.current;
-    if (!ws || ws.readyState !== WebSocket.OPEN) return;
-    ws.send(JSON.stringify({ type: "delete-project-workspace", projectId: pid }));
-  }, []);
+  }, [conn]);
 
   return {
     messages,
