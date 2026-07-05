@@ -7,23 +7,25 @@ import { WebSocketServer, WebSocket } from "ws";
 import { createServer, type IncomingMessage, type ServerResponse } from "http";
 import crypto from "crypto";
 import {
-  registerDaemon,
   unregisterDaemon,
-  updateHeartbeat,
   getOnlineMachines,
-  forwardToDaemon,
-  forwardToApp,
-  forwardPairRequest,
-  forwardPairResponse,
   cleanupStaleDaemons,
   sendRawToDaemon,
 } from "./relay.js";
 import { RequestTracker } from "./requestTracker.js";
 import { TunnelHub } from "./tunnelHub.js";
+import { requireRelaySecret } from "./config.js";
+import { createConnState, handleRelayInbound } from "./messageRouter.js";
 
 const PORT = parseInt(process.env.PORT || "3200", 10);
-const RELAY_SECRET = process.env.RELAY_SECRET || "";
-const HMAC_TIME_WINDOW_MS = 5 * 60 * 1000; // 5 minutes for replay prevention
+
+let RELAY_SECRET: string;
+try {
+  RELAY_SECRET = requireRelaySecret();
+} catch (err: any) {
+  console.error(`[Relay] 启动失败:${err.message}`);
+  process.exit(1);
+}
 
 // ── 反向 HTTP 隧道枢纽(关联 http 请求与 tunnelId) ──
 const tunnelHub = new TunnelHub();
@@ -65,7 +67,7 @@ const httpServer = createServer(
       req.on("data", (c) => chunks.push(c as Buffer));
       req.on("end", () => {
         const body = chunks.length ? Buffer.concat(chunks).toString("base64") : undefined;
-        tunnelHub.open(tunnelId, res, extraHeaders);
+        tunnelHub.open(tunnelId, res, machineId, extraHeaders);
         const ok = sendRawToDaemon(machineId, {
           type: "tunnel-request",
           tunnelId,
@@ -119,232 +121,26 @@ setInterval(cleanupStaleDaemons, 20 * 1000);
 
 // ── Connection Handling ───────────────────────────────
 
-function sendJSON(ws: WebSocket, data: unknown) {
-  if (ws.readyState === WebSocket.OPEN) {
-    ws.send(JSON.stringify(data));
-  }
-}
-
 wss.on("connection", (ws: WebSocket) => {
-  // Track what this socket represents
-  let role: "unknown" | "daemon" | "app" = "unknown";
-  let machineId: string | null = null;
-
+  const state = createConnState();
   console.log("[Relay] New connection");
 
   ws.on("message", (raw: Buffer) => {
-    try {
-      const msg = JSON.parse(raw.toString());
-
-      switch (msg.type) {
-        // ── Daemon registration ──────────────────────
-        case "daemon-register": {
-          if (!msg.machineId || !msg.machineName) {
-            sendJSON(ws, {
-              type: "error",
-              error: "machineId and machineName are required",
-            });
-            return;
-          }
-
-          // Verify HMAC if RELAY_SECRET is configured
-          if (RELAY_SECRET) {
-            if (!msg.authToken || !msg.timestamp) {
-              sendJSON(ws, {
-                type: "error",
-                error: "Registration requires authToken and timestamp when RELAY_SECRET is set.",
-              });
-              return;
-            }
-
-            // Replay prevention: reject timestamps outside the time window
-            const now = Date.now();
-            if (Math.abs(now - msg.timestamp) > HMAC_TIME_WINDOW_MS) {
-              sendJSON(ws, {
-                type: "error",
-                error: "Registration timestamp expired. Check system clock sync.",
-              });
-              return;
-            }
-
-            // Verify HMAC-SHA256(machineId + timestamp, RELAY_SECRET)
-            const expectedHmac = crypto
-              .createHmac("sha256", RELAY_SECRET)
-              .update(msg.machineId + msg.timestamp)
-              .digest("hex");
-
-            if (!crypto.timingSafeEqual(
-              Buffer.from(msg.authToken, "hex"),
-              Buffer.from(expectedHmac, "hex")
-            )) {
-              sendJSON(ws, {
-                type: "error",
-                error: "Invalid authToken. RELAY_SECRET mismatch.",
-              });
-              return;
-            }
-          }
-
-          role = "daemon";
-          machineId = msg.machineId;
-          registerDaemon(ws, msg.machineId, msg.machineName);
-          sendJSON(ws, {
-            type: "daemon-registered",
-            machineId: msg.machineId,
-          });
-          break;
-        }
-
-        // ── Daemon heartbeat ─────────────────────────
-        case "daemon-heartbeat": {
-          if (msg.machineId) {
-            updateHeartbeat(msg.machineId);
-          }
-          break;
-        }
-
-        // ── Daemon responses (forward to App) ────────
-        case "forward-response": {
-          if (role !== "daemon" || !msg.requestId) return;
-          // We need the appSocket — find it by tracking
-          // The relay-request handler stores the appSocket per requestId
-          const appSocket = requests.get(msg.requestId);
-          if (appSocket) {
-            forwardToApp(appSocket, "relay-response", msg.requestId, msg.payload);
-            requests.delete(msg.requestId);
-          }
-          break;
-        }
-
-        case "forward-stream": {
-          if (role !== "daemon" || !msg.requestId) return;
-          const streamAppSocket = requests.get(msg.requestId);
-          if (streamAppSocket) {
-            forwardToApp(
-              streamAppSocket,
-              "relay-stream",
-              msg.requestId,
-              msg.payload
-            );
-            // 流有多个分片,不在每片删除;"done" 标志流结束才删,
-            // 其余悬挂请求由 TTL 清理兜底。
-            if (msg.payload?.type === "done") {
-              requests.delete(msg.requestId);
-            }
-          }
-          break;
-        }
-
-        // ── Daemon pair-response ─────────────────────
-        case "pair-response": {
-          if (role !== "daemon" || !machineId) return;
-          forwardPairResponse(machineId, msg);
-          break;
-        }
-
-        // ── Daemon 隧道回帧(route to TunnelHub) ──────
-        case "tunnel-response": {
-          if (role !== "daemon" || !msg.tunnelId) return;
-          tunnelHub.onResponse(msg.tunnelId, msg.status, msg.headers || {});
-          break;
-        }
-        case "tunnel-chunk": {
-          if (role !== "daemon" || !msg.tunnelId) return;
-          tunnelHub.onChunk(msg.tunnelId, msg.data);
-          break;
-        }
-        case "tunnel-end": {
-          if (role !== "daemon" || !msg.tunnelId) return;
-          tunnelHub.onEnd(msg.tunnelId, msg.error);
-          break;
-        }
-
-        // ── App: list online machines ────────────────
-        case "list-machines": {
-          role = "app";
-          const machines = getOnlineMachines();
-          sendJSON(ws, { type: "machines-list", machines });
-          break;
-        }
-
-        // ── App: pair request ────────────────────────
-        case "pair-request": {
-          role = "app";
-          if (!msg.pairingCode || !msg.deviceId || !msg.deviceName) {
-            sendJSON(ws, {
-              type: "pair-response",
-              success: false,
-              error: "pairingCode, deviceId, and deviceName are required",
-            });
-            return;
-          }
-          forwardPairRequest(
-            ws,
-            msg.pairingCode,
-            msg.deviceId,
-            msg.deviceName,
-            msg.machineId
-          );
-          break;
-        }
-
-        // ── App: relay-request (business message) ────
-        case "relay-request": {
-          role = "app";
-          if (!msg.token || !msg.machineId || !msg.requestId || !msg.payload) {
-            sendJSON(ws, {
-              type: "error",
-              error: "token, machineId, requestId, and payload are required",
-            });
-            return;
-          }
-
-          // Track this request so we can route daemon responses back
-          requests.track(msg.requestId, ws);
-
-          const forwarded = forwardToDaemon(
-            msg.machineId,
-            msg.requestId,
-            msg.token,
-            msg.payload
-          );
-
-          if (!forwarded) {
-            requests.delete(msg.requestId);
-            sendJSON(ws, {
-              type: "relay-response",
-              requestId: msg.requestId,
-              payload: {
-                type: "error",
-                error: `Daemon ${msg.machineId} is not online.`,
-              },
-            });
-          }
-          break;
-        }
-
-        default: {
-          sendJSON(ws, {
-            type: "error",
-            error: `Unknown message type: ${msg.type}`,
-          });
-        }
-      }
-    } catch (err: any) {
-      console.error("[Relay] Parse error:", err.message);
-      sendJSON(ws, { type: "error", error: "Invalid JSON" });
-    }
+    handleRelayInbound(ws, raw.toString(), state, {
+      relaySecret: RELAY_SECRET,
+      requests,
+      tunnelHub,
+    });
   });
 
   ws.on("close", () => {
-    console.log(`[Relay] Connection closed (role: ${role})`);
-    if (role === "daemon") {
+    console.log(`[Relay] Connection closed (role: ${state.role})`);
+    if (state.role === "daemon") {
       unregisterDaemon(ws);
-      // 中止该 daemon 相关隧道(简单起见全部中止;精确按 machineId 关联后续优化)。
-      tunnelHub.abortAll(`daemon offline`);
+      // 只中止该 daemon 的隧道(原 abortAll 全断)
+      if (state.machineId) tunnelHub.abortByMachine(state.machineId);
     }
-    // Cleanup any pending requests from this app socket
-    if (role === "app") {
+    if (state.role === "app") {
       requests.deleteBySocket(ws);
     }
   });
