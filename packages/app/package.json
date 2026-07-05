@@ -6,7 +6,8 @@
     "start": "expo start",
     "android": "expo run:android",
     "ios": "expo run:ios",
-    "web": "expo start --web"
+    "web": "expo start --web",
+    "test": "vitest run src"
   },
   "dependencies": {
     "@react-native-async-storage/async-storage": "^2.2.0",
@@ -34,8 +35,10 @@
     "react-native-webview": "^13.16.1"
   },
   "devDependencies": {
+    "@pocket-code/wire": "workspace:*",
     "@types/react": "~19.1.0",
-    "typescript": "~5.9.2"
+    "typescript": "~5.9.2",
+    "vitest": "^4.0.18"
   },
   "private": true
 }

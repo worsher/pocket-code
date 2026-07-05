@@ -12,7 +12,7 @@
     "build:daemon": "pnpm --filter @pocket-code/daemon build",
     "dev:app": "pnpm --filter @pocket-code/app start",
     "test": "pnpm --filter @pocket-code/server test",
-    "test:all": "pnpm --filter @pocket-code/wire --filter @pocket-code/server --filter @pocket-code/daemon --filter @pocket-code/relay test",
+    "test:all": "pnpm --filter @pocket-code/wire --filter @pocket-code/server --filter @pocket-code/daemon --filter @pocket-code/relay --filter @pocket-code/app test",
     "build": "pnpm -r --if-present build",
     "typecheck:app": "pnpm --filter @pocket-code/app exec tsc --noEmit",
     "lint": "eslint packages/server/src packages/app/src",
