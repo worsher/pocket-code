@@ -33,6 +33,23 @@ export function makeTunnelWss(): WebSocketServer {
 
 export function createUpgradeHandler(deps: UpgradeDeps) {
   return (req: IncomingMessage, socket: Duplex, head: Buffer): void => {
+    try {
+      dispatchUpgrade(deps, req, socket, head);
+    } catch (err: any) {
+      // 本处理器是所有 upgrade 流量的单一入口:任何同步异常都不能让
+      // 进程崩溃或留下悬挂 socket(原 { server } 挂载由 ws 库内部兜底)。
+      console.error(`[Relay] Upgrade handler error: ${err?.message ?? err}`);
+      try { socket.destroy(); } catch { /* ignore */ }
+    }
+  };
+}
+
+function dispatchUpgrade(
+  deps: UpgradeDeps,
+  req: IncomingMessage,
+  socket: Duplex,
+  head: Buffer
+): void {
     const url = new URL(req.url || "", `http://localhost:${deps.port || 80}`);
 
     let machineId: string | null = null;
@@ -83,5 +100,4 @@ export function createUpgradeHandler(deps: UpgradeDeps) {
       });
       if (!ok) deps.wsTunnelHub.onClose(tunnelId, 1013, `daemon ${machineId} offline`);
     });
-  };
 }
