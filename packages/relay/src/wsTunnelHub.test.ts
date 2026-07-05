@@ -46,12 +46,17 @@ describe("WsTunnelHub", () => {
   });
 
   it("closes the tunnel when pre-open buffer exceeds 64 messages", () => {
-    const hub = new WsTunnelHub(() => true);
+    const toDaemon = vi.fn((_machineId: string, _frame: unknown) => true);
+    const hub = new WsTunnelHub(toDaemon);
     const ws = mockBrowserWs();
     hub.open("ws_2", ws as any, "m_A");
     for (let i = 0; i < 65; i++) ws.emit("message", Buffer.from("x"), false);
     expect(ws.closed?.code).toBe(1011);
     expect(hub.size).toBe(0);
+    // daemon 必须收到 close 通知(否则其本地连接泄漏)
+    const closeFrames = toDaemon.mock.calls.filter((c) => (c[1] as any).type === "tunnel-ws-close");
+    expect(closeFrames).toHaveLength(1);
+    expect((closeFrames[0][1] as any).code).toBe(1011);
   });
 
   it("writes daemon data frames to browser ws and drops frames from non-owner", () => {

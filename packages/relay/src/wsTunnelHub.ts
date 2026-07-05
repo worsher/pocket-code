@@ -40,6 +40,10 @@ export class WsTunnelHub {
       if (!t.opened) {
         if (t.buffer.length >= MAX_PREOPEN_BUFFER) {
           console.warn(`[Relay] WS tunnel ${tunnelId} pre-open buffer overflow, closing`);
+          // relay 单方面关闭:daemon 不知情,必须显式通知其清理本地连接
+          this.sendToDaemon(t.machineId, {
+            type: "tunnel-ws-close", tunnelId, code: 1011, reason: "tunnel buffer overflow",
+          });
           this.tunnels.delete(tunnelId);
           try { browserWs.close(1011, "tunnel buffer overflow"); } catch { /* ignore */ }
           return;
