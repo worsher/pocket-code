@@ -88,3 +88,15 @@ export {
   type TunnelEndType,
   type TunnelFrameType,
 } from "./tunnel.js";
+
+// Boundary inbound unions (P6a: relay/daemon message validation)
+export {
+  RelayErrorMessage,
+  DaemonRegistered,
+  RelayInbound,
+  DaemonInbound,
+  type RelayErrorMessageType,
+  type DaemonRegisteredType,
+  type RelayInboundType,
+  type DaemonInboundType,
+} from "./inbound.js";
