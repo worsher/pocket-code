@@ -15,6 +15,7 @@ import {
 import { RequestTracker } from "./requestTracker.js";
 import { TunnelHub } from "./tunnelHub.js";
 import { WsTunnelHub } from "./wsTunnelHub.js";
+import { createUpgradeHandler, makeTunnelWss } from "./upgradeRouter.js";
 import { requireRelaySecret } from "./config.js";
 import { createConnState, handleRelayInbound } from "./messageRouter.js";
 
@@ -116,7 +117,18 @@ const httpServer = createServer(
 
 // ── WebSocket Server ──────────────────────────────────
 
-const wss = new WebSocketServer({ server: httpServer });
+const wss = new WebSocketServer({ noServer: true });
+const tunnelWss = makeTunnelWss();
+httpServer.on(
+  "upgrade",
+  createUpgradeHandler({
+    controlWss: wss,
+    tunnelWss,
+    wsTunnelHub,
+    sendToDaemon: sendRawToDaemon,
+    port: PORT,
+  })
+);
 
 httpServer.listen(PORT, "0.0.0.0", () => {
   console.log(`[Relay] Listening on ws://0.0.0.0:${PORT}`);
