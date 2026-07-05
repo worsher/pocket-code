@@ -12,6 +12,9 @@ describe("RelayInbound", () => {
     { type: "tunnel-response", tunnelId: "t1", status: 200, headers: {} },
     { type: "tunnel-chunk", tunnelId: "t1", data: "YWJj" },
     { type: "tunnel-end", tunnelId: "t1" },
+    { type: "tunnel-ws-opened", tunnelId: "ws_1" },
+    { type: "tunnel-ws-data", tunnelId: "ws_1", data: "x" },
+    { type: "tunnel-ws-close", tunnelId: "ws_1", code: 1000 },
     { type: "list-machines" },
     { type: "pair-request", pairingCode: "ABCD2345", deviceId: "d1", deviceName: "Phone" },
     { type: "relay-request", token: "jwt", machineId: "m_1", requestId: "r1", payload: { type: "abort" } },
@@ -34,6 +37,9 @@ describe("DaemonInbound", () => {
     { type: "pair-request", pairingCode: "ABCD2345", deviceId: "d1", deviceName: "Phone" },
     { type: "forward-request", token: "jwt", requestId: "r1", payload: { type: "abort" } },
     { type: "tunnel-request", tunnelId: "t1", port: 5173, method: "GET", path: "/", headers: {} },
+    { type: "tunnel-ws-open", tunnelId: "ws_1", port: 5173, path: "/", headers: {} },
+    { type: "tunnel-ws-data", tunnelId: "ws_1", data: "x", binary: true },
+    { type: "tunnel-ws-close", tunnelId: "ws_1" },
     { type: "error", error: "boom" },
   ];
   it.each(valid.map((v) => [(v as any).type, v]))("accepts %s", (_t, v) => {

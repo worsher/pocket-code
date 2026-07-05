@@ -35,15 +35,57 @@ export const TunnelEnd = z.object({
   error: z.string().optional(),
 });
 
+// ── WS 隧道帧(P7 HMR:dev server 的 WebSocket 经隧道透传) ──
+
+export const TunnelWsOpen = z.object({
+  type: z.literal("tunnel-ws-open"),
+  tunnelId: z.string().min(1).max(64),
+  port: z.number().int().min(1).max(65535),
+  path: z.string().max(8192),
+  /** 白名单透传:cookie / sec-websocket-protocol / user-agent;origin 已由 relay 重写 */
+  headers: z.record(z.string()),
+});
+
+export const TunnelWsOpened = z.object({
+  type: z.literal("tunnel-ws-opened"),
+  tunnelId: z.string(),
+  /** daemon 侧协商出的子协议 */
+  protocol: z.string().optional(),
+});
+
+export const TunnelWsData = z.object({
+  type: z.literal("tunnel-ws-data"),
+  tunnelId: z.string(),
+  /** 文本消息直传;binary 时为 base64 */
+  data: z.string(),
+  binary: z.boolean().optional(),
+});
+
+export const TunnelWsClose = z.object({
+  type: z.literal("tunnel-ws-close"),
+  tunnelId: z.string(),
+  /** 原始关闭码(调用 ws.close 前由消费方夹紧) */
+  code: z.number().int().optional(),
+  reason: z.string().max(512).optional(),
+});
+
 export const TunnelFrame = z.discriminatedUnion("type", [
   TunnelRequest,
   TunnelResponse,
   TunnelChunk,
   TunnelEnd,
+  TunnelWsOpen,
+  TunnelWsOpened,
+  TunnelWsData,
+  TunnelWsClose,
 ]);
 
 export type TunnelRequestType = z.infer<typeof TunnelRequest>;
 export type TunnelResponseType = z.infer<typeof TunnelResponse>;
 export type TunnelChunkType = z.infer<typeof TunnelChunk>;
 export type TunnelEndType = z.infer<typeof TunnelEnd>;
+export type TunnelWsOpenType = z.infer<typeof TunnelWsOpen>;
+export type TunnelWsOpenedType = z.infer<typeof TunnelWsOpened>;
+export type TunnelWsDataType = z.infer<typeof TunnelWsData>;
+export type TunnelWsCloseType = z.infer<typeof TunnelWsClose>;
 export type TunnelFrameType = z.infer<typeof TunnelFrame>;

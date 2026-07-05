@@ -16,7 +16,7 @@ import {
   ForwardResponse,
   ForwardStream,
 } from "./relay.js";
-import { TunnelRequest, TunnelResponse, TunnelChunk, TunnelEnd } from "./tunnel.js";
+import { TunnelRequest, TunnelResponse, TunnelChunk, TunnelEnd, TunnelWsOpen, TunnelWsOpened, TunnelWsData, TunnelWsClose } from "./tunnel.js";
 
 /** relay → daemon / relay → app 的通用错误消息 */
 export const RelayErrorMessage = z.object({
@@ -42,6 +42,9 @@ export const RelayInbound = z.union([
   TunnelResponse,
   TunnelChunk,
   TunnelEnd,
+  TunnelWsOpened,
+  TunnelWsData,
+  TunnelWsClose,
   ListMachines,
   PairRequest,
   RelayRequest,
@@ -54,6 +57,9 @@ export const DaemonInbound = z.union([
   PairRequest,
   ForwardRequest,
   TunnelRequest,
+  TunnelWsOpen,
+  TunnelWsData,
+  TunnelWsClose,
   RelayErrorMessage,
 ]);
 export type DaemonInboundType = z.infer<typeof DaemonInbound>;
