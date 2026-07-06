@@ -87,7 +87,11 @@ export function runCliAgent(
 
   const handle = (event: AgentEventType) => {
     if (event.type === "text-delta") fullText += event.text;
-    if (event.type === "error") errorEmitted = true;
+    if (event.type === "error") {
+      errorEmitted = true;
+      // CLI 的 API 错误走 NDJSON in-band(不进 stderr),不落日志的话本地毫无痕迹
+      console.error(`[CLI:${adapter.id}] error event:`, event.message.slice(0, 300));
+    }
     if (event.type !== "done") producedOutput = true;
     onEvent(event);
   };

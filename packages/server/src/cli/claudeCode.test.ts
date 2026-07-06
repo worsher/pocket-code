@@ -148,6 +148,7 @@ describe("claudeCodeAdapter.buildSpawn", () => {
     const spec = claudeCodeAdapter.buildSpawn("x", { workspace: "/ws" });
     expect(spec.env.ANTHROPIC_API_KEY).toBeUndefined();
     expect(spec.env.ANTHROPIC_AUTH_TOKEN).toBeUndefined();
+    expect(spec.env.ANTHROPIC_BASE_URL).toBeUndefined();
   });
 
   it("appends project system prompt when customPrompt is provided", () => {
