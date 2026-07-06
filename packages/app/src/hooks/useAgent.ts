@@ -65,7 +65,7 @@ const mkAssistantMsg = (): Message => ({
 });
 
 // ── Main Hook ──────────────────────────────────────────
-export function useAgent({ settings, model = "deepseek-v3", customPrompt, projectId, onFileChanged }: UseAgentOptions) {
+export function useAgent({ settings, model = "deepseek-v4-flash", customPrompt, projectId, onFileChanged }: UseAgentOptions) {
   const [messages, setMessages] = useState<Message[]>([]);
   const [isConnected, setIsConnected] = useState(false);
   const [isStreaming, setIsStreaming] = useState(false);

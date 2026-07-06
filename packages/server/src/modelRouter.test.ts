@@ -7,7 +7,7 @@ describe("modelRouter — analyzePrompt", () => {
     it("should classify simple greetings as simple", () => {
         const result = analyzePrompt("hello", emptyHistory);
         expect(result.complexity).toBe("simple");
-        expect(result.suggestedModel).toBe("deepseek-v3");
+        expect(result.suggestedModel).toBe("deepseek-v4-flash");
     });
 
     it("should classify Chinese greetings as simple", () => {
@@ -56,6 +56,6 @@ describe("modelRouter — analyzePrompt", () => {
     it("should default to medium for normal coding requests", () => {
         const result = analyzePrompt("帮我写一个函数计算两数之和", emptyHistory);
         expect(result.complexity).toBe("medium");
-        expect(result.suggestedModel).toBe("deepseek-v3");
+        expect(result.suggestedModel).toBe("deepseek-v4-flash");
     });
 });

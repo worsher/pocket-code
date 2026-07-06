@@ -35,7 +35,7 @@ export async function initDb(): Promise<void> {
       project_id TEXT NOT NULL DEFAULT '',
       title TEXT DEFAULT '',
       messages TEXT DEFAULT '[]',
-      model_key TEXT DEFAULT 'deepseek-v3',
+      model_key TEXT DEFAULT 'deepseek-v4-flash',
       created_at INTEGER NOT NULL,
       updated_at INTEGER NOT NULL
     );

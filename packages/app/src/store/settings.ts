@@ -84,7 +84,7 @@ export const DEFAULT_SETTINGS: AppSettings = {
     toolServerUrl: "ws://localhost:3100",
     relayServerUrl: "wss://relay.your-vps.com", // Example URL, configurable in UI
     apiKeys: {},
-    defaultModel: "deepseek-v3",
+    defaultModel: "deepseek-v4-flash",
     gitCredentials: [],
 };
 

@@ -219,7 +219,7 @@ function sendInit(
     JSON.stringify({
       type: "init",
       projectId,
-      model: settings.defaultModel || "deepseek-v3",
+      model: settings.defaultModel || "deepseek-v4-flash",
       ...(authToken ? { token: authToken } : {}),
       gitCredentials:
         settings.gitCredentials?.filter((c) => c.token) || [],
@@ -257,7 +257,7 @@ function initSession(
         JSON.stringify({
           type: "init",
           projectId,
-          model: settings.defaultModel || "deepseek-v3",
+          model: settings.defaultModel || "deepseek-v4-flash",
           gitCredentials:
             settings.gitCredentials?.filter((c) => c.token) || [],
         })
