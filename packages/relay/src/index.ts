@@ -3,24 +3,50 @@
 // mobile App clients and local Daemon processes.
 // Does NOT execute any business logic — only auth and routing.
 
+// 加载 .env:依次尝试 cwd → 包根 → 仓库根(已存在的变量不被覆盖)。
+// pnpm --filter 运行时 cwd 是包目录,直接跑 dist 时 cwd 可能是仓库根,三级都兜住。
+import { config as loadEnv } from "dotenv";
+import { fileURLToPath } from "url";
+import { dirname, join as joinPath } from "path";
+loadEnv();
+{
+  const here = dirname(fileURLToPath(import.meta.url)); // src/ 或 dist/
+  loadEnv({ path: joinPath(here, "..", ".env") });               // 包根
+  loadEnv({ path: joinPath(here, "..", "..", "..", ".env") });   // 仓库根
+}
 import { WebSocketServer, WebSocket } from "ws";
 import { createServer, type IncomingMessage, type ServerResponse } from "http";
 import crypto from "crypto";
 import {
-  registerDaemon,
   unregisterDaemon,
-  updateHeartbeat,
   getOnlineMachines,
-  forwardToDaemon,
-  forwardToApp,
-  forwardPairRequest,
-  forwardPairResponse,
   cleanupStaleDaemons,
+  sendRawToDaemon,
 } from "./relay.js";
+import { RequestTracker } from "./requestTracker.js";
+import { TunnelHub } from "./tunnelHub.js";
+import { WsTunnelHub } from "./wsTunnelHub.js";
+import { createUpgradeHandler, makeTunnelWss } from "./upgradeRouter.js";
+import { requireRelaySecret } from "./config.js";
+import { createConnState, handleRelayInbound } from "./messageRouter.js";
 
 const PORT = parseInt(process.env.PORT || "3200", 10);
-const RELAY_SECRET = process.env.RELAY_SECRET || "";
-const HMAC_TIME_WINDOW_MS = 5 * 60 * 1000; // 5 minutes for replay prevention
+
+let RELAY_SECRET: string;
+try {
+  RELAY_SECRET = requireRelaySecret();
+} catch (err: any) {
+  console.error(`[Relay] 启动失败:${err.message}`);
+  process.exit(1);
+}
+
+// ── 反向 HTTP 隧道枢纽(关联 http 请求与 tunnelId) ──
+const tunnelHub = new TunnelHub();
+
+// ── WS 隧道枢纽(P7 HMR,关联浏览器 ws 与 tunnelId) ──
+const wsTunnelHub = new WsTunnelHub((machineId, frame) => {
+  return sendRawToDaemon(machineId, frame);
+});
 
 // ── HTTP Server (health check only) ──────────────────
 
@@ -42,6 +68,59 @@ const httpServer = createServer(
       return;
     }
 
+    // 启动一条隧道:收齐请求体后转给 daemon。
+    const startTunnel = (
+      machineId: string,
+      port: number,
+      path: string,
+      extraHeaders?: Record<string, string>
+    ) => {
+      const tunnelId = crypto.randomUUID();
+      const headers: Record<string, string> = {};
+      for (const [k, v] of Object.entries(req.headers)) {
+        if (typeof v === "string") headers[k] = v;
+        else if (Array.isArray(v)) headers[k] = v.join(", ");
+      }
+      const chunks: Buffer[] = [];
+      req.on("data", (c) => chunks.push(c as Buffer));
+      req.on("end", () => {
+        const body = chunks.length ? Buffer.concat(chunks).toString("base64") : undefined;
+        tunnelHub.open(tunnelId, res, machineId, extraHeaders);
+        const ok = sendRawToDaemon(machineId, {
+          type: "tunnel-request",
+          tunnelId,
+          port,
+          method: req.method || "GET",
+          path,
+          headers,
+          body,
+        });
+        if (!ok) tunnelHub.onEnd(tunnelId, `daemon ${machineId} offline`);
+      });
+    };
+
+    // ── 显式隧道: /t/<machineId>/<port>/<rest> ──
+    // 顺便下发 pc_tunnel cookie,使该页的「绝对路径子资源」(如 vite 的 /src/x)
+    // 也能被路由回同一隧道(否则绝对路径会丢掉 /t/<id>/<port> 前缀而 404)。
+    const tunnelMatch = url.pathname.match(/^\/t\/([^/]+)\/(\d+)(\/.*)?$/);
+    if (tunnelMatch) {
+      const [, machineId, portStr, rest] = tunnelMatch;
+      const port = parseInt(portStr, 10);
+      startTunnel(machineId, port, (rest || "/") + (url.search || ""), {
+        "Set-Cookie": `pc_tunnel=${machineId}:${port}; Path=/; SameSite=Lax`,
+      });
+      return;
+    }
+
+    // ── 绝对路径子资源:靠 pc_tunnel cookie 路由回同一隧道 ──
+    const cookieMatch = (req.headers.cookie || "").match(
+      /(?:^|;\s*)pc_tunnel=([^:;]+):(\d+)/
+    );
+    if (cookieMatch) {
+      startTunnel(cookieMatch[1], parseInt(cookieMatch[2], 10), url.pathname + (url.search || ""));
+      return;
+    }
+
     res.writeHead(404, { "Content-Type": "application/json" });
     res.end(JSON.stringify({ error: "Not Found" }));
   }
@@ -49,7 +128,18 @@ const httpServer = createServer(
 
 // ── WebSocket Server ──────────────────────────────────
 
-const wss = new WebSocketServer({ server: httpServer });
+const wss = new WebSocketServer({ noServer: true });
+const tunnelWss = makeTunnelWss();
+httpServer.on(
+  "upgrade",
+  createUpgradeHandler({
+    controlWss: wss,
+    tunnelWss,
+    wsTunnelHub,
+    sendToDaemon: sendRawToDaemon,
+    port: PORT,
+  })
+);
 
 httpServer.listen(PORT, "0.0.0.0", () => {
   console.log(`[Relay] Listening on ws://0.0.0.0:${PORT}`);
@@ -60,235 +150,41 @@ setInterval(cleanupStaleDaemons, 20 * 1000);
 
 // ── Connection Handling ───────────────────────────────
 
-function sendJSON(ws: WebSocket, data: unknown) {
-  if (ws.readyState === WebSocket.OPEN) {
-    ws.send(JSON.stringify(data));
-  }
-}
-
 wss.on("connection", (ws: WebSocket) => {
-  // Track what this socket represents
-  let role: "unknown" | "daemon" | "app" = "unknown";
-  let machineId: string | null = null;
-
+  const state = createConnState();
   console.log("[Relay] New connection");
 
   ws.on("message", (raw: Buffer) => {
-    try {
-      const msg = JSON.parse(raw.toString());
-
-      switch (msg.type) {
-        // ── Daemon registration ──────────────────────
-        case "daemon-register": {
-          if (!msg.machineId || !msg.machineName) {
-            sendJSON(ws, {
-              type: "error",
-              error: "machineId and machineName are required",
-            });
-            return;
-          }
-
-          // Verify HMAC if RELAY_SECRET is configured
-          if (RELAY_SECRET) {
-            if (!msg.authToken || !msg.timestamp) {
-              sendJSON(ws, {
-                type: "error",
-                error: "Registration requires authToken and timestamp when RELAY_SECRET is set.",
-              });
-              return;
-            }
-
-            // Replay prevention: reject timestamps outside the time window
-            const now = Date.now();
-            if (Math.abs(now - msg.timestamp) > HMAC_TIME_WINDOW_MS) {
-              sendJSON(ws, {
-                type: "error",
-                error: "Registration timestamp expired. Check system clock sync.",
-              });
-              return;
-            }
-
-            // Verify HMAC-SHA256(machineId + timestamp, RELAY_SECRET)
-            const expectedHmac = crypto
-              .createHmac("sha256", RELAY_SECRET)
-              .update(msg.machineId + msg.timestamp)
-              .digest("hex");
-
-            if (!crypto.timingSafeEqual(
-              Buffer.from(msg.authToken, "hex"),
-              Buffer.from(expectedHmac, "hex")
-            )) {
-              sendJSON(ws, {
-                type: "error",
-                error: "Invalid authToken. RELAY_SECRET mismatch.",
-              });
-              return;
-            }
-          }
-
-          role = "daemon";
-          machineId = msg.machineId;
-          registerDaemon(ws, msg.machineId, msg.machineName);
-          sendJSON(ws, {
-            type: "daemon-registered",
-            machineId: msg.machineId,
-          });
-          break;
-        }
-
-        // ── Daemon heartbeat ─────────────────────────
-        case "daemon-heartbeat": {
-          if (msg.machineId) {
-            updateHeartbeat(msg.machineId);
-          }
-          break;
-        }
-
-        // ── Daemon responses (forward to App) ────────
-        case "forward-response": {
-          if (role !== "daemon" || !msg.requestId) return;
-          // We need the appSocket — find it by tracking
-          // The relay-request handler stores the appSocket per requestId
-          const appSocket = requestMap.get(msg.requestId);
-          if (appSocket) {
-            forwardToApp(appSocket, "relay-response", msg.requestId, msg.payload);
-            requestMap.delete(msg.requestId);
-          }
-          break;
-        }
-
-        case "forward-stream": {
-          if (role !== "daemon" || !msg.requestId) return;
-          const streamAppSocket = requestMap.get(msg.requestId);
-          if (streamAppSocket) {
-            forwardToApp(
-              streamAppSocket,
-              "relay-stream",
-              msg.requestId,
-              msg.payload
-            );
-            // Don't delete from requestMap — stream has multiple chunks
-            // The "done" payload signals end of stream, cleanup happens via
-            // payload inspection or a timeout
-            if (msg.payload?.type === "done") {
-              requestMap.delete(msg.requestId);
-            }
-          }
-          break;
-        }
-
-        // ── Daemon pair-response ─────────────────────
-        case "pair-response": {
-          if (role !== "daemon" || !machineId) return;
-          forwardPairResponse(machineId, msg);
-          break;
-        }
-
-        // ── App: list online machines ────────────────
-        case "list-machines": {
-          role = "app";
-          const machines = getOnlineMachines();
-          sendJSON(ws, { type: "machines-list", machines });
-          break;
-        }
-
-        // ── App: pair request ────────────────────────
-        case "pair-request": {
-          role = "app";
-          if (!msg.pairingCode || !msg.deviceId || !msg.deviceName) {
-            sendJSON(ws, {
-              type: "pair-response",
-              success: false,
-              error: "pairingCode, deviceId, and deviceName are required",
-            });
-            return;
-          }
-          forwardPairRequest(
-            ws,
-            msg.pairingCode,
-            msg.deviceId,
-            msg.deviceName,
-            msg.machineId
-          );
-          break;
-        }
-
-        // ── App: relay-request (business message) ────
-        case "relay-request": {
-          role = "app";
-          if (!msg.token || !msg.machineId || !msg.requestId || !msg.payload) {
-            sendJSON(ws, {
-              type: "error",
-              error: "token, machineId, requestId, and payload are required",
-            });
-            return;
-          }
-
-          // Track this request so we can route daemon responses back
-          requestMap.set(msg.requestId, ws);
-
-          const forwarded = forwardToDaemon(
-            msg.machineId,
-            msg.requestId,
-            msg.token,
-            msg.payload
-          );
-
-          if (!forwarded) {
-            requestMap.delete(msg.requestId);
-            sendJSON(ws, {
-              type: "relay-response",
-              requestId: msg.requestId,
-              payload: {
-                type: "error",
-                error: `Daemon ${msg.machineId} is not online.`,
-              },
-            });
-          }
-          break;
-        }
-
-        default: {
-          sendJSON(ws, {
-            type: "error",
-            error: `Unknown message type: ${msg.type}`,
-          });
-        }
-      }
-    } catch (err: any) {
-      console.error("[Relay] Parse error:", err.message);
-      sendJSON(ws, { type: "error", error: "Invalid JSON" });
-    }
+    handleRelayInbound(ws, raw.toString(), state, {
+      relaySecret: RELAY_SECRET,
+      requests,
+      tunnelHub,
+      wsTunnelHub,
+    });
   });
 
   ws.on("close", () => {
-    console.log(`[Relay] Connection closed (role: ${role})`);
-    if (role === "daemon") {
+    console.log(`[Relay] Connection closed (role: ${state.role})`);
+    if (state.role === "daemon") {
       unregisterDaemon(ws);
-    }
-    // Cleanup any pending requests from this app socket
-    if (role === "app") {
-      for (const [reqId, sock] of requestMap) {
-        if (sock === ws) {
-          requestMap.delete(reqId);
-        }
+      // 只中止该 daemon 的隧道(原 abortAll 全断)
+      if (state.machineId) {
+        tunnelHub.abortByMachine(state.machineId);
+        wsTunnelHub.abortByMachine(state.machineId);
       }
+    }
+    if (state.role === "app") {
+      requests.deleteBySocket(ws);
     }
   });
 });
 
 // ── Request tracking ──────────────────────────────────
-// Maps requestId → App WebSocket, so daemon responses can be routed back.
+// Maps requestId → App WebSocket(带 TTL),so daemon responses can be routed back.
 
-const requestMap = new Map<string, WebSocket>();
+const requests = new RequestTracker<WebSocket>();
 
-// Cleanup stale request mappings every 5 minutes
+// 每 60s 清理:已关闭 socket 或超 TTL 的悬挂请求(修复原内存泄漏)。
 setInterval(() => {
-  // We can't easily know which requests are stale without timestamps,
-  // but closed sockets will be caught here
-  for (const [reqId, sock] of requestMap) {
-    if (sock.readyState !== WebSocket.OPEN) {
-      requestMap.delete(reqId);
-    }
-  }
-}, 5 * 60 * 1000);
+  requests.cleanupStale();
+}, 60 * 1000);

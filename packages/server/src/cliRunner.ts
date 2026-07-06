@@ -1,222 +1,40 @@
 /**
  * cliRunner.ts
- * 通过已安装的 CLI 工具（Claude Code SDK / Gemini CLI）运行 AI Agent。
+ * 通过已安装的 CLI 工具（Claude Code / Gemini CLI）运行 AI Agent。
  * 适用于在服务器上使用 Pro 订阅额度、无需消耗 API Key 的场景。
+ *
+ * claude 路径复用 cli/ 下的 CliAgentAdapter + runCliAgent,直接产出归一化 AgentEvent;
+ * gemini 路径在本文件内解析 stream-json 并同样归一化为 AgentEvent。
  */
 import { spawn } from "child_process";
-import type { AgentSession, StreamEvent } from "./agent.js";
-
-// ── 进程树终止工具（移植自 clawdbot/src/process/kill-tree.ts）────────────
-
-function isProcessAlive(pid: number): boolean {
-  try {
-    process.kill(pid, 0);
-    return true;
-  } catch {
-    return false;
-  }
-}
-
-/**
- * 跨平台进程树终止：先 SIGTERM，等待 grace 后 SIGKILL。
- * 使用进程组信号（kill -pid）确保子进程一并终止。
- */
-function killProcessTree(pid: number, graceMs = 3000): void {
-  if (!Number.isFinite(pid) || pid <= 0) return;
-
-  if (process.platform === "win32") {
-    // Windows：taskkill /T 包含子进程，先优雅，再强制
-    try {
-      spawn("taskkill", ["/T", "/PID", String(pid)], { stdio: "ignore", detached: true });
-    } catch { /* ignore */ }
-    setTimeout(() => {
-      if (!isProcessAlive(pid)) return;
-      try {
-        spawn("taskkill", ["/F", "/T", "/PID", String(pid)], { stdio: "ignore", detached: true });
-      } catch { /* ignore */ }
-    }, graceMs).unref();
-    return;
-  }
-
-  // Unix：向进程组发 SIGTERM，等待后 SIGKILL
-  try {
-    process.kill(-pid, "SIGTERM");
-  } catch {
-    try { process.kill(pid, "SIGTERM"); } catch { return; }
-  }
-  setTimeout(() => {
-    if (isProcessAlive(-pid)) {
-      try { process.kill(-pid, "SIGKILL"); return; } catch { /* fall through */ }
-    }
-    if (isProcessAlive(pid)) {
-      try { process.kill(pid, "SIGKILL"); } catch { /* already gone */ }
-    }
-  }, graceMs).unref();
-}
+import type { AgentSession } from "./agent.js";
+import { claudeCodeAdapter } from "./cli/claudeCode.js";
+import { runCliAgent, killProcessTree } from "./cli/runner.js";
+import type { AgentEventType } from "@pocket-code/wire";
 
 // ── Claude Code CLI Runner ────────────────────────────────
 
 /**
- * 使用 claude CLI 子进程运行，解析 stream-json 格式的 NDJSON 输出。
- * 与 Gemini CLI runner 相同模式：spawn → stdin.end → 解析 stdout NDJSON。
- * 服务器上需要全局安装并认证：npm install -g @anthropic-ai/claude-code
+ * 使用 claude CLI 运行:经 claudeCodeAdapter 解析为归一化 AgentEvent,直接透传给调用方。
+ * 服务器上需全局安装并认证:npm install -g @anthropic-ai/claude-code
  */
 export async function runClaudeCodeAgent(
   session: AgentSession,
   userMessage: string,
-  onEvent: (event: StreamEvent) => void,
+  onEvent: (event: AgentEventType) => void,
   signal?: AbortSignal
 ): Promise<void> {
-  const claudePath = process.env.CLAUDE_CLI_PATH || "claude";
-
-  const args = [
-    "-p", userMessage,
-    "--output-format", "stream-json",
-    "--verbose",
-    "--include-partial-messages",
-    "--dangerously-skip-permissions",
-  ];
-
-  if (session.customPrompt?.trim()) {
-    args.push("--append-system-prompt", `\n\n## Project Instructions\n${session.customPrompt.trim()}`);
-  }
-
   console.log(`[CLI] Claude Code: workspace=${session.workspace}, msg="${userMessage.slice(0, 80)}"`);
 
-  // 清除 API key 环境变量，避免干扰 claude CLI 的 OAuth 认证
-  // claude CLI 使用自己存储的 OAuth 凭证，不应使用服务器的 API key
-  const env = { ...process.env };
-  delete env.ANTHROPIC_API_KEY;
-  delete env.ANTHROPIC_AUTH_TOKEN;
+  const fullText = await runCliAgent(
+    claudeCodeAdapter,
+    userMessage,
+    { workspace: session.workspace, customPrompt: session.customPrompt },
+    onEvent,
+    signal
+  );
 
-  const proc = spawn(claudePath, args, {
-    cwd: session.workspace,
-    stdio: ["pipe", "pipe", "pipe"],
-    detached: process.platform !== "win32",
-    windowsHide: true,
-    env,
-  });
-
-  // 立即关闭 stdin，防止 claude CLI 等待输入
-  proc.stdin?.end();
-
-  if (signal) {
-    signal.addEventListener("abort", () => {
-      if (proc.pid) killProcessTree(proc.pid);
-      else proc.kill("SIGTERM");
-    });
-  }
-
-  let fullText = "";
-  let lineBuffer = "";
-  let resultSuccess = false;
-
-  return new Promise<void>((resolve) => {
-    proc.stdout.on("data", (chunk: Buffer) => {
-      lineBuffer += chunk.toString("utf-8");
-      const lines = lineBuffer.split("\n");
-      lineBuffer = lines.pop() ?? "";
-      for (const line of lines) {
-        if (parseClaudeLine(line, onEvent, (t) => { fullText += t; })) {
-          resultSuccess = true;
-        }
-      }
-    });
-
-    proc.stderr.on("data", (chunk: Buffer) => {
-      const msg = chunk.toString("utf-8").trim();
-      if (msg) console.warn("[CLI] Claude Code stderr:", msg.slice(0, 300));
-    });
-
-    proc.on("close", (code) => {
-      if (lineBuffer.trim()) {
-        if (parseClaudeLine(lineBuffer, onEvent, (t) => { fullText += t; })) {
-          resultSuccess = true;
-        }
-      }
-      // claude CLI 有时即使成功也以非零退出码结束，已收到 result.success 则忽略
-      if (code !== 0 && !signal?.aborted && !resultSuccess) {
-        console.error(`[CLI] Claude Code exited with code ${code}`);
-        onEvent({ type: "error", error: `Claude Code 进程异常退出 (code=${code})` });
-      }
-      session.messages.push({ role: "assistant", content: fullText || "(Claude Code completed)" });
-      onEvent({ type: "done" });
-      resolve();
-    });
-
-    proc.on("error", (err) => {
-      console.error("[CLI] Failed to start Claude Code:", err.message);
-      onEvent({
-        type: "error",
-        error: `无法启动 Claude Code CLI: ${err.message}。请确认已安装: npm install -g @anthropic-ai/claude-code`,
-      });
-      onEvent({ type: "done" });
-      resolve();
-    });
-  });
-}
-
-/** 返回 true 表示收到了 result.subtype=success */
-function parseClaudeLine(
-  line: string,
-  onEvent: (e: StreamEvent) => void,
-  appendText: (t: string) => void
-): boolean {
-  const trimmed = line.trim();
-  if (!trimmed) return false;
-  let msg: any;
-  try {
-    msg = JSON.parse(trimmed);
-  } catch {
-    return false;
-  }
-
-  switch (msg.type) {
-    case "system":
-      if (msg.subtype === "init") {
-        console.log(`[CLI] Claude Code session=${msg.session_id}, model=${msg.model}`);
-      }
-      break;
-
-    case "assistant": {
-      const content = msg.message?.content;
-      if (!Array.isArray(content)) break;
-      for (const block of content) {
-        if (block.type === "text") {
-          appendText(block.text);
-          onEvent({ type: "text-delta", text: block.text });
-        } else if (block.type === "tool_use") {
-          onEvent({ type: "tool-call", toolName: block.name, args: block.input });
-        }
-      }
-      break;
-    }
-
-    case "user": {
-      const content = msg.message?.content;
-      if (!Array.isArray(content)) break;
-      for (const block of content) {
-        if (block.type === "tool_result") {
-          const resultText = Array.isArray(block.content)
-            ? block.content.map((c: any) => (c.type === "text" ? c.text : "")).join("")
-            : String(block.content ?? "");
-          onEvent({ type: "tool-result", toolName: "_claude_tool", result: resultText });
-        }
-      }
-      break;
-    }
-
-    case "result":
-      if (msg.subtype !== "success") {
-        const errMsg = Array.isArray(msg.errors) ? msg.errors.join(", ") : (msg.subtype ?? "unknown error");
-        onEvent({ type: "error", error: `Claude Code 执行失败: ${errMsg}` });
-      } else {
-        console.log(`[CLI] Claude Code done. turns=${msg.num_turns}, cost=$${msg.total_cost_usd?.toFixed(4) ?? "?"}`);
-        return true;
-      }
-      break;
-  }
-  return false;
+  session.messages.push({ role: "assistant", content: fullText || "(Claude Code completed)" });
 }
 
 // ── Gemini CLI Runner ─────────────────────────────────────
@@ -254,7 +72,7 @@ interface GeminiStreamLine {
 export async function runGeminiCliAgent(
   session: AgentSession,
   userMessage: string,
-  onEvent: (event: StreamEvent) => void,
+  onEvent: (event: AgentEventType) => void,
   signal?: AbortSignal
 ): Promise<void> {
   const geminiPath = process.env.GEMINI_CLI_PATH || "gemini";
@@ -308,6 +126,7 @@ export async function runGeminiCliAgent(
 
   let fullText = "";
   let lineBuffer = "";
+  const parseLine = createGeminiLineParser();
 
   return new Promise<void>((resolve) => {
     proc.stdout.on("data", (chunk: Buffer) => {
@@ -332,7 +151,7 @@ export async function runGeminiCliAgent(
       }
       if (code !== 0 && !signal?.aborted) {
         console.error(`[CLI] Gemini CLI exited with code ${code}`);
-        onEvent({ type: "error", error: `Gemini CLI 进程异常退出 (code=${code})` });
+        onEvent({ type: "error", message: `Gemini CLI 进程异常退出 (code=${code})` });
       }
       session.messages.push({ role: "assistant", content: fullText || "(Gemini CLI completed)" });
       onEvent({ type: "done" });
@@ -343,7 +162,7 @@ export async function runGeminiCliAgent(
       console.error("[CLI] Failed to start Gemini CLI:", err.message);
       onEvent({
         type: "error",
-        error: `无法启动 Gemini CLI: ${err.message}。请确认已安装: npm install -g @google/gemini-cli`,
+        message: `无法启动 Gemini CLI: ${err.message}。请确认已安装: npm install -g @google/gemini-cli`,
       });
       onEvent({ type: "done" });
       resolve();
@@ -351,49 +170,59 @@ export async function runGeminiCliAgent(
   });
 }
 
-function parseLine(
+/** gemini stream-json 行解析器(工厂:内部维护合成 callId 计数)。 */
+export function createGeminiLineParser(): (
   line: string,
-  onEvent: (e: StreamEvent) => void,
+  onEvent: (e: AgentEventType) => void,
   appendText: (t: string) => void
-) {
-  const trimmed = line.trim();
-  if (!trimmed) return;
-  let evt: GeminiStreamLine;
-  try {
-    evt = JSON.parse(trimmed);
-  } catch {
-    // 非 JSON 行（如 ANSI 彩色文本）直接忽略
-    return;
-  }
-  switch (evt.type) {
-    case "init":
-      console.log(`[CLI] Gemini session=${evt.session_id}, model=${evt.model}`);
-      break;
-    case "message":
-      if (evt.role === "assistant" && evt.content) {
-        appendText(evt.content);
-        onEvent({ type: "text-delta", text: evt.content });
-      }
-      break;
-    case "tool_use":
-      if (evt.tool_name) {
-        onEvent({ type: "tool-call", toolName: evt.tool_name, args: evt.parameters ?? {} });
-      }
-      break;
-    case "tool_result":
-      if (evt.tool_id) {
-        onEvent({ type: "tool-result", toolName: evt.tool_id, result: evt.output ?? {} });
-      }
-      break;
-    case "result":
-      if (evt.status === "error" && evt.error) {
-        const errMsg = typeof evt.error === "string" ? evt.error : (evt.error.message ?? "Gemini CLI 执行失败");
-        onEvent({ type: "error", error: errMsg });
-      }
-      // status === "success" 无需额外处理，proc.on("close") 会发出 done
-      break;
-    case "error":
-      onEvent({ type: "error", error: typeof evt.error === "string" ? evt.error : "Gemini CLI 未知错误" });
-      break;
-  }
+) => void {
+  let synthCount = 0;
+  return (line, onEvent, appendText) => {
+    const trimmed = line.trim();
+    if (!trimmed) return;
+    let evt: GeminiStreamLine;
+    try {
+      evt = JSON.parse(trimmed);
+    } catch {
+      return; // 非 JSON 行(ANSI 等)忽略
+    }
+    switch (evt.type) {
+      case "init":
+        console.log(`[CLI] Gemini session=${evt.session_id}, model=${evt.model}`);
+        break;
+      case "message":
+        if (evt.role === "assistant" && evt.content) {
+          appendText(evt.content);
+          onEvent({ type: "text-delta", text: evt.content });
+        }
+        break;
+      case "tool_use":
+        if (evt.tool_name) {
+          onEvent({
+            type: "tool-call",
+            callId: evt.tool_id ?? `gm_${++synthCount}`,
+            name: evt.tool_name,
+            args: (evt.parameters as Record<string, unknown>) ?? {},
+          });
+        }
+        break;
+      case "tool_result":
+        onEvent({
+          type: "tool-result",
+          callId: evt.tool_id ?? `gm_${synthCount}`,
+          result: evt.output ?? {},
+          ...(evt.status === "error" ? { isError: true } : {}),
+        });
+        break;
+      case "result":
+        if (evt.status === "error" && evt.error) {
+          const errMsg = typeof evt.error === "string" ? evt.error : (evt.error.message ?? "Gemini CLI 执行失败");
+          onEvent({ type: "error", message: errMsg });
+        }
+        break;
+      case "error":
+        onEvent({ type: "error", message: typeof evt.error === "string" ? evt.error : "Gemini CLI 未知错误" });
+        break;
+    }
+  };
 }

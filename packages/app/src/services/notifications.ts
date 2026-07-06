@@ -12,11 +12,11 @@ Notifications.setNotificationHandler({
 });
 
 export async function requestNotificationPermissions(): Promise<boolean> {
-  const { status: existing } = await Notifications.getPermissionsAsync();
-  if (existing === "granted") return true;
+  const existing = await Notifications.getPermissionsAsync();
+  if (existing.granted) return true;
 
-  const { status } = await Notifications.requestPermissionsAsync();
-  return status === "granted";
+  const requested = await Notifications.requestPermissionsAsync();
+  return requested.granted;
 }
 
 export async function sendLocalNotification(title: string, body: string): Promise<void> {

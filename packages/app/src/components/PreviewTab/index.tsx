@@ -8,13 +8,51 @@ import {
   ActivityIndicator,
 } from "react-native";
 import { WebView } from "react-native-webview";
+import type { AppSettings } from "../../store/settings";
 
 interface Props {
   /** URL to load initially, set externally when a dev server is detected */
   initialUrl?: string;
+  /** App 设置:relay 模式下用于构造中继隧道预览 URL */
+  settings?: AppSettings;
 }
 
-export default function PreviewTab({ initialUrl }: Props) {
+// relayServerUrl 形如 ws://host:3200 → http://host:3200/t/<machineId>/<port>/
+function buildTunnelUrl(relayServerUrl: string, machineId: string, port: number): string {
+  const httpBase = relayServerUrl.replace(/^ws:\/\//, "http://").replace(/^wss:\/\//, "https://");
+  return `${httpBase.replace(/\/$/, "")}/t/${machineId}/${port}/`;
+}
+
+/**
+ * relay 模式下,把用户输入的 `localhost:N` / `127.0.0.1:N` / 裸端口 `N`
+ * 改写为中继隧道 URL。非 localhost/裸端口的输入保持原样。
+ * 非 relay 模式或缺少 relay 配置时返回 null(不改写)。
+ */
+function maybeRewriteToTunnel(input: string, settings?: AppSettings): string | null {
+  if (!settings || settings.workspaceMode !== "relay") return null;
+  const { relayServerUrl, relayMachineId } = settings;
+  if (!relayServerUrl || !relayMachineId) return null;
+
+  // 已经是隧道 URL,不重复改写
+  if (/\/t\/[^/]+\/\d+/.test(input)) return null;
+
+  // 裸端口: "3000"
+  const bare = input.match(/^(\d{1,5})$/);
+  if (bare) {
+    return buildTunnelUrl(relayServerUrl, relayMachineId, parseInt(bare[1], 10));
+  }
+  // localhost / 127.0.0.1 (可带 http:// 前缀) + 端口 + 可选路径
+  const loc = input.match(/^(?:https?:\/\/)?(?:localhost|127\.0\.0\.1)(?::(\d{1,5}))?(\/.*)?$/i);
+  if (loc) {
+    const port = loc[1] ? parseInt(loc[1], 10) : 80;
+    const base = buildTunnelUrl(relayServerUrl, relayMachineId, port);
+    const rest = loc[2] ? loc[2].replace(/^\//, "") : "";
+    return base + rest;
+  }
+  return null;
+}
+
+export default function PreviewTab({ initialUrl, settings }: Props) {
   const [url, setUrl] = useState(initialUrl || "http://localhost:3000");
   const [inputUrl, setInputUrl] = useState(url);
   const [loading, setLoading] = useState(false);
@@ -35,13 +73,17 @@ export default function PreviewTab({ initialUrl }: Props) {
   const handleGo = useCallback(() => {
     let target = inputUrl.trim();
     if (!target) return;
-    if (!target.startsWith("http://") && !target.startsWith("https://")) {
+    // relay 模式:把 localhost/裸端口改写为中继隧道 URL
+    const tunnel = maybeRewriteToTunnel(target, settings);
+    if (tunnel) {
+      target = tunnel;
+    } else if (!target.startsWith("http://") && !target.startsWith("https://")) {
       target = "http://" + target;
     }
     setUrl(target);
     setInputUrl(target);
     setError(null);
-  }, [inputUrl]);
+  }, [inputUrl, settings]);
 
   const handleRefresh = useCallback(() => {
     webViewRef.current?.reload();

@@ -3,6 +3,17 @@
 // from the mobile App, using the same message processing logic
 // as the direct-connection server.
 
+// 加载 .env:依次尝试 cwd → 包根 → 仓库根(已存在的变量不被覆盖)。
+// pnpm --filter 运行时 cwd 是包目录,直接跑 dist 时 cwd 可能是仓库根,三级都兜住。
+import { config as loadEnv } from "dotenv";
+import { fileURLToPath } from "url";
+import { dirname, join as joinPath } from "path";
+loadEnv();
+{
+  const here = dirname(fileURLToPath(import.meta.url)); // src/ 或 dist/
+  loadEnv({ path: joinPath(here, "..", ".env") });               // 包根
+  loadEnv({ path: joinPath(here, "..", "..", "..", ".env") });   // 仓库根
+}
 import crypto from "crypto";
 import { readFileSync, writeFileSync, mkdirSync } from "fs";
 import { join, resolve } from "path";
@@ -15,8 +26,11 @@ import {
   getPairingCodeInfo,
 } from "./pairing.js";
 import { loadDevices, getDevices } from "./deviceStore.js";
+import { proxyToLocalhost, openLocalWebSocket, onWsTunnelData, onWsTunnelClose, closeAllWsTunnels } from "./tunnel.js";
 import { createMessageHandler, type MessageHandler } from "@pocket-code/server/messageHandler";
 import { initDb } from "@pocket-code/server/db";
+import { requireRelaySecret } from "./config.js";
+import type { DaemonInboundType, ServerOutboundType } from "@pocket-code/wire";
 
 // ── Configuration ─────────────────────────────────────
 
@@ -49,6 +63,14 @@ function loadOrGenerateMachineId(): string {
 }
 
 const MACHINE_ID = loadOrGenerateMachineId();
+
+let RELAY_SECRET: string;
+try {
+  RELAY_SECRET = requireRelaySecret();
+} catch (err: any) {
+  console.error(`[Daemon] 启动失败:${err.message}`);
+  process.exit(1);
+}
 
 // ── Initialize ────────────────────────────────────────
 
@@ -108,6 +130,7 @@ const connection = new RelayConnection({
   relayUrl: RELAY_URL,
   machineId: MACHINE_ID,
   machineName: MACHINE_NAME,
+  relaySecret: RELAY_SECRET,
 
   onConnected() {
     console.log("[Daemon] Registered with relay. Waiting for connections...");
@@ -115,9 +138,10 @@ const connection = new RelayConnection({
 
   onDisconnected() {
     console.log("[Daemon] Lost connection to relay.");
+    closeAllWsTunnels();
   },
 
-  onMessage(msg: any) {
+  onMessage(msg: DaemonInboundType) {
     handleRelayMessage(msg);
   },
 });
@@ -151,7 +175,7 @@ setInterval(() => {
 
 // ── Message Handler ───────────────────────────────────
 
-function handleRelayMessage(msg: any) {
+function handleRelayMessage(msg: DaemonInboundType) {
   switch (msg.type) {
     case "daemon-registered": {
       console.log("[Daemon] Registration confirmed by relay");
@@ -224,7 +248,7 @@ function handleRelayMessage(msg: any) {
           currentRequestId: requestId,
         };
 
-        const sendFn = (data: any) => {
+        const sendFn = (data: ServerOutboundType) => {
           // Dynamically use the current requestId from the entry
           connection.send({
             type: "forward-stream",
@@ -251,7 +275,51 @@ function handleRelayMessage(msg: any) {
       // Pass the payload to the handler
       entry.handler.onMessage(JSON.stringify(payload)).catch((err: any) => {
         console.error("[Daemon] Error handling forwarded message:", err);
+        // 出错时回 error 响应给 App,避免其挂起等待(审计:原先静默)。
+        const sent = connection.send({
+          type: "forward-response",
+          requestId,
+          payload: { type: "error", error: `Daemon handler error: ${err?.message ?? "unknown"}` },
+        });
+        if (!sent) {
+          console.error("[Daemon] Failed to deliver error response (relay disconnected)");
+        }
       });
+      break;
+    }
+
+    // ── 反向 HTTP 隧道请求 ───────────────────────
+    case "tunnel-request": {
+      proxyToLocalhost(
+        {
+          tunnelId: msg.tunnelId,
+          port: msg.port,
+          method: msg.method,
+          path: msg.path,
+          headers: msg.headers || {},
+          body: msg.body,
+        },
+        (frame) => connection.send(frame)
+      ).catch((err: any) => {
+        connection.send({ type: "tunnel-end", tunnelId: msg.tunnelId, error: err?.message ?? "tunnel error" });
+      });
+      break;
+    }
+
+    // ── WS 隧道(P7 HMR) ──────────────────────────
+    case "tunnel-ws-open": {
+      openLocalWebSocket(
+        { tunnelId: msg.tunnelId, port: msg.port, path: msg.path, headers: msg.headers },
+        (frame) => connection.send(frame)
+      );
+      break;
+    }
+    case "tunnel-ws-data": {
+      onWsTunnelData(msg.tunnelId, msg.data, msg.binary);
+      break;
+    }
+    case "tunnel-ws-close": {
+      onWsTunnelClose(msg.tunnelId, msg.code, msg.reason);
       break;
     }
 
@@ -261,7 +329,8 @@ function handleRelayMessage(msg: any) {
     }
 
     default: {
-      console.log("[Daemon] Unknown message from relay:", msg.type);
+      // DaemonInbound 已穷尽;此分支仅为将来 wire 扩展时的兜底日志
+      console.log("[Daemon] Unhandled message from relay:", (msg as { type: string }).type);
     }
   }
 }

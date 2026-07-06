@@ -7,13 +7,20 @@ import FileTabBar from "./components/FileTabBar";
 import type { FileItem } from "../../hooks/useFileTree";
 import type { WorkspaceMode, AppSettings } from "../../store/settings";
 import { syncRemoteToLocal } from "../../services/workspaceSync";
-import { getProjectWorkspaceRoot } from "../../services/localFileSystem";
+import { getProjectWorkspaceRoot, listLocalFiles, readLocalFile } from "../../services/localFileSystem";
+import { pullFromDevMachine } from "../../services/codeSync";
 import { useWorkspace } from "../../contexts/WorkspaceContext";
+import { useProject } from "../../contexts/ProjectContext";
 
 interface Props {
   requestFileList: (path: string) => Promise<any>;
   requestFileContent: (path: string) => Promise<any>;
   writeFile?: (path: string, content: string) => Promise<{ success: boolean; error?: string }>;
+  /** 影子快照同步(server/relay 模式从开发机拉代码到手机本地工作区)。 */
+  requestSyncPull?: (sinceCommit?: string) => Promise<any>;
+  requestSyncFile?: (commit: string, path: string) => Promise<any>;
+  /** agent 是否正在流式输出;用于"一轮结束自动增量同步"(活动文件快路径)。 */
+  isStreaming?: boolean;
   workspaceMode: WorkspaceMode;
   settings: AppSettings;
   projectId?: string;
@@ -34,10 +41,14 @@ export default function FilesTab({
   requestFileList,
   requestFileContent,
   writeFile,
+  requestSyncPull,
+  requestSyncFile,
+  isStreaming,
   workspaceMode,
   settings,
   projectId,
 }: Props) {
+  const { currentProject, updateProject } = useProject();
   const [viewState, setViewState] = useState<"tree" | "viewer">("tree");
   const [selectedFile, setSelectedFile] = useState<FileItem | null>(null);
   const [openFiles, setOpenFiles] = useState<FileItem[]>([]);
@@ -46,6 +57,8 @@ export default function FilesTab({
   const [refreshKey, setRefreshKey] = useState(0);
   const [syncing, setSyncing] = useState(false);
   const [syncMessage, setSyncMessage] = useState<string | undefined>();
+  // 影子同步成功后浏览手机本地副本(而非远端),让同步的文件在 UI 可见。
+  const [browseLocal, setBrowseLocal] = useState(false);
 
   // Track which projects have already been auto-sync checked
   const autoSyncChecked = useRef<Set<string>>(new Set());
@@ -65,11 +78,25 @@ export default function FilesTab({
   const isLocal = workspaceMode === "local";
   const isEditable = isLocal && !!writeFile;
 
-  const syncAvailable = isLocal && !!projectId && canSyncRemote(settings);
+  // 影子快照同步:已连接开发机(server/relay 模式)且 useAgent 提供了 sync 请求函数
+  const shadowSyncAvailable = !isLocal && !!projectId && !!requestSyncPull && !!requestSyncFile;
+  const syncAvailable = (isLocal && !!projectId && canSyncRemote(settings)) || shadowSyncAvailable;
 
   const localWorkspaceRoot = useMemo(
     () => getProjectWorkspaceRoot(projectId),
     [projectId]
+  );
+
+  // 浏览源:browseLocal(影子同步后)用手机本地副本,否则用传入的远端/本地函数。
+  const effectiveRequestFileList = useCallback(
+    (path: string) =>
+      browseLocal ? listLocalFiles(path, localWorkspaceRoot) : requestFileList(path),
+    [browseLocal, localWorkspaceRoot, requestFileList]
+  );
+  const effectiveRequestFileContent = useCallback(
+    (path: string) =>
+      browseLocal ? readLocalFile(path, localWorkspaceRoot) : requestFileContent(path),
+    [browseLocal, localWorkspaceRoot, requestFileContent]
   );
 
   const doSync = useCallback(async (silent: boolean = false) => {
@@ -77,6 +104,36 @@ export default function FilesTab({
     setSyncing(true);
 
     try {
+      // ── 影子快照同步:server/relay 模式从开发机拉代码到手机本地工作区 ──
+      if (!isLocal && requestSyncPull && requestSyncFile) {
+        const result = await pullFromDevMachine({
+          requestSyncPull,
+          requestSyncFile,
+          projectId,
+          sinceCommit: currentProject?.lastSyncedCommit ?? null,
+          onProgress: (m) => setSyncMessage(m),
+        });
+        if (result.commit) {
+          updateProject(projectId, {
+            lastSyncedCommit: result.commit,
+            lastSyncTime: Date.now(),
+          });
+          setLastSyncTime(Date.now());
+          setBrowseLocal(true); // 同步后浏览本地副本
+          setRefreshKey((k) => k + 1);
+        }
+        if (!silent) {
+          if (result.success || result.commit) {
+            const tail = result.failed.length ? `，失败 ${result.failed.length}` : "";
+            Alert.alert("同步成功", `写入 ${result.applied}，删除 ${result.deleted}${tail}`);
+          } else {
+            Alert.alert("同步失败", result.error || "未知错误");
+          }
+        }
+        return result.success;
+      }
+
+      // ── geek+local 模式:原有远端→本地同步 ──
       const result = await syncRemoteToLocal(
         settings,
         projectId,
@@ -106,7 +163,7 @@ export default function FilesTab({
       setSyncing(false);
       setSyncMessage(undefined);
     }
-  }, [settings, projectId, localWorkspaceRoot]);
+  }, [settings, projectId, localWorkspaceRoot, isLocal, requestSyncPull, requestSyncFile, currentProject, updateProject]);
 
   // Auto-sync: when entering local mode with sync available, check if workspace is empty
   useEffect(() => {
@@ -128,6 +185,35 @@ export default function FilesTab({
       }
     })();
   }, [syncAvailable, projectId, requestFileList, doSync]);
+
+  // ── 活动文件快路径 ──
+  // agent 一轮结束(isStreaming true→false)后,若已在浏览本地副本,自动增量同步,
+  // 把开发机的改动很快反映到手机本地视图。用 ref 持有最新条件/动作,effect 只
+  // 依赖 isStreaming,从而仅在流式状态切换时触发、且不读到陈旧闭包。
+  const liveSyncRef = useRef<{ enabled: boolean; run: () => void }>({
+    enabled: false,
+    run: () => {},
+  });
+  liveSyncRef.current = {
+    enabled:
+      browseLocal &&
+      !isLocal &&
+      !!requestSyncPull &&
+      !!requestSyncFile &&
+      !!currentProject?.lastSyncedCommit &&
+      !syncing,
+    run: () => {
+      doSync(true);
+    },
+  };
+  const prevStreamingRef = useRef(isStreaming);
+  useEffect(() => {
+    const justFinished = prevStreamingRef.current && !isStreaming;
+    prevStreamingRef.current = isStreaming;
+    if (justFinished && liveSyncRef.current.enabled) {
+      liveSyncRef.current.run();
+    }
+  }, [isStreaming]);
 
   const MAX_OPEN_FILES = 5;
 
@@ -209,7 +295,7 @@ export default function FilesTab({
           />
           <FileTreeView
             key={refreshKey}
-            requestFileList={requestFileList}
+            requestFileList={effectiveRequestFileList}
             onFilePress={handleFilePress}
             searchQuery={searchQuery || undefined}
           />
@@ -224,7 +310,7 @@ export default function FilesTab({
           />
           <InlineFileViewer
             file={selectedFile}
-            requestFileContent={requestFileContent}
+            requestFileContent={effectiveRequestFileContent}
             onBack={handleBack}
             editable={isEditable}
             onSave={writeFile}

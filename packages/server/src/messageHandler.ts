@@ -9,7 +9,8 @@ import { verifyToken, registerAnonymous, type AuthPayload } from "./auth.js";
 import { isDockerEnabled, getContainer } from "./docker.js";
 import { initDb, listUserSessions, deleteSession } from "./db.js";
 import { checkQuota, incrementUsage, getUserQuota } from "./resourceLimits.js";
-import { WsMessage } from "./wsSchemas.js";
+import { WsMessage, type ServerOutboundType } from "@pocket-code/wire";
+import { handleSyncPull, handleSyncFile } from "./sync/syncHandler.js";
 import { rm } from "fs/promises";
 
 // Shared session store — the same Map is used for all handlers
@@ -42,10 +43,12 @@ export interface MessageHandlerOptions {
  *
  * @param send - Callback to send a response back to the client.
  *               The handler doesn't care if this goes to a direct WS or through a relay.
+ *               Typed as ServerOutboundType so every construction site is checked
+ *               against the wire contract at compile time.
  * @param options - Optional configuration including pre-injected auth.
  */
 export function createMessageHandler(
-  send: (data: unknown) => void,
+  send: (data: ServerOutboundType) => void,
   options?: MessageHandlerOptions
 ): MessageHandler {
   let session: AgentSession | null = null;
@@ -96,7 +99,7 @@ export function createMessageHandler(
               type: "auth",
               token: result.token,
               userId: result.userId,
-            });
+            } satisfies ServerOutboundType);
             break;
           }
 
@@ -184,7 +187,7 @@ export function createMessageHandler(
               sessionId: session.sessionId,
               projectId: session.projectId,
               workspace: session.workspace,
-            });
+            } satisfies ServerOutboundType);
             break;
           }
 
@@ -197,7 +200,7 @@ export function createMessageHandler(
             if (auth) {
               const quotaCheck = checkQuota(auth.userId, "api_call");
               if (!quotaCheck.allowed) {
-                send({ type: "error", error: quotaCheck.reason });
+                send({ type: "error", error: quotaCheck.reason || "Quota exceeded." });
                 send({ type: "done" });
                 return;
               }
@@ -236,7 +239,13 @@ export function createMessageHandler(
               return;
             }
             const quota = getUserQuota(auth.userId);
-            send({ type: "quota", ...quota });
+            send({
+              type: "quota",
+              userId: quota.userId,
+              tier: quota.tier,
+              limits: quota.limits as unknown as Record<string, unknown>,
+              usage: quota.usage as unknown as Record<string, unknown>,
+            });
             break;
           }
 
@@ -246,31 +255,22 @@ export function createMessageHandler(
               send({ type: "error", error: "No session. Send init first." });
               return;
             }
-            const { toolName, args, callId } = msg;
+            const { toolName, args } = msg;
+            const callId = msg.callId ?? "";
             const tools = createTools(
               session.workspace,
               session.containerId
             );
             const toolFn = (tools as Record<string, any>)[toolName];
             if (!toolFn) {
-              send({
-                type: "tool-result",
-                callId,
-                toolName,
-                result: { success: false, error: `Unknown tool: ${toolName}` },
-              });
+              send({ type: "tool-result", callId, result: { success: false, error: `Unknown tool: ${toolName}` } } satisfies ServerOutboundType);
               break;
             }
             try {
               const result = await toolFn.execute(args);
-              send({ type: "tool-result", callId, toolName, result });
+              send({ type: "tool-result", callId, result } satisfies ServerOutboundType);
             } catch (err: any) {
-              send({
-                type: "tool-result",
-                callId,
-                toolName,
-                result: { success: false, error: err.message },
-              });
+              send({ type: "tool-result", callId, result: { success: false, error: err.message } } satisfies ServerOutboundType);
             }
             break;
           }
@@ -293,8 +293,8 @@ export function createMessageHandler(
                 type: "file-list",
                 path: msg.path || ".",
                 _reqId: msg._reqId,
-                ...result,
-              });
+                ...(result as Record<string, unknown>),
+              } as ServerOutboundType);
             } catch (err: any) {
               send({
                 type: "file-list",
@@ -324,8 +324,8 @@ export function createMessageHandler(
                 type: "file-content",
                 path: msg.path,
                 _reqId: msg._reqId,
-                ...result,
-              });
+                ...(result as Record<string, unknown>),
+              } as ServerOutboundType);
             } catch (err: any) {
               send({
                 type: "file-content",
@@ -334,6 +334,33 @@ export function createMessageHandler(
                 success: false,
                 error: err.message,
               });
+            }
+            break;
+          }
+
+          // ── Code sync (shadow snapshot) ──
+          case "sync-pull": {
+            if (!session) {
+              send({ type: "error", error: "No session. Send init first." });
+              return;
+            }
+            try {
+              await handleSyncPull(session.workspace, msg.sinceCommit ?? null, send, msg._reqId);
+            } catch (err: any) {
+              send({ type: "error", error: `sync-pull failed: ${err.message}` });
+            }
+            break;
+          }
+
+          case "sync-file": {
+            if (!session) {
+              send({ type: "error", error: "No session. Send init first." });
+              return;
+            }
+            try {
+              await handleSyncFile(session.workspace, msg.commit, msg.path, send, msg._reqId);
+            } catch (err: any) {
+              send({ type: "error", error: `sync-file failed: ${err.message}` });
             }
             break;
           }
@@ -351,7 +378,10 @@ export function createMessageHandler(
               msg.limit || 50,
               projectFilter
             );
-            send({ type: "sessions-list", sessions: userSessions });
+            send({
+              type: "sessions-list",
+              sessions: userSessions as unknown as Record<string, unknown>[],
+            });
             break;
           }
 
@@ -365,7 +395,7 @@ export function createMessageHandler(
               type: "session-deleted",
               sessionId: msg.sessionId,
               success: deleted,
-            });
+            } satisfies ServerOutboundType);
             break;
           }
 
@@ -390,7 +420,7 @@ export function createMessageHandler(
                 projectId: delProjectId,
                 success: false,
                 error: "No sessions found for this project.",
-              });
+              } satisfies ServerOutboundType);
               return;
             }
             const workspacePath = getWorkspaceRoot("", delProjectId);
@@ -400,14 +430,14 @@ export function createMessageHandler(
                 type: "project-workspace-deleted",
                 projectId: delProjectId,
                 success: true,
-              });
+              } satisfies ServerOutboundType);
             } catch (err: any) {
               send({
                 type: "project-workspace-deleted",
                 projectId: delProjectId,
                 success: false,
                 error: err.message,
-              });
+              } satisfies ServerOutboundType);
             }
             break;
           }

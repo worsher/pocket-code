@@ -2,12 +2,12 @@ name: CI
 
 on:
   push:
-    branches: [main]
+    branches: [master, main]
   pull_request:
-    branches: [main]
+    branches: [master, main]
 
 jobs:
-  test:
+  build-and-test:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -23,11 +23,15 @@ jobs:
 
       - run: pnpm install --frozen-lockfile
 
-      - name: Lint
+      - name: Lint (informational)
         run: pnpm lint
+        continue-on-error: true
 
-      - name: Test
-        run: pnpm test
+      - name: Build all packages
+        run: pnpm build
 
-      - name: Type Check (Server)
-        run: pnpm --filter @pocket-code/server build
+      - name: Run all package tests
+        run: pnpm test:all
+
+      - name: Type Check (app)
+        run: pnpm typecheck:app

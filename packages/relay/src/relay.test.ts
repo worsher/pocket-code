@@ -118,6 +118,22 @@ describe("Relay Routing & Discovery", () => {
     unregisterDaemon(daemonWs);
   });
 
+  it("should remove all daemon records pointing to the same socket on unregister (I-2)", () => {
+    const ws = new MockWebSocket() as unknown as WebSocket;
+
+    registerDaemon(ws, "m_1", "MacBook");
+    registerDaemon(ws, "m_2", "MacBook-Renamed");
+
+    // Both entries exist prior to unregister (simulating same-socket re-registration).
+    expect(getOnlineMachines().some((m) => m.machineId === "m_1")).toBe(true);
+    expect(getOnlineMachines().some((m) => m.machineId === "m_2")).toBe(true);
+
+    unregisterDaemon(ws);
+
+    expect(getOnlineMachines().some((m) => m.machineId === "m_1")).toBe(false);
+    expect(getOnlineMachines().some((m) => m.machineId === "m_2")).toBe(false);
+  });
+
   it("should cleanup stale daemons after heartbeat timeout", () => {
     const daemonWs = new MockWebSocket() as unknown as WebSocket;
     registerDaemon(daemonWs, "m_stale", "Stale");

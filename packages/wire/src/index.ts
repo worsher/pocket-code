@@ -14,6 +14,8 @@ export {
   DeleteProjectWorkspaceMessage,
   GetQuotaMessage,
   AbortMessage,
+  SyncPullMessage,
+  SyncFileMessage,
   WsMessage,
   type WsMessageType,
 } from "./messages.js";
@@ -53,3 +55,73 @@ export {
   type ForwardStreamType,
   type RelayStreamType,
 } from "./relay.js";
+
+// Normalized agent event protocol (consumed by the App's render layer)
+export {
+  TextDeltaEvent,
+  ReasoningDeltaEvent,
+  ToolCallEvent,
+  ToolResultEvent,
+  FileChangedEvent,
+  CommandOutputEvent,
+  ProcessStartedEvent,
+  ProcessExitedEvent,
+  PreviewAvailableEvent,
+  ModelSelectedEvent,
+  UsageEvent,
+  DoneEvent,
+  ErrorEvent,
+  AgentEvent,
+  type AgentEventType,
+} from "./agentEvent.js";
+
+// HTTP 隧道帧(relay ↔ daemon)
+export {
+  TunnelRequest,
+  TunnelResponse,
+  TunnelChunk,
+  TunnelEnd,
+  TunnelWsOpen,
+  TunnelWsOpened,
+  TunnelWsData,
+  TunnelWsClose,
+  TunnelFrame,
+  type TunnelRequestType,
+  type TunnelResponseType,
+  type TunnelChunkType,
+  type TunnelEndType,
+  type TunnelWsOpenType,
+  type TunnelWsOpenedType,
+  type TunnelWsDataType,
+  type TunnelWsCloseType,
+  type TunnelFrameType,
+} from "./tunnel.js";
+
+// Boundary inbound unions (P6a: relay/daemon message validation)
+export {
+  RelayErrorMessage,
+  DaemonRegistered,
+  RelayInbound,
+  DaemonInbound,
+  type RelayErrorMessageType,
+  type DaemonRegisteredType,
+  type RelayInboundType,
+  type DaemonInboundType,
+} from "./inbound.js";
+
+// Server outbound responses (P6b: control-response contracts)
+export {
+  AuthMsg,
+  SessionMsg,
+  QuotaMsg,
+  FileListMsg,
+  FileContentMsg,
+  SyncManifestMsg,
+  SyncFileContentMsg,
+  SessionsListMsg,
+  SessionDeletedMsg,
+  ProjectWorkspaceDeletedMsg,
+  ServerErrorMsg,
+  ServerOutbound,
+  type ServerOutboundType,
+} from "./serverOutbound.js";

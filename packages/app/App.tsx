@@ -11,6 +11,7 @@ import {
   Modal,
   TextInput,
   Keyboard,
+  Alert,
   type AppStateStatus,
 } from "react-native";
 import { StatusBar } from "expo-status-bar";
@@ -118,6 +119,7 @@ function MainScreen() {
     streamingPhase,
     currentToolName,
     sessionId,
+    authError,
     needsAutoConnect,
     connect,
     disconnect,
@@ -128,11 +130,22 @@ function MainScreen() {
     newSession,
     requestFileList,
     requestFileContent,
+    requestSyncPull,
+    requestSyncFile,
     deleteProjectWorkspace,
   } = useAgent({ settings, model: currentModel, customPrompt: currentProject?.customPrompt, projectId: currentProject?.id, onFileChanged: handleFileChanged });
 
   const listRef = useRef<FlatList>(null);
   const appStateRef = useRef<AppStateStatus>(AppState.currentState);
+
+  // 设备授权失效(token 被开发机拒绝):提示用户重新配对,避免静默断开
+  useEffect(() => {
+    if (!authError) return;
+    Alert.alert("需要重新配对", authError, [
+      { text: "稍后", style: "cancel" },
+      { text: "去配对", onPress: () => setShowSettings(true) },
+    ]);
+  }, [authError]);
 
   // Connect on mount (after settings loaded) and reconnect when settings change.
   // In geek+local mode, skip auto-connect (WS only needed for runCommand fallback).
@@ -164,6 +177,35 @@ function MainScreen() {
 
     return () => subscription.remove();
   }, [needsAutoConnect, isConnected, connect]);
+
+  // 连接相关设置变化(尤其 Relay 重新配对后的 machineId/token)→ 重连,
+  // 让运行中的 WS/RelayClient 用新值重建,而不是沿用构造时固化的旧值
+  // (否则配对后当前会话仍用旧 machineId,要新会话才生效)。
+  const connIdentity = [
+    settings.mode,
+    settings.workspaceMode,
+    settings.cloudServerUrl,
+    settings.toolServerUrl,
+    settings.relayServerUrl,
+    settings.relayToken,
+    settings.relayMachineId,
+    settings.authToken,
+  ].join("|");
+  const connIdentityRef = useRef<string | null>(null);
+  useEffect(() => {
+    if (!settingsLoaded) return;
+    if (connIdentityRef.current === null) {
+      // 首次稳定值:只记录,初次连接由上面的 effect 负责
+      connIdentityRef.current = connIdentity;
+      return;
+    }
+    if (connIdentityRef.current === connIdentity) return;
+    connIdentityRef.current = connIdentity;
+    disconnect();
+    if (needsAutoConnect) {
+      setTimeout(() => connect(), 150);
+    }
+  }, [connIdentity, settingsLoaded, needsAutoConnect, connect, disconnect]);
 
   const scrollToEnd = () => {
     if (messages.length > 0) {
@@ -358,6 +400,9 @@ function MainScreen() {
             writeFile={isGeek && settings.workspaceMode === "local"
               ? (path: string, content: string) => writeLocalFile(path, content, localWorkspaceRoot)
               : undefined}
+            requestSyncPull={requestSyncPull}
+            requestSyncFile={requestSyncFile}
+            isStreaming={isStreaming}
             workspaceMode={settings.workspaceMode}
             settings={settings}
             projectId={currentProject?.id}
@@ -366,7 +411,7 @@ function MainScreen() {
 
         {/* ── Preview Tab ── */}
         <View style={[styles.flex1, activeTab !== "preview" && styles.hidden]}>
-          <PreviewTab initialUrl={previewUrl} />
+          <PreviewTab initialUrl={previewUrl} settings={settings} />
         </View>
       </View>
 
