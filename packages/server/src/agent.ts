@@ -168,7 +168,12 @@ export async function runAgent(
   // Smart model routing: auto-select model based on prompt complexity
   let effectiveModelKey = session.modelKey;
   if (session.modelKey === "auto") {
-    const analysis = analyzePrompt(userMessage, session.messages, !!images?.length);
+    // 对齐旧行为:分析时含本轮 user 消息(旧代码先 push 本轮消息再分析,historyLength 含它)。
+    const analysis = analyzePrompt(
+      userMessage,
+      [...session.messages, { role: "user", content: userMessage }],
+      !!images?.length
+    );
     effectiveModelKey = analysis.suggestedModel;
     onEvent({ type: "model-selected", modelKey: effectiveModelKey, reason: analysis.reason });
     console.log(`[Router] auto → ${effectiveModelKey} (${analysis.reason})`);
