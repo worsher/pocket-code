@@ -48,16 +48,25 @@
 | P6a | relay 远程安全加固（强制 RELAY_SECRET / 响应身份绑定 / 边界 safeParse） | specs+plans/2026-07-05-p6a |
 | P6b | App 切归一化 AgentEvent（删 StreamEvent 与 bridge / 出站 schema / useAgent 拆三层 / geek 共用 reducer） | specs+plans/2026-07-05-p6b |
 | P7 | HMR 热更新隧道（WS upgrade 路由拆分 / WsTunnelHub / daemon 本地 ws 客户端） | specs+plans/2026-07-05-p7 |
+| P8 | codex/gemini-cli 适配器 + 注册表路由 + 删 cliRunner | specs+plans/2026-07-06-p8 |
+| — | DeepSeek V4 升级（Pro/Flash,默认与 auto 路由随迁） | specs/2026-07-06-deepseek-v4 |
 
 ## 待办（按优先级）
 
-1. **真机验收**：P6a/P6b/P7 三组清单，见 `docs/真机验收指南.md`。
-2. **合并 refactor/architecture-redesign → master**（验收通过后）；顺带让 CI 生效。
-3. **codex / gemini-cli 适配器**：gemini 事件已归一化但仍是 cliRunner 遗留实现（未进 adapter 架构、未真机验证）；codex 未接。
-4. **agent-core（模式 C 端侧 agent）**：合并 server/agent.ts 与 app geekLoop/aiClient 为同构包（三套 loop 收编的最后一步）。
-5. **esbuild-wasm 离线前端预览**（模式 B/C）。
-6. **端侧 shell spike**（proot/Alpine over SELinux，真机验证）。
-7. **iOS**。
+1. **P9 agent-core**（进行中）：同构 agent 包 + server/App 双侧接入，三套 loop 收编终局。设计见 specs/2026-07-06-p9。
+2. **P10 候选：多端客户端**：抽 `client-core` 包（serverConnection/chatReducer/relayClient 已平台无关），Web 端作为新消费者。预案见 P9 spec 第一部分候选四。
+3. **esbuild-wasm 离线前端预览**（模式 B/C）。
+4. **端侧 shell spike**（proot/Alpine over SELinux，真机验证）。
+5. **iOS**。
+6. 小增强：DeepSeek V4 think 参数透传、codex MCP/todo 事件精细渲染。
+
+## 拆分路线（评估结论,详见 specs/2026-07-06-p9 第一部分）
+
+单人期不拆仓库,包边界按"随时可拆"标准维护。触发信号:开源/第三方复用/多人协作。
+- **relay** → 独立中继服务(类 ngrok):前置 wire 拆 protocol-core 层,约 1-2 天。
+- **cli 适配层** → 独立 OSS 库(驱动 claude-code/codex/gemini 的归一化事件流):约 1 天,价值最高。
+- **agent-core** → P9 即按可拆标准建包(运行时零依赖)。
+- **client-core + Web 端** → P10 候选。
 
 ## 安全后置（多用户/公开部署前必做）
 
