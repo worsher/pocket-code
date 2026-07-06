@@ -117,6 +117,9 @@ importers:
       '@pocket-code/wire':
         specifier: workspace:*
         version: link:../wire
+      dotenv:
+        specifier: ^16.4.0
+        version: 16.6.1
       jsonwebtoken:
         specifier: ^9.0.3
         version: 9.0.3
@@ -148,6 +151,9 @@ importers:
       '@pocket-code/wire':
         specifier: workspace:*
         version: link:../wire
+      dotenv:
+        specifier: ^16.4.0
+        version: 16.6.1
       ws:
         specifier: ^8.18.0
         version: 8.19.0

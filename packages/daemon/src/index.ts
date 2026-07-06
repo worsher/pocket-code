@@ -3,6 +3,8 @@
 // from the mobile App, using the same message processing logic
 // as the direct-connection server.
 
+// 先加载 .env(cwd 下):显式加载,不再依赖 server/agent.ts 的传递性 dotenv。
+import "dotenv/config";
 import crypto from "crypto";
 import { readFileSync, writeFileSync, mkdirSync } from "fs";
 import { join, resolve } from "path";

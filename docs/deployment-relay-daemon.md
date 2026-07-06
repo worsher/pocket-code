@@ -47,6 +47,8 @@ pnpm --filter @pocket-code/daemon build    # 开发机需 wire+server+daemon
 
 ### 2.1 环境变量
 
+> 支持 `.env` 文件:在**启动时的工作目录**(如 `/opt/pocket-code`)放一个 `.env`,内容 `RELAY_SECRET=xxx`(每行一个 `KEY=VALUE`),即可不用 export。真实环境变量优先于 `.env`。
+
 | 变量 | 说明 | 默认 |
 |---|---|---|
 | `PORT` | 监听端口 | `3200` |
@@ -182,7 +184,9 @@ sudo ufw allow 80,443/tcp
 
 Daemon 主动出站连 Relay，内嵌 server 跑 AI 与工具，**不需要公网 IP、不暴露任何端口**。
 
-### 3.1 环境变量（建议写到 `packages/daemon/.env` 或 export）
+### 3.1 环境变量（支持 `.env` 文件或 export）
+
+> `.env` 放在**启动时的工作目录**(通常是仓库根,即 `cd pocket-code` 后启动);真实环境变量优先于 `.env`。**勿提交 git**(已在 .gitignore)。
 
 **连接 Relay：**
 | 变量 | 说明 | 默认 |

@@ -3,6 +3,9 @@
 // mobile App clients and local Daemon processes.
 // Does NOT execute any business logic — only auth and routing.
 
+// 先加载 .env(cwd 下):RELAY_SECRET 等可写在文件里而不必 export;
+// 真实环境变量优先于 .env(dotenv 默认不覆盖已存在的变量)。
+import "dotenv/config";
 import { WebSocketServer, WebSocket } from "ws";
 import { createServer, type IncomingMessage, type ServerResponse } from "http";
 import crypto from "crypto";

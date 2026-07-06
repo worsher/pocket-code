@@ -10,6 +10,7 @@
     "test": "vitest run src"
   },
   "dependencies": {
+    "dotenv": "^16.4.0",
     "jsonwebtoken": "^9.0.3",
     "ws": "^8.18.0",
     "@pocket-code/wire": "workspace:*",
