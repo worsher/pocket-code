@@ -11,10 +11,10 @@ import type { StreamingPhase } from "../components/StreamingIndicator";
 import { enqueueMessage, getQueue, dequeueMessage } from "../services/offlineQueue";
 import { sendLocalNotification } from "../services/notifications";
 import { ServerConnection, type ConnectionConfig, type ConnectionHandlers } from "../services/serverConnection";
-import { applyAgentEvent, phaseFor, truncateCoreHistory } from "./chatReducer";
+import { applyAgentEvent, phaseFor, truncateCoreHistory, storedToCoreMessages } from "./chatReducer";
 import type { Message, ImageAttachment } from "./chatReducer";
 import { createRnModelClient } from "../services/rnModelClient";
-import { createDeviceBackend } from "../services/deviceBackend";
+import { createDeviceBackend, GEEK_WORKSPACE } from "../services/deviceBackend";
 import { runAgentLoop, buildSystemPrompt, type CoreMessage } from "@pocket-code/agent-core";
 import type { AgentEventType } from "@pocket-code/wire";
 
@@ -93,11 +93,10 @@ export function useAgent({ settings, model = "deepseek-v4-flash", customPrompt, 
   // callId → toolName(runCommand 后台通知需知道工具名)
   const callNamesRef = useRef(new Map<string, string>());
   // geek 会话的 CoreMessage 史(与 UI messages 并行维护,供 runAgentLoop 使用)。
-  // 重置点与 setMessages([]) 同点:newSession、项目切换 effect。loadSession
-  // 从存档恢复 UI messages,但旧存档没有 CoreMessage 形态历史,同样重置为
-  // 空——下一轮 geek 发送会以"无历史、仅本轮 user 消息"重新开始(load 后继续
-  // 对话时上下文会略短于云端场景,可接受:与云端历史来源不同构,brief 未要求
-  // 从 StoredMessage 反向重建 CoreMessage)。
+  // 重置点与 setMessages([]) 同点:newSession、项目切换 effect ——重置为 []。
+  // loadSession 是例外(I1 修复):从存档的 StoredMessage[] 用
+  // storedToCoreMessages(...) 重建 CoreMessage[] 历史,而不是重置为空,
+  // 这样 load 一个旧会话后立即在 geek 模式续聊,模型仍能看到之前的对话上下文。
   const coreHistoryRef = useRef<CoreMessage[]>([]);
 
   const serverUrl = settings.mode === "geek"
@@ -326,9 +325,14 @@ export function useAgent({ settings, model = "deepseek-v4-flash", customPrompt, 
         const { messages: nextHistory } = await runAgentLoop({
           modelClient: createRnModelClient({ modelConfig, apiKey }),
           backend: createDeviceBackend({ projectId: projectIdRef.current, execTool: executeTool }),
-          workspace: "/", // DeviceBackend 内部已定根,safePath 以 "/" 为界
+          // C1 修复:workspace 不能是字面量 "/"——core safePath("/", path) 的
+          // `full.startsWith(ws + "/")` 检查在 ws==="/" 时变成 startsWith("//"),
+          // 导致几乎所有正常路径都被误判为路径穿越。GEEK_WORKSPACE("/workspace")
+          // 是纯粹喂给 safePath 的哨兵根,真实路径解析仍由 DeviceBackend 内部的
+          // workspaceRoot()(projectId → 真实目录)完成,见 deviceBackend.ts。
+          workspace: GEEK_WORKSPACE,
           system: buildSystemPrompt({ customPrompt: customPromptRef.current }),
-          history: coreHistoryRef.current, // 新会话/loadSession/newSession/项目切换处重置为 []
+          history: coreHistoryRef.current, // newSession/项目切换处重置为 [];loadSession 重建自存档(I1)
           userMessage: content,
           images: images?.map((i) => ({ base64: i.base64, mimeType: i.mimeType })),
           onEvent: emitGeek,
@@ -409,7 +413,9 @@ export function useAgent({ settings, model = "deepseek-v4-flash", customPrompt, 
       setIsConnected(false);
       const loaded = await loadChatHistory(targetSessionId);
       setMessages(loaded as Message[]);
-      coreHistoryRef.current = []; // 旧存档无 CoreMessage 形态历史,geek 续聊从空历史开始
+      // I1 修复:从存档重建 CoreMessage 历史(而非重置为 []),使 loadSession 后
+      // geek 续聊仍能看到之前对话的上下文。
+      coreHistoryRef.current = storedToCoreMessages(loaded);
       setSessionId(targetSessionId);
       sessionIdRef.current = targetSessionId; // 立即更新,供 connect() 使用
       setIsStreaming(false);

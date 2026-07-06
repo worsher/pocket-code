@@ -14,13 +14,29 @@ vi.mock("./localFileSystem", () => ({
   getDefaultWorkspace: () => getDefaultWorkspace(),
 }));
 
-import { createDeviceBackend, toRelativePath, parseExecResult } from "./deviceBackend";
+import { createDeviceBackend, toRelativePath, parseExecResult, GEEK_WORKSPACE } from "./deviceBackend";
 
 describe("toRelativePath", () => {
-  it("strips leading slashes produced by safePath('/', ...)", () => {
+  it("C1: strips the GEEK_WORKSPACE sentinel prefix produced by safePath(GEEK_WORKSPACE, ...)", () => {
+    expect(toRelativePath("/workspace/a/b.ts")).toBe("a/b.ts");
+    expect(toRelativePath("/workspace/file.txt")).toBe("file.txt");
+  });
+
+  it("C1: exactly the workspace root maps to ''", () => {
+    expect(toRelativePath("/workspace")).toBe("");
+  });
+
+  it("falls back to stripping leading slashes for paths without the sentinel prefix (defensive)", () => {
     expect(toRelativePath("/a/b.ts")).toBe("a/b.ts");
     expect(toRelativePath("/")).toBe(".");
     expect(toRelativePath("/file.txt")).toBe("file.txt");
+  });
+});
+
+describe("GEEK_WORKSPACE", () => {
+  it("is not the bare '/' (which breaks core safePath's ws+'/' boundary check)", () => {
+    expect(GEEK_WORKSPACE).toBe("/workspace");
+    expect(GEEK_WORKSPACE).not.toBe("/");
   });
 });
 
@@ -160,6 +176,24 @@ describe("createDeviceBackend", () => {
     const result = await backend.exec("false");
 
     expect(result).toEqual({ stdout: "", stderr: "boom", exitCode: 1 });
+  });
+
+  it("M-obs1: exec forwards opts.timeoutMs and opts.cwd to execTool args", async () => {
+    const execTool = vi.fn().mockResolvedValue({ success: true, stdout: "", stderr: "", exitCode: 0 });
+    const backend = createDeviceBackend({ execTool });
+
+    await backend.exec("npm test", { cwd: "app", timeoutMs: 5000 });
+
+    expect(execTool).toHaveBeenCalledWith("runCommand", { command: "npm test", cwd: "app", timeoutMs: 5000 });
+  });
+
+  it("M-obs1: exec omits cwd/timeoutMs from args when not provided", async () => {
+    const execTool = vi.fn().mockResolvedValue({ success: true, stdout: "", stderr: "", exitCode: 0 });
+    const backend = createDeviceBackend({ execTool });
+
+    await backend.exec("ls");
+
+    expect(execTool).toHaveBeenCalledWith("runCommand", { command: "ls" });
   });
 
   it("startProcess: calls execTool('runInBackground', ...) and coerces numeric processId to string", async () => {

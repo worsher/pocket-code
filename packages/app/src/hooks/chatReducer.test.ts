@@ -1,6 +1,7 @@
 import { describe, it, expect } from "vitest";
-import { applyAgentEvent, phaseFor, truncateCoreHistory, type Message } from "./chatReducer";
+import { applyAgentEvent, phaseFor, truncateCoreHistory, storedToCoreMessages, type Message } from "./chatReducer";
 import type { CoreMessage } from "@pocket-code/agent-core";
+import type { StoredMessage } from "../store/chatHistory";
 
 const base = (over: Partial<Message> = {}): Message[] => [
   { id: "1", role: "user", content: "hi", timestamp: 1 },
@@ -105,6 +106,108 @@ describe("truncateCoreHistory", () => {
 
   it("returns empty array for empty history", () => {
     expect(truncateCoreHistory([], 5)).toEqual([]);
+  });
+});
+
+describe("storedToCoreMessages (I1: loadSession core history reconstruction)", () => {
+  it("converts a full user/assistant+toolCalls/images session and preserves shape", () => {
+    const stored: StoredMessage[] = [
+      {
+        id: "1",
+        role: "user",
+        content: "look at this",
+        images: [{ uri: "file://x.png", base64: "aGVsbG8=", mimeType: "image/png" }],
+        timestamp: 1,
+      },
+      {
+        id: "2",
+        role: "assistant",
+        content: "let me check",
+        toolCalls: [
+          { toolName: "readFile", args: { path: "a.ts" }, result: { success: true, content: "x" } },
+          { toolName: "listFiles", args: { path: "." }, result: "plain-string-result" },
+        ],
+        timestamp: 2,
+      },
+      {
+        id: "3",
+        role: "user",
+        content: "thanks, now write it",
+        timestamp: 3,
+      },
+      {
+        id: "4",
+        role: "assistant",
+        content: "done!",
+        timestamp: 4,
+      },
+    ];
+
+    const out = storedToCoreMessages(stored);
+
+    expect(out).toEqual([
+      {
+        role: "user",
+        content: [
+          { type: "text", text: "look at this" },
+          { type: "image", base64: "aGVsbG8=", mimeType: "image/png" },
+        ],
+      },
+      {
+        role: "assistant",
+        content: "let me check",
+        toolCalls: [
+          { id: "stored-1-0", name: "readFile", args: { path: "a.ts" } },
+          { id: "stored-1-1", name: "listFiles", args: { path: "." } },
+        ],
+      },
+      {
+        role: "tool",
+        toolCallId: "stored-1-0",
+        toolName: "readFile",
+        content: JSON.stringify({ success: true, content: "x" }),
+      },
+      {
+        role: "tool",
+        toolCallId: "stored-1-1",
+        toolName: "listFiles",
+        content: "plain-string-result",
+      },
+      { role: "user", content: "thanks, now write it" },
+      { role: "assistant", content: "done!" },
+    ] satisfies CoreMessage[]);
+  });
+
+  it("plain user message without images becomes a string-content user message", () => {
+    const stored: StoredMessage[] = [{ id: "1", role: "user", content: "hi", timestamp: 1 }];
+    expect(storedToCoreMessages(stored)).toEqual([{ role: "user", content: "hi" }]);
+  });
+
+  it("assistant with empty toolCalls array is treated as plain text (no toolCalls field)", () => {
+    const stored: StoredMessage[] = [
+      { id: "1", role: "assistant", content: "ok", toolCalls: [], timestamp: 1 },
+    ];
+    expect(storedToCoreMessages(stored)).toEqual([{ role: "assistant", content: "ok" }]);
+  });
+
+  it("skips a tool message when the stored toolCall has no result yet", () => {
+    const stored: StoredMessage[] = [
+      {
+        id: "1",
+        role: "assistant",
+        content: "",
+        toolCalls: [{ toolName: "readFile", args: { path: "a.ts" } }],
+        timestamp: 1,
+      },
+    ];
+    const out = storedToCoreMessages(stored);
+    expect(out).toEqual([
+      { role: "assistant", content: "", toolCalls: [{ id: "stored-0-0", name: "readFile", args: { path: "a.ts" } }] },
+    ]);
+  });
+
+  it("returns an empty array for an empty session", () => {
+    expect(storedToCoreMessages([])).toEqual([]);
   });
 });
 

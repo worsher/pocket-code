@@ -5,6 +5,7 @@
 import type { AgentEventType } from "@pocket-code/wire";
 import type { StreamingPhase } from "../components/StreamingIndicator";
 import type { CoreMessage } from "@pocket-code/agent-core";
+import type { StoredMessage } from "../store/chatHistory";
 
 export interface ImageAttachment {
   uri: string;
@@ -100,6 +101,70 @@ export function truncateCoreHistory(history: CoreMessage[], keepUserTurns: numbe
     }
   }
   return history.slice();
+}
+
+/**
+ * I1 修复:loadSession 后 coreHistoryRef 从 StoredMessage[] 重建 CoreMessage[]
+ * 历史,取代此前"总是重置为 []"的做法(load 一个旧会话后,geek 续聊本应看到
+ * 存档里的历史,而不是从零开始)。
+ *
+ * 映射规则:
+ * - user → user(有 images 时 content 为 ContentPart[]:{type:"text"} + N 个
+ *   {type:"image", base64, mimeType};否则 content 为纯字符串)。
+ * - assistant 含 toolCalls → assistant(content, toolCalls:[{id,name,args}]) +
+ *   紧随其后的对应 tool 消息(每个 toolCall 一条,toolCallId 与 assistant 里的
+ *   toolCalls[i].id 对齐;result 非 string 时 JSON.stringify)。StoredMessage 的
+ *   toolCalls 不含 id(旧存档字段),这里合成稳定 id `stored-${msgIndex}-${i}`,
+ *   assistant 消息与紧随的 tool 消息必须使用同一个 id。
+ * - assistant 纯文本(无 toolCalls 或为空数组)→ assistant(content)。
+ */
+export function storedToCoreMessages(stored: StoredMessage[]): CoreMessage[] {
+  const result: CoreMessage[] = [];
+
+  stored.forEach((msg, index) => {
+    if (msg.role === "user") {
+      if (msg.images && msg.images.length > 0) {
+        result.push({
+          role: "user",
+          content: [
+            { type: "text", text: msg.content },
+            ...msg.images.map((img) => ({
+              type: "image" as const,
+              base64: img.base64,
+              mimeType: img.mimeType,
+            })),
+          ],
+        });
+      } else {
+        result.push({ role: "user", content: msg.content });
+      }
+      return;
+    }
+
+    // assistant
+    if (msg.toolCalls && msg.toolCalls.length > 0) {
+      const toolCalls = msg.toolCalls.map((tc, i) => ({
+        id: `stored-${index}-${i}`,
+        name: tc.toolName,
+        args: tc.args,
+      }));
+      result.push({ role: "assistant", content: msg.content, toolCalls });
+      msg.toolCalls.forEach((tc, i) => {
+        if (tc.result === undefined) return;
+        const content = typeof tc.result === "string" ? tc.result : JSON.stringify(tc.result);
+        result.push({
+          role: "tool",
+          toolCallId: `stored-${index}-${i}`,
+          toolName: tc.toolName,
+          content,
+        });
+      });
+    } else {
+      result.push({ role: "assistant", content: msg.content });
+    }
+  });
+
+  return result;
 }
 
 /** 事件 → streaming phase;null 表示不改变当前 phase。 */
