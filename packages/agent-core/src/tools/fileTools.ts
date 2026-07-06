@@ -225,13 +225,12 @@ export function buildFileTools(workspace: string): ToolDef[] {
       const isRegex = (args.isRegex as boolean | undefined) ?? false;
 
       try {
-        // 旧版命令构造照迁(grep -rn --include=... -e <pattern>);core 侧统一用 -e 传参
-        // (避免 -F/-E 与 pattern 转义细节耦合),配合 exec 输出 2000 字符截断(替代旧版 shell head -50)。
+        // C1: grep 标志添加 -F（字面匹配默认，非 regex 时）
         const flags = [
           "-rn", // recursive + line numbers
           "--color=never",
           ignoreCase ? "-i" : "",
-          isRegex ? "-E" : "",
+          isRegex ? "-E" : "-F", // -F for fixed string, -E for extended regex
         ]
           .filter(Boolean)
           .join(" ");
@@ -243,39 +242,42 @@ export function buildFileTools(workspace: string): ToolDef[] {
 
         const cmd = `grep ${flags} ${includeFlag} -e ${safePattern} ${JSON.stringify(searchPath)}`.replace(/\s+/g, " ").trim();
 
-        const { stdout } = await backend.exec(cmd, { cwd: workspace, timeoutMs: 15000 });
+        const r = await backend.exec(cmd, { cwd: workspace, timeoutMs: 15000 });
 
-        const truncatedStdout = stdout.slice(0, 2000);
+        // C2: 检查 exitCode；grep 语义：0=有匹配、1=无匹配（正常）、>1=真错误
+        if (r.exitCode > 1) {
+          return { success: false, error: r.stderr || `grep exit ${r.exitCode}` };
+        }
 
-        const matches = truncatedStdout
-          .trim()
-          .split("\n")
-          .filter(Boolean)
-          .map((line) => {
-            // Format: filepath:lineNumber:content
-            const firstColon = line.indexOf(":");
-            const secondColon = line.indexOf(":", firstColon + 1);
-            if (firstColon === -1 || secondColon === -1) {
-              return { file: "", line: 0, content: line };
-            }
-            let file = line.slice(0, firstColon);
-            const wsPrefix = workspace + "/";
-            if (file.startsWith(wsPrefix)) {
-              file = file.slice(wsPrefix.length);
-            }
-            return {
-              file,
-              line: parseInt(line.slice(firstColon + 1, secondColon), 10) || 0,
-              content: line.slice(secondColon + 1).trim(),
-            };
-          });
+        // I1: 按行数上限 50 截断（对齐旧版 head -50）
+        const lines = r.stdout.trim().split("\n").filter(Boolean);
+        const truncated = lines.length > 50;
+        const kept = lines.slice(0, 50);
+
+        const matches = kept.map((line) => {
+          // Format: filepath:lineNumber:content
+          const firstColon = line.indexOf(":");
+          const secondColon = line.indexOf(":", firstColon + 1);
+          if (firstColon === -1 || secondColon === -1) {
+            return { file: "", line: 0, content: line };
+          }
+          let file = line.slice(0, firstColon);
+          const wsPrefix = workspace + "/";
+          if (file.startsWith(wsPrefix)) {
+            file = file.slice(wsPrefix.length);
+          }
+          return {
+            file,
+            line: parseInt(line.slice(firstColon + 1, secondColon), 10) || 0,
+            content: line.slice(secondColon + 1).trim(),
+          };
+        });
 
         return {
           success: true,
-          matchCount: matches.length,
+          matchCount: kept.length,
           matches,
-          // core 侧按字符数截断(2000)替代旧版 shell head -50 的按行截断，故以 stdout 是否被截断判定
-          truncated: stdout.length > 2000,
+          truncated,
         };
       } catch (err) {
         return { success: false, error: errorMessage(err) };

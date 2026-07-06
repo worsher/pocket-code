@@ -75,6 +75,34 @@ describe("file tools", () => {
     ]);
   });
 
+  it("searchFiles with isRegex=false passes -F flag (fixed-string matching)", async () => {
+    const exec = vi.fn(async () => ({
+      stdout: "/ws/a.ts:1:a.b matches\n",
+      stderr: "",
+      exitCode: 0,
+    }));
+    const registry = buildToolRegistry(makeFakeBackend({ exec }), "/ws");
+    await registry.run("searchFiles", { pattern: "a.b", isRegex: false });
+    expect(exec).toHaveBeenCalled();
+    const cmd = (exec.mock.calls as Array<any[]>)[0][0];
+    expect(cmd).toContain(" -F ");
+    expect(cmd).not.toContain(" -E ");
+  });
+
+  it("searchFiles with isRegex=true passes -E flag (extended regex)", async () => {
+    const exec = vi.fn(async () => ({
+      stdout: "/ws/a.ts:1:match\n",
+      stderr: "",
+      exitCode: 0,
+    }));
+    const registry = buildToolRegistry(makeFakeBackend({ exec }), "/ws");
+    await registry.run("searchFiles", { pattern: "a+b", isRegex: true });
+    expect(exec).toHaveBeenCalled();
+    const cmd = (exec.mock.calls as Array<any[]>)[0][0];
+    expect(cmd).toContain(" -E ");
+    expect(cmd).not.toContain(" -F ");
+  });
+
   it("searchFiles parses grep output into matches + matchCount + truncated", async () => {
     const exec = vi.fn(async () => ({
       stdout: "/ws/a.ts:1:hello world\n/ws/b.ts:3:say hello\n",
@@ -94,21 +122,47 @@ describe("file tools", () => {
     });
   });
 
-  it("searchFiles with no matches returns empty matches, matchCount:0", async () => {
+  it("searchFiles with no matches (exitCode:1) returns empty matches, matchCount:0", async () => {
     const exec = vi.fn(async () => ({ stdout: "", stderr: "", exitCode: 1 }));
     const registry = buildToolRegistry(makeFakeBackend({ exec }), "/ws");
     const r: any = await registry.run("searchFiles", { pattern: "nope" });
     expect(r).toEqual({ success: true, matchCount: 0, matches: [], truncated: false });
   });
 
-  it("searchFiles marks truncated when stdout exceeds 2000-char cap", async () => {
-    const line = "/ws/a.ts:1:" + "x".repeat(50) + "\n";
-    const stdout = line.repeat(60); // well over 2000 chars
+  it("searchFiles with exitCode>1 returns error (C2: grep error handling)", async () => {
+    const exec = vi.fn(async () => ({
+      stdout: "",
+      stderr: "grep: bad pattern",
+      exitCode: 2,
+    }));
+    const registry = buildToolRegistry(makeFakeBackend({ exec }), "/ws");
+    const r: any = await registry.run("searchFiles", { pattern: "bad" });
+    expect(r.success).toBe(false);
+    expect(r.error).toBe("grep: bad pattern");
+  });
+
+  it("searchFiles with 60 lines marks truncated=true (I1: line-count cap at 50)", async () => {
+    const line = "/ws/a.ts:1:match\n";
+    const stdout = line.repeat(60); // 60 lines
     const exec = vi.fn(async () => ({ stdout, stderr: "", exitCode: 0 }));
     const registry = buildToolRegistry(makeFakeBackend({ exec }), "/ws");
-    const r: any = await registry.run("searchFiles", { pattern: "x" });
+    const r: any = await registry.run("searchFiles", { pattern: "match" });
     expect(r.success).toBe(true);
+    expect(r.matches.length).toBe(50);
+    expect(r.matchCount).toBe(50);
     expect(r.truncated).toBe(true);
+  });
+
+  it("searchFiles with 50 lines marks truncated=false (I1: no truncation at boundary)", async () => {
+    const line = "/ws/a.ts:1:match\n";
+    const stdout = line.repeat(50); // exactly 50 lines
+    const exec = vi.fn(async () => ({ stdout, stderr: "", exitCode: 0 }));
+    const registry = buildToolRegistry(makeFakeBackend({ exec }), "/ws");
+    const r: any = await registry.run("searchFiles", { pattern: "match" });
+    expect(r.success).toBe(true);
+    expect(r.matches.length).toBe(50);
+    expect(r.matchCount).toBe(50);
+    expect(r.truncated).toBe(false);
   });
 
   it("unknown tool yields structured error", async () => {
