@@ -37,12 +37,18 @@ export const claudeCodeAdapter: CliAgentAdapter = {
         `\n\n## Project Instructions\n${ctx.customPrompt.trim()}`
       );
     }
-    // claude CLI 使用自身存储的 OAuth 凭证;清除 API key/自定义 base URL,
-    // 避免宿主 shell 里为其他工具配置的镜像/代理干扰其认证(典型症状:404)。
+    // claude CLI 使用自身存储的 OAuth 凭证与自身配置的模型;清除宿主 shell
+    // 里可能残留的 ANTHROPIC_* 覆盖项(API key/镜像 base URL/模型指定),
+    // 否则旧值会劫持 CLI(真机案例:ANTHROPIC_MODEL 指向已下线模型 → 404)。
     const env: NodeJS.ProcessEnv = { ...process.env };
     delete env.ANTHROPIC_API_KEY;
     delete env.ANTHROPIC_AUTH_TOKEN;
     delete env.ANTHROPIC_BASE_URL;
+    delete env.ANTHROPIC_MODEL;
+    delete env.ANTHROPIC_SMALL_FAST_MODEL;
+    delete env.ANTHROPIC_DEFAULT_OPUS_MODEL;
+    delete env.ANTHROPIC_DEFAULT_SONNET_MODEL;
+    delete env.ANTHROPIC_DEFAULT_HAIKU_MODEL;
     return {
       cmd: process.env.CLAUDE_CLI_PATH || "claude",
       args,

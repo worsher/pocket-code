@@ -149,6 +149,8 @@ describe("claudeCodeAdapter.buildSpawn", () => {
     expect(spec.env.ANTHROPIC_API_KEY).toBeUndefined();
     expect(spec.env.ANTHROPIC_AUTH_TOKEN).toBeUndefined();
     expect(spec.env.ANTHROPIC_BASE_URL).toBeUndefined();
+    expect(spec.env.ANTHROPIC_MODEL).toBeUndefined();
+    expect(spec.env.ANTHROPIC_SMALL_FAST_MODEL).toBeUndefined();
   });
 
   it("appends project system prompt when customPrompt is provided", () => {
