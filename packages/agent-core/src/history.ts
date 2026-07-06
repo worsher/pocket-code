@@ -5,9 +5,51 @@
 
 import type { CoreMessage, ContentPart } from "./types.js";
 
+const BASE64_CHARS = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+
+/**
+ * Isomorphic base64 encoder (RFC4648, standard alphabet + padding).
+ * Avoids relying on Buffer (Node-only) or btoa (unreliable/unavailable in core's
+ * runtime-agnostic environment).
+ */
+export function bytesToBase64(bytes: number[]): string {
+  let result = "";
+  for (let i = 0; i < bytes.length; i += 3) {
+    const b0 = bytes[i];
+    const b1 = i + 1 < bytes.length ? bytes[i + 1] : undefined;
+    const b2 = i + 2 < bytes.length ? bytes[i + 2] : undefined;
+
+    result += BASE64_CHARS[b0 >> 2];
+    result += BASE64_CHARS[((b0 & 0x03) << 4) | ((b1 ?? 0) >> 4)];
+    result += b1 !== undefined ? BASE64_CHARS[((b1 & 0x0f) << 2) | ((b2 ?? 0) >> 6)] : "=";
+    result += b2 !== undefined ? BASE64_CHARS[b2 & 0x3f] : "=";
+  }
+  return result;
+}
+
+/**
+ * Detects the legacy DB shape of an image part's `image` field: a Uint8Array
+ * that was JSON.stringify-d, producing a plain object with numeric string keys
+ * (e.g. {"0":137,"1":80,...}).
+ */
+function isNumericKeyedByteObject(value: unknown): value is Record<string, number> {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) {
+    return false;
+  }
+  const keys = Object.keys(value);
+  if (keys.length === 0) {
+    return false;
+  }
+  if ("0" in value) {
+    return true;
+  }
+  return keys.every((k) => /^\d+$/.test(k));
+}
+
 export function fromLegacyAiSdkMessages(raw: unknown[]): CoreMessage[] {
   const result: CoreMessage[] = [];
   let toolPartsWarningLogged = false;
+  let imageDropWarned = false;
 
   for (const item of raw) {
     // Skip non-objects
@@ -54,6 +96,27 @@ export function fromLegacyAiSdkMessages(raw: unknown[]): CoreMessage[] {
             base64: p.image,
             mimeType: p.mimeType,
           });
+        } else if (partType === "image" && isNumericKeyedByteObject(p.image) && typeof p.mimeType === "string") {
+          // Legacy DB shape: a Uint8Array that was JSON.stringify-d into a
+          // numeric-keyed object (e.g. {"0":137,"1":80,...}). Rebuild the byte
+          // array and re-encode as base64.
+          const byteObj = p.image;
+          const bytes = Object.keys(byteObj)
+            .map((k) => Number(k))
+            .sort((a, b) => a - b)
+            .map((k) => byteObj[String(k)]);
+          imageParts.push({
+            type: "image",
+            base64: bytesToBase64(bytes),
+            mimeType: p.mimeType,
+          });
+        } else if (partType === "image") {
+          // Unrecognized image shape: drop it, but warn once so silent data
+          // loss doesn't go unnoticed.
+          if (!imageDropWarned) {
+            console.warn("[fromLegacyAiSdkMessages] Dropped unrecognized image part shape");
+            imageDropWarned = true;
+          }
         } else if (partType === "tool-call" || partType === "tool-result") {
           hasToolParts = true;
         }

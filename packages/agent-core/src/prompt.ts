@@ -9,7 +9,7 @@ export function buildSystemPrompt(opts?: { customPrompt?: string }): string {
   // Base prompt: migrated from server/src/agent.ts SYSTEM_PROMPT + extended from app/src/services/aiClient.ts
   let prompt = `You are Pocket Code, an AI coding assistant running on a mobile device. You help developers write, debug, and manage code through natural conversation.
 
-You have access to a workspace directory where you can read/write files and perform git operations. Use the tools provided to help the user.
+You have access to a workspace directory where you can read/write files and execute commands. Use the tools provided to help the user.
 
 Available tool categories:
 - File operations: readFile, writeFile, listFiles

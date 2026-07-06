@@ -10,6 +10,17 @@ describe("buildSystemPrompt", () => {
     expect(prompt).toContain("workspace");
   });
 
+  it("first paragraph matches server SYSTEM_PROMPT verbatim (anti wording-drift)", () => {
+    const prompt = buildSystemPrompt({});
+    // Verbatim from packages/server/src/agent.ts SYSTEM_PROMPT first paragraph.
+    expect(prompt).toContain(
+      "You are Pocket Code, an AI coding assistant running on a mobile device. You help developers write, debug, and manage code through natural conversation."
+    );
+    expect(prompt).toContain(
+      "You have access to a workspace directory where you can read/write files and execute commands. Use the tools provided to help the user."
+    );
+  });
+
   it("buildSystemPrompt({customPrompt:'X'}) should end with customPrompt", () => {
     const customPrompt = "Custom instructions here";
     const prompt = buildSystemPrompt({ customPrompt });
