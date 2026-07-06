@@ -3,7 +3,7 @@
 // In geek mode the App calls the provider directly;
 // in cloud mode the key is forwarded to the Server.
 
-export type ModelProvider = "anthropic" | "openai" | "google" | "siliconflow" | "iflow" | "cli-claude" | "cli-gemini";
+export type ModelProvider = "anthropic" | "openai" | "google" | "siliconflow" | "iflow" | "cli-claude" | "cli-gemini" | "cli-codex";
 
 export interface ModelConfig {
     key: string;
@@ -123,6 +123,15 @@ export const MODELS: ModelConfig[] = [
         baseURL: "",
         cloudOnly: true,
     },
+    {
+        key: "codex",
+        label: "Codex (ChatGPT)",
+        description: "服务器 Codex CLI 订阅，无需 API Key",
+        provider: "cli-codex",
+        modelId: "codex",
+        baseURL: "",
+        cloudOnly: true,
+    },
 ];
 
 /** Look up a model config by key, fallback to deepseek-v3 */
@@ -134,6 +143,6 @@ export function getModelConfig(key: string): ModelConfig {
 export function getApiKeyField(
     provider: ModelProvider
 ): "siliconflow" | "anthropic" | "openai" | "google" | "iflow" | null {
-    if (provider === "cli-claude" || provider === "cli-gemini") return null;
+    if (provider === "cli-claude" || provider === "cli-gemini" || provider === "cli-codex") return null;
     return provider;
 }
