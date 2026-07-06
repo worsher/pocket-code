@@ -65,6 +65,7 @@ export const geminiAdapter = {
       } catch {
         return []; // 非 JSON 行(ANSI 等)忽略
       }
+      if (!evt || typeof evt !== "object") return [];
       switch (evt.type) {
         case "init":
           console.log(`[CLI] Gemini session=${evt.session_id}, model=${evt.model}`);

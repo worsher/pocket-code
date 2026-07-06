@@ -12,6 +12,12 @@ describe("codexAdapter.parseLine", () => {
     expect(codexAdapter.parseLine("")).toEqual([]);
   });
 
+  it("returns [] for valid JSON that is not an object (null/number/string)", () => {
+    for (const line of ["null", "42", "true", "\"str\""]) {
+      expect(codexAdapter.parseLine(line)).toEqual([]);
+    }
+  });
+
   it("maps agent_message to text-delta (真机 fixture)", () => {
     expect(P({ type: "item.completed", item: { id: "item_1", type: "agent_message", text: "Hi there friend" } }))
       .toEqual([{ type: "text-delta", text: "Hi there friend" }]);

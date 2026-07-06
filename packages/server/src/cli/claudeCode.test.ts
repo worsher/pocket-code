@@ -165,3 +165,11 @@ describe("claudeCodeAdapter.buildSpawn", () => {
     expect(claudeCodeAdapter.supportsResume).toBe(true);
   });
 });
+
+describe("claudeCodeAdapter parser robustness (P8 修复)", () => {
+  it("returns [] for valid JSON that is not an object (null/number/string)", () => {
+    for (const line of ["null", "42", "true", "\"str\""]) {
+      expect(claudeCodeAdapter.parseLine(line)).toEqual([]);
+    }
+  });
+});

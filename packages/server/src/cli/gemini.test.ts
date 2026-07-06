@@ -58,6 +58,15 @@ describe("geminiAdapter.createParser", () => {
   });
 });
 
+describe("geminiAdapter parser robustness", () => {
+  it("returns [] for valid JSON that is not an object (null/number/string)", () => {
+    const parse = geminiAdapter.createParser();
+    for (const line of ["null", "42", "true", "\"str\""]) {
+      expect(parse(line)).toEqual([]);
+    }
+  });
+});
+
 describe("geminiAdapter.buildSpawn", () => {
   it("builds gemini exec args with stream-json/yolo/extensions and cleans GCP env", () => {
     const prevModel = process.env.GEMINI_CLI_MODEL;

@@ -66,6 +66,7 @@ export const claudeCodeAdapter = {
     } catch {
       return [];
     }
+    if (!msg || typeof msg !== "object") return [];
 
     const events: AgentEventType[] = [];
     switch (msg?.type) {

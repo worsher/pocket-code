@@ -66,6 +66,7 @@ export const codexAdapter = {
     } catch {
       return [];
     }
+    if (!evt || typeof evt !== "object") return [];
 
     switch (evt.type) {
       case "item.started": {
