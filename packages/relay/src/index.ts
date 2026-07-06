@@ -3,9 +3,17 @@
 // mobile App clients and local Daemon processes.
 // Does NOT execute any business logic — only auth and routing.
 
-// 先加载 .env(cwd 下):RELAY_SECRET 等可写在文件里而不必 export;
-// 真实环境变量优先于 .env(dotenv 默认不覆盖已存在的变量)。
-import "dotenv/config";
+// 加载 .env:依次尝试 cwd → 包根 → 仓库根(已存在的变量不被覆盖)。
+// pnpm --filter 运行时 cwd 是包目录,直接跑 dist 时 cwd 可能是仓库根,三级都兜住。
+import { config as loadEnv } from "dotenv";
+import { fileURLToPath } from "url";
+import { dirname, join as joinPath } from "path";
+loadEnv();
+{
+  const here = dirname(fileURLToPath(import.meta.url)); // src/ 或 dist/
+  loadEnv({ path: joinPath(here, "..", ".env") });               // 包根
+  loadEnv({ path: joinPath(here, "..", "..", "..", ".env") });   // 仓库根
+}
 import { WebSocketServer, WebSocket } from "ws";
 import { createServer, type IncomingMessage, type ServerResponse } from "http";
 import crypto from "crypto";

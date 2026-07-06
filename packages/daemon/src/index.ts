@@ -3,8 +3,17 @@
 // from the mobile App, using the same message processing logic
 // as the direct-connection server.
 
-// 先加载 .env(cwd 下):显式加载,不再依赖 server/agent.ts 的传递性 dotenv。
-import "dotenv/config";
+// 加载 .env:依次尝试 cwd → 包根 → 仓库根(已存在的变量不被覆盖)。
+// pnpm --filter 运行时 cwd 是包目录,直接跑 dist 时 cwd 可能是仓库根,三级都兜住。
+import { config as loadEnv } from "dotenv";
+import { fileURLToPath } from "url";
+import { dirname, join as joinPath } from "path";
+loadEnv();
+{
+  const here = dirname(fileURLToPath(import.meta.url)); // src/ 或 dist/
+  loadEnv({ path: joinPath(here, "..", ".env") });               // 包根
+  loadEnv({ path: joinPath(here, "..", "..", "..", ".env") });   // 仓库根
+}
 import crypto from "crypto";
 import { readFileSync, writeFileSync, mkdirSync } from "fs";
 import { join, resolve } from "path";
