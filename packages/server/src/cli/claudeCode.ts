@@ -1,6 +1,6 @@
 // ── claude-code 适配器 ─────────────────────────────────────
 // 把 claude CLI 的 --output-format stream-json NDJSON 归一化为 AgentEvent。
-// 解析形态参考既有 cliRunner.ts 的 parseClaudeLine(proven 对接真实 claude-code)。
+// 解析形态参考既有 parseClaudeLine 实现(proven 对接真实 claude-code)。
 
 import type { AgentEventType } from "@pocket-code/wire";
 import type { CliAgentAdapter, CliSpawnContext, CliSpawnSpec } from "./types.js";
@@ -19,7 +19,7 @@ function toolResultText(content: unknown): string {
   return String(content ?? "");
 }
 
-export const claudeCodeAdapter: CliAgentAdapter = {
+export const claudeCodeAdapter = {
   id: "claude-code",
   supportsResume: true,
 
@@ -66,6 +66,7 @@ export const claudeCodeAdapter: CliAgentAdapter = {
     } catch {
       return [];
     }
+    if (!msg || typeof msg !== "object") return [];
 
     const events: AgentEventType[] = [];
     switch (msg?.type) {
@@ -122,4 +123,4 @@ export const claudeCodeAdapter: CliAgentAdapter = {
     }
     return events;
   },
-};
+} satisfies CliAgentAdapter;

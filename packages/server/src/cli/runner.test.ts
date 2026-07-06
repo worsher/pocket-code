@@ -94,3 +94,39 @@ describe("runCliAgent", () => {
     expect(proc.kill).toHaveBeenCalled(); // 进程被终止(pid 路径或回退到 proc.kill)
   });
 });
+
+describe("runCliAgent parser selection", () => {
+  it("prefers createParser and creates a fresh parser per run (stateful adapters)", async () => {
+    // 有状态适配器:每行输出一个递增序号事件;两次运行序号都应从 1 开始
+    const statefulAdapter = {
+      id: "gemini-cli" as const,
+      supportsResume: false,
+      buildSpawn: () => ({ cmd: "x", args: [], env: {}, cwd: "/" }),
+      createParser: () => {
+        let n = 0;
+        return (_line: string) => [{ type: "text-delta" as const, text: `#${++n}` }];
+      },
+    };
+    for (const run of [1, 2]) {
+      const proc = makeFakeProc();
+      const events: any[] = [];
+      const p = runCliAgent(statefulAdapter as any, "hi", ctx, (e) => events.push(e), undefined, () => proc);
+      proc.pushLine({ a: 1 });
+      proc.pushLine({ a: 2 });
+      proc.finish(0);
+      await p;
+      expect(events.filter((e) => e.type === "text-delta").map((e) => e.text)).toEqual(["#1", "#2"]);
+    }
+  });
+
+  it("throws a clear error when adapter has neither parseLine nor createParser", async () => {
+    const badAdapter = {
+      id: "codex" as const,
+      supportsResume: false,
+      buildSpawn: () => ({ cmd: "x", args: [], env: {}, cwd: "/" }),
+    };
+    await expect(
+      runCliAgent(badAdapter as any, "hi", ctx, () => {}, undefined, () => makeFakeProc())
+    ).rejects.toThrow(/parseLine|createParser/);
+  });
+});

@@ -52,7 +52,7 @@ export function killProcessTree(pid: number, graceMs = 3000): void {
  * 运行一个 CLI 代理。把适配器解析出的 AgentEvent 通过 onEvent 流式发出,
  * 结尾必发一个 done。返回累计的 assistant 文本(供上层写入会话历史)。
  */
-export function runCliAgent(
+export async function runCliAgent(
   adapter: CliAgentAdapter,
   userMessage: string,
   ctx: CliSpawnContext,
@@ -61,6 +61,13 @@ export function runCliAgent(
   spawnFn: SpawnFn = nodeSpawn
 ): Promise<string> {
   const spec = adapter.buildSpawn(userMessage, ctx);
+
+  const parse =
+    adapter.createParser?.() ??
+    (adapter.parseLine ? adapter.parseLine.bind(adapter) : undefined);
+  if (!parse) {
+    throw new Error(`adapter ${adapter.id} must implement parseLine or createParser`);
+  }
 
   const proc = spawnFn(spec.cmd, spec.args, {
     cwd: spec.cwd,
@@ -97,7 +104,7 @@ export function runCliAgent(
   };
 
   const drainLine = (line: string) => {
-    for (const ev of adapter.parseLine(line)) handle(ev);
+    for (const ev of parse(line)) handle(ev);
   };
 
   return new Promise<string>((resolve) => {

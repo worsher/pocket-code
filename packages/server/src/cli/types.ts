@@ -32,6 +32,12 @@ export interface CliAgentAdapter {
   /**
    * 解析 CLI stdout 的一行 NDJSON,返回归一化 AgentEvent 数组。
    * 对空行/非 JSON 行/无对应业务语义的类型,返回 []。
+   * 无状态适配器实现本方法;有状态的实现 createParser。二者至少其一。
    */
-  parseLine(line: string): AgentEventType[];
+  parseLine?(line: string): AgentEventType[];
+  /**
+   * 可选:创建一次运行专用的解析器(每次 spawn 新建,状态互不串扰)。
+   * runner 优先使用本方法。
+   */
+  createParser?(): (line: string) => AgentEventType[];
 }
