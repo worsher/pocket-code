@@ -69,15 +69,15 @@ export function buildExecTools(workspace: string): ToolDef[] {
       if (r.exitCode === 0) {
         return {
           success: true,
-          stdout: r.stdout.slice(0, 5000),
-          stderr: r.stderr.slice(0, 2000),
+          stdout: r.stdout.slice(0, 10000),
+          stderr: r.stderr.slice(0, 5000),
         };
       }
       return {
         success: false,
         error: r.stderr || `exit ${r.exitCode}`,
-        stdout: r.stdout.slice(0, 5000),
-        stderr: r.stderr.slice(0, 2000),
+        stdout: r.stdout.slice(0, 10000),
+        stderr: r.stderr.slice(0, 5000),
       };
     },
   };
@@ -110,12 +110,12 @@ export function buildExecTools(workspace: string): ToolDef[] {
           isolateHome: true,
         });
         if (r.exitCode === 0) {
-          return { success: true, stdout: r.stdout.slice(0, 5000), stderr: r.stderr.slice(0, 2000) };
+          return { success: true, stdout: r.stdout.slice(0, 10000), stderr: r.stderr.slice(0, 5000) };
         }
         return {
           success: false,
           error: r.stderr || `exit ${r.exitCode}`,
-          stderr: r.stderr.slice(0, 2000),
+          stderr: r.stderr.slice(0, 5000),
         };
       } catch (err) {
         return { success: false, error: errorMessage(err) };
@@ -254,7 +254,7 @@ export function buildExecTools(workspace: string): ToolDef[] {
         if (r.exitCode !== 0) {
           return { success: false, error: r.stderr || `exit ${r.exitCode}` };
         }
-        return { success: true, stdout: r.stdout.slice(0, 2000), stderr: r.stderr.slice(0, 2000) };
+        return { success: true, stdout: r.stdout.slice(0, 2000), stderr: r.stderr.slice(0, 5000) };
       } catch (err) {
         return { success: false, error: errorMessage(err) };
       }
@@ -290,7 +290,7 @@ export function buildExecTools(workspace: string): ToolDef[] {
         if (r.exitCode !== 0) {
           return { success: false, error: r.stderr || `exit ${r.exitCode}` };
         }
-        return { success: true, stdout: r.stdout.slice(0, 2000), stderr: r.stderr.slice(0, 2000) };
+        return { success: true, stdout: r.stdout.slice(0, 2000), stderr: r.stderr.slice(0, 5000) };
       } catch (err) {
         return { success: false, error: errorMessage(err) };
       }

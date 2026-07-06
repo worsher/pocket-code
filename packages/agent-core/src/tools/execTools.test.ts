@@ -5,10 +5,10 @@ import { makeFakeBackend } from "./fileTools.test.js";
 
 describe("runCommand", () => {
   it("success path slices stdout/stderr", async () => {
-    const be = makeFakeBackend({ exec: vi.fn(async () => ({ stdout: "x".repeat(6000), stderr: "", exitCode: 0 })) });
+    const be = makeFakeBackend({ exec: vi.fn(async () => ({ stdout: "x".repeat(11000), stderr: "", exitCode: 0 })) });
     const r: any = await buildToolRegistry(be, "/ws").run("runCommand", { command: "ls" });
     expect(r.success).toBe(true);
-    expect(r.stdout.length).toBe(5000);
+    expect(r.stdout.length).toBe(10000);
   });
   it("non-zero exit yields success:false with stderr", async () => {
     const be = makeFakeBackend({ exec: vi.fn(async () => ({ stdout: "", stderr: "boom", exitCode: 2 })) });
