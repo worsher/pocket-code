@@ -68,7 +68,7 @@ const openai = createOpenAI({
   apiKey: process.env.OPENAI_API_KEY || "",
 });
 
-function getModel(modelKey: string) {
+export function getModel(modelKey: string) {
   const config = MODEL_MAP[modelKey] || MODEL_MAP["deepseek-v4-flash"];
   switch (config.provider) {
     case "anthropic":
