@@ -1,15 +1,21 @@
 import "dotenv/config";
-import { streamText, type CoreMessage } from "ai";
 import { anthropic } from "@ai-sdk/anthropic";
 import { createOpenAI } from "@ai-sdk/openai";
 import { google } from "@ai-sdk/google";
-import { createTools, getWorkspaceRoot } from "./tools.js";
+import { getWorkspaceRoot } from "./tools.js";
 import { mkdir } from "fs/promises";
 import { saveSession, getSession } from "./db.js";
 import { analyzePrompt } from "./modelRouter.js";
 import { cliAdapters, runCliSession } from "./cli/index.js";
 import type { AgentEventType } from "@pocket-code/wire";
-import { mapAiSdkPart, type AiStreamPartLike } from "./aiSdkEvents.js";
+import {
+  runAgentLoop,
+  fromLegacyAiSdkMessages,
+  buildSystemPrompt,
+  type CoreMessage,
+} from "@pocket-code/agent-core";
+import { createNodeModelClient } from "./nodeModelClient.js";
+import { createNodeBackend } from "./nodeBackend.js";
 
 export type ModelProvider = "anthropic" | "openai" | "google" | "siliconflow" | "iflow" | "cli-claude" | "cli-gemini" | "cli-codex";
 
@@ -87,17 +93,7 @@ export function getModel(modelKey: string) {
   }
 }
 
-const SYSTEM_PROMPT = `You are Pocket Code, an AI coding assistant running on a mobile device. You help developers write, debug, and manage code through natural conversation.
-
-You have access to a workspace directory where you can read/write files and execute commands. Use the tools provided to help the user.
-
-Guidelines:
-- Be concise in your responses (mobile screen is small)
-- When modifying files, always read them first to understand the context
-- After making changes, verify by reading the file or running relevant commands
-- Use markdown for code blocks with language tags
-- When executing commands, explain what you're doing briefly
-- If a command fails, try to diagnose and fix the issue`;
+const AGENT_MAX_STEPS = parseInt(process.env.AGENT_MAX_STEPS || "25", 10);
 
 export interface AgentSession {
   sessionId: string;
@@ -169,23 +165,6 @@ export async function runAgent(
     return;
   }
 
-  // Build user message — multi-modal if images are present
-  if (images?.length) {
-    const content: Array<{ type: string; text?: string; image?: Uint8Array; mimeType?: string }> = [
-      { type: "text", text: userMessage },
-    ];
-    for (const img of images) {
-      content.push({
-        type: "image",
-        image: new Uint8Array(Buffer.from(img.base64, "base64")),
-        mimeType: img.mimeType,
-      });
-    }
-    session.messages.push({ role: "user", content: content as any });
-  } else {
-    session.messages.push({ role: "user", content: userMessage });
-  }
-
   // Smart model routing: auto-select model based on prompt complexity
   let effectiveModelKey = session.modelKey;
   if (session.modelKey === "auto") {
@@ -195,69 +174,41 @@ export async function runAgent(
     console.log(`[Router] auto → ${effectiveModelKey} (${analysis.reason})`);
   }
 
-  const tools = createTools(session.workspace, session.containerId);
-  const model = getModel(effectiveModelKey);
-
-  // Append custom project instructions if present
-  let systemPrompt = SYSTEM_PROMPT;
-  if (session.customPrompt?.trim()) {
-    systemPrompt += `\n\n## Project Instructions\n${session.customPrompt.trim()}`;
-  }
-
   console.log(`[Agent] model=${effectiveModelKey}, message="${userMessage.slice(0, 80)}"`);
 
-  const maxSteps = parseInt(process.env.AGENT_MAX_STEPS || "25", 10);
+  const history = fromLegacyAiSdkMessages(session.messages);
 
   try {
-    const result = streamText({
-      model,
-      system: systemPrompt,
-      messages: session.messages,
-      tools,
-      maxSteps,
-      abortSignal: signal,
+    const { messages } = await runAgentLoop({
+      modelClient: createNodeModelClient(effectiveModelKey),
+      backend: createNodeBackend(session.workspace, session.containerId),
+      workspace: session.workspace,
+      system: buildSystemPrompt({ customPrompt: session.customPrompt }),
+      history,
+      userMessage,
+      images,
+      onEvent,
+      signal,
+      maxSteps: AGENT_MAX_STEPS,
     });
 
-    let fullText = "";
-
-    for await (const part of result.fullStream) {
-      if (part.type === "text-delta") fullText += part.textDelta;
-      for (const ev of mapAiSdkPart(part as AiStreamPartLike)) onEvent(ev);
-    }
-
-    // Use the SDK's response messages which include tool calls and results,
-    // preserving full context for subsequent conversation turns.
-    const responseMessages = (await result.response).messages;
-    if (responseMessages.length > 0) {
-      session.messages.push(...responseMessages);
-    } else {
-      // Fallback: save at least the text content
-      session.messages.push({ role: "assistant", content: fullText });
-    }
+    // loop 返回的 messages 已含本轮 user 消息;此后持久化即 CoreMessage 格式。
+    session.messages = messages;
 
     // Persist to database
     saveSession(session.sessionId, session.userId, session.messages, session.modelKey, session.projectId);
 
-    // Emit token usage stats
-    try {
-      const usage = await result.usage;
-      if (usage) {
-        onEvent({
-          type: "usage",
-          inputTokens: usage.promptTokens || 0,
-          outputTokens: usage.completionTokens || 0,
-        });
-      }
-    } catch {
-      // Usage data not available — ignore
-    }
-
     onEvent({ type: "done" });
   } catch (err: any) {
     console.error("[Agent] Error:", err.message);
-    // Still persist what we have
+    // loop 抛出前已发 error 事件,但未返回 messages。这里保留 loop 前的历史 + 本轮 user 消息,
+    // 尽力保留语境(旧行为同样只落盘到出错前的最后一次成功状态)。
+    const userContent =
+      images && images.length > 0
+        ? [{ type: "text" as const, text: userMessage }, ...images.map((img) => ({ type: "image" as const, ...img }))]
+        : userMessage;
+    session.messages = [...history, { role: "user", content: userContent }];
     saveSession(session.sessionId, session.userId, session.messages, session.modelKey, session.projectId);
-    onEvent({ type: "error", message: err.message });
     onEvent({ type: "done" });
   }
 }

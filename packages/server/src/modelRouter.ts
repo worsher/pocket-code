@@ -2,7 +2,7 @@
 // Analyzes prompt complexity to auto-select the best model.
 // Rule-based + heuristic, no extra AI call.
 
-import type { CoreMessage } from "ai";
+import type { CoreMessage } from "@pocket-code/agent-core";
 
 export type ComplexityLevel = "simple" | "medium" | "complex" | "reasoning";
 

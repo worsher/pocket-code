@@ -2,7 +2,7 @@ import initSqlJs, { type Database as SqlJsDatabase } from "sql.js";
 import { join, resolve, dirname } from "path";
 import { homedir } from "os";
 import { mkdirSync, readFileSync, writeFileSync, existsSync } from "fs";
-import type { CoreMessage } from "ai";
+import type { CoreMessage } from "@pocket-code/agent-core";
 
 // ── Database setup ──────────────────────────────────────
 

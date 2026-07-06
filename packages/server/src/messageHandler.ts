@@ -3,7 +3,9 @@
 // Used by both the direct WebSocket server (index.ts) and the relay daemon.
 
 import { createSession, runAgent, type AgentSession } from "./agent.js";
-import { createTools, getWorkspaceRoot } from "./tools.js";
+import { getWorkspaceRoot } from "./tools.js";
+import { buildToolRegistry } from "@pocket-code/agent-core";
+import { createNodeBackend } from "./nodeBackend.js";
 import { setupGitCredentials } from "./gitCredentials.js";
 import { verifyToken, registerAnonymous, type AuthPayload } from "./auth.js";
 import { isDockerEnabled, getContainer } from "./docker.js";
@@ -257,17 +259,16 @@ export function createMessageHandler(
             }
             const { toolName, args } = msg;
             const callId = msg.callId ?? "";
-            const tools = createTools(
-              session.workspace,
-              session.containerId
+            const registry = buildToolRegistry(
+              createNodeBackend(session.workspace, session.containerId),
+              session.workspace
             );
-            const toolFn = (tools as Record<string, any>)[toolName];
-            if (!toolFn) {
+            if (!registry.has(toolName)) {
               send({ type: "tool-result", callId, result: { success: false, error: `Unknown tool: ${toolName}` } } satisfies ServerOutboundType);
               break;
             }
             try {
-              const result = await toolFn.execute(args);
+              const result = await registry.run(toolName, args);
               send({ type: "tool-result", callId, result } satisfies ServerOutboundType);
             } catch (err: any) {
               send({ type: "tool-result", callId, result: { success: false, error: err.message } } satisfies ServerOutboundType);
@@ -281,12 +282,12 @@ export function createMessageHandler(
               send({ type: "error", error: "No session. Send init first." });
               return;
             }
-            const listTools = createTools(
-              session.workspace,
-              session.containerId
-            ) as Record<string, any>;
+            const listRegistry = buildToolRegistry(
+              createNodeBackend(session.workspace, session.containerId),
+              session.workspace
+            );
             try {
-              const result = await listTools.listFiles.execute({
+              const result = await listRegistry.run("listFiles", {
                 path: msg.path || ".",
               });
               send({
@@ -312,12 +313,12 @@ export function createMessageHandler(
               send({ type: "error", error: "No session. Send init first." });
               return;
             }
-            const readTools = createTools(
-              session.workspace,
-              session.containerId
-            ) as Record<string, any>;
+            const readRegistry = buildToolRegistry(
+              createNodeBackend(session.workspace, session.containerId),
+              session.workspace
+            );
             try {
-              const result = await readTools.readFile.execute({
+              const result = await readRegistry.run("readFile", {
                 path: msg.path,
               });
               send({
