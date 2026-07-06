@@ -58,8 +58,23 @@ export function buildFileTools(workspace: string): ToolDef[] {
       const content = args.content as string;
       try {
         const fullPath = safePath(workspace, path);
+
+        // Read old content for diff display (App DiffPreview 消费 oldContent/newContent)
+        let oldContent: string | null = null;
+        try {
+          oldContent = await backend.readFile(fullPath);
+        } catch {
+          // File doesn't exist yet
+        }
+
         const { isNew } = await backend.writeFile(fullPath, content);
-        return { success: true, path, isNew };
+        return {
+          success: true,
+          path,
+          isNew,
+          ...(isNew ? {} : { oldContent }),
+          newContent: content,
+        };
       } catch (err) {
         return { success: false, error: errorMessage(err) };
       }
@@ -118,7 +133,14 @@ export function buildFileTools(workspace: string): ToolDef[] {
 
         await backend.writeFile(fullPath, newContent);
 
-        return { success: true, path, isNew: false, replaced: 1 };
+        return {
+          success: true,
+          path,
+          isNew: false,
+          replaced: 1,
+          oldContent: content,
+          newContent,
+        };
       } catch (err) {
         return { success: false, error: errorMessage(err) };
       }
@@ -148,7 +170,12 @@ export function buildFileTools(workspace: string): ToolDef[] {
       const path = (args.path as string | undefined) ?? ".";
       try {
         const fullPath = safePath(workspace, path);
-        const items = await backend.listFiles(fullPath);
+        const rawItems = await backend.listFiles(fullPath);
+        // RuntimeBackend 契约仍是 "dir"|"file"（Task 1 已固化）；App FileTreeView 判 "directory"，在工具层映射。
+        const items = rawItems.map((item) => ({
+          name: item.name,
+          type: item.type === "dir" ? "directory" : "file",
+        }));
         return { success: true, items };
       } catch (err) {
         return { success: false, error: errorMessage(err) };
@@ -243,7 +270,13 @@ export function buildFileTools(workspace: string): ToolDef[] {
             };
           });
 
-        return { success: true, matches };
+        return {
+          success: true,
+          matchCount: matches.length,
+          matches,
+          // core 侧按字符数截断(2000)替代旧版 shell head -50 的按行截断，故以 stdout 是否被截断判定
+          truncated: stdout.length > 2000,
+        };
       } catch (err) {
         return { success: false, error: errorMessage(err) };
       }

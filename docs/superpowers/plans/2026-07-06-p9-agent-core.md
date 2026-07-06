@@ -246,10 +246,10 @@ export function buildToolRegistry(backend: RuntimeBackend): ToolRegistry;
 | 工具 | 基准行为要点（对照 tools.ts） |
 |---|---|
 | readFile | safePath → backend.readFile → `{success:true, content}`；异常 → `{success:false,error:e.message}` |
-| writeFile | safePath → backend.writeFile → `{success:true, path, isNew}`（**path/isNew 字段被 file-changed 派生依赖**） |
-| editFile | safePath → readFile → `oldText` 必须唯一出现一次（0 次/多次报错文案照旧版）→ 替换写回 → `{success:true, path, isNew:false, replaced:1}` 按旧版字段 |
-| listFiles | safePath → backend.listFiles → `{success:true, items:[{name,type}]}` |
-| searchFiles | 经 `backend.exec` 跑 grep（旧版命令构造照迁：`grep -rn --include=... -e <pattern>`，2000 字符截断）→ `{success:true, matches}` |
+| writeFile | safePath → 先 `backend.readFile(fullPath)` 捕获旧内容（抛错=文件不存在→oldContent=null）→ backend.writeFile → `{success:true, path, isNew, ...(isNew?{}:{oldContent}), newContent:content}`（**path/isNew 字段被 file-changed 派生依赖；oldContent/newContent 供 App DiffPreview 消费，对照 tools.ts:187-245**） |
+| editFile | safePath → readFile → `oldText` 必须唯一出现一次（0 次/多次报错文案照旧版）→ 替换写回 → `{success:true, path, isNew:false, replaced:1, oldContent, newContent}`（oldContent=编辑前全文，newContent=替换后全文，对照 tools.ts:687-692） |
+| listFiles | safePath → backend.listFiles → `{success:true, items:[{name,type}]}`；**工具层将 RuntimeBackend 的 `"dir"` 映射为 `"directory"`**（`RuntimeBackend.listFiles` 契约仍是 `"dir"\|"file"`，Task 1 已固化不改类型；App FileTreeView 判 `"directory"`，对照 tools.ts:265-280） |
+| searchFiles | 经 `backend.exec` 跑 grep（旧版命令构造照迁：`grep -rn --include=... -e <pattern>`，2000 字符截断）→ `{success:true, matchCount, matches, truncated}`（matchCount=matches.length；truncated 对照 tools.ts:607-616 的 `matchCount`/`truncated` 字段，core 侧因按字符数截断改用 `stdout.length > 2000` 判定，语义等价） |
 
 - [ ] **Step 1: 写失败测试**（fake backend 模式，后续任务复用）`src/tools/fileTools.test.ts`：
 
