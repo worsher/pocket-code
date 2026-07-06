@@ -1,5 +1,5 @@
 // ── gemini-cli 适配器 ───────────────────────────────────────
-// spawn 参数与 stream-json 解析等价迁移自 cliRunner.ts(P8 后删除)。
+// spawn 参数与 stream-json 解析等价迁移自旧版内联 CLI runner(P8 后已删除)。
 // 与旧路径唯一有意差异:customPrompt 非空时拼为消息前缀(旧路径丢弃)。
 
 import type { AgentEventType } from "@pocket-code/wire";

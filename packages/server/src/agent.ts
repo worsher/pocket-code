@@ -7,11 +7,11 @@ import { createTools, getWorkspaceRoot } from "./tools.js";
 import { mkdir } from "fs/promises";
 import { saveSession, getSession } from "./db.js";
 import { analyzePrompt } from "./modelRouter.js";
-import { runClaudeCodeAgent, runGeminiCliAgent } from "./cliRunner.js";
+import { cliAdapters, runCliSession } from "./cli/index.js";
 import type { AgentEventType } from "@pocket-code/wire";
 import { mapAiSdkPart, type AiStreamPartLike } from "./aiSdkEvents.js";
 
-export type ModelProvider = "anthropic" | "openai" | "google" | "siliconflow" | "iflow" | "cli-claude" | "cli-gemini";
+export type ModelProvider = "anthropic" | "openai" | "google" | "siliconflow" | "iflow" | "cli-claude" | "cli-gemini" | "cli-codex";
 
 interface ModelConfig {
   provider: ModelProvider;
@@ -45,6 +45,7 @@ const MODEL_MAP: Record<string, ModelConfig> = {
   // CLI providers — use server-side installed CLI tools with Pro subscription
   "claude-code": { provider: "cli-claude", modelId: "claude-code" },
   "gemini-cli": { provider: "cli-gemini", modelId: "gemini-cli" },
+  "codex": { provider: "cli-codex", modelId: "codex" },
 };
 
 /** SiliconFlow uses OpenAI-compatible API */
@@ -156,16 +157,11 @@ export async function runAgent(
   signal?: AbortSignal,
   images?: ImageData[]
 ): Promise<void> {
-  // ── CLI routing: delegate to local CLI tools if selected ──
-  if (session.modelKey === "claude-code") {
+  // ── CLI routing: 注册表命中即委托本机 CLI 工具 ──
+  const cliAdapter = cliAdapters[session.modelKey];
+  if (cliAdapter) {
     session.messages.push({ role: "user", content: userMessage });
-    await runClaudeCodeAgent(session, userMessage, onEvent, signal);
-    saveSession(session.sessionId, session.userId, session.messages, session.modelKey, session.projectId);
-    return;
-  }
-  if (session.modelKey === "gemini-cli") {
-    session.messages.push({ role: "user", content: userMessage });
-    await runGeminiCliAgent(session, userMessage, onEvent, signal);
+    await runCliSession(cliAdapter, session, userMessage, onEvent, signal);
     saveSession(session.sessionId, session.userId, session.messages, session.modelKey, session.projectId);
     return;
   }
