@@ -1,6 +1,6 @@
 import { describe, it, expect, vi } from "vitest";
 import { runAgentLoop } from "./loop.js";
-import { makeFakeBackend } from "./tools/fileTools.test.js";
+import { makeFakeBackend } from "./tools/testFakes.js";
 import type { ModelClient, ModelDelta } from "./types.js";
 
 /** 每次 streamStep 弹出下一段脚本 */
@@ -99,5 +99,80 @@ describe("runAgentLoop", () => {
     const onEvent = vi.fn();
     await expect(runAgentLoop(base(client, { onEvent }))).rejects.toThrow("model down");
     expect(onEvent.mock.calls.at(-1)![0]).toMatchObject({ type: "error", message: "model down" });
+  });
+
+  it("I-1: abort between tool calls synthesizes an aborted tool message for the un-executed call", async () => {
+    const ac = new AbortController();
+    const client = scriptedClient([
+      [
+        { type: "tool-call", id: "c1", name: "readFile", args: { path: "a.ts" } },
+        { type: "tool-call", id: "c2", name: "readFile", args: { path: "a.ts" } },
+      ],
+    ]);
+    const onEvent = vi.fn((ev: any) => {
+      if (ev.type === "tool-result") ac.abort();
+    });
+    const backend = makeFakeBackend();
+    const r = await runAgentLoop(base(client, { signal: ac.signal, onEvent, backend }));
+
+    // 第二个工具没有真正执行
+    expect((backend.readFile as any).mock.calls.length).toBe(1);
+
+    const toolMsgs = r.messages.filter((m: any) => m.role === "tool");
+    expect(toolMsgs.length).toBe(2);
+    expect(toolMsgs[0]).toMatchObject({ toolCallId: "c1" });
+    expect(JSON.parse((toolMsgs[0] as any).content).success).toBe(true);
+    expect(toolMsgs[1]).toEqual({
+      role: "tool",
+      toolCallId: "c2",
+      toolName: "readFile",
+      content: JSON.stringify({ success: false, error: "aborted" }),
+    });
+
+    // 合成消息不发任何事件:tool-call/tool-result 事件只针对 c1
+    const toolEventCallIds = onEvent.mock.calls
+      .map((c) => c[0])
+      .filter((e: any) => e.type === "tool-call" || e.type === "tool-result")
+      .map((e: any) => e.callId);
+    expect(toolEventCallIds).toEqual(["c1", "c1"]);
+  });
+
+  it("M-1: usage accumulates across multiple steps", async () => {
+    const client = scriptedClient([
+      [
+        { type: "usage", inputTokens: 10, outputTokens: 5 },
+        { type: "tool-call", id: "c1", name: "listFiles", args: { path: "." } },
+      ],
+      [{ type: "usage", inputTokens: 3, outputTokens: 2 }, { type: "text", text: "done" }],
+    ]);
+    const onEvent = vi.fn();
+    await runAgentLoop(base(client, { onEvent }));
+    const usage = onEvent.mock.calls.map((c) => c[0]).filter((e) => e.type === "usage");
+    expect(usage).toEqual([{ type: "usage", inputTokens: 13, outputTokens: 7 }]);
+  });
+
+  it("usage with explicit zero deltas across steps does not emit a summary event", async () => {
+    const client = scriptedClient([
+      [
+        { type: "usage", inputTokens: 0, outputTokens: 0 },
+        { type: "tool-call", id: "c1", name: "listFiles", args: { path: "." } },
+      ],
+      [{ type: "usage", inputTokens: 0, outputTokens: 0 }, { type: "text", text: "done" }],
+    ]);
+    const onEvent = vi.fn();
+    await runAgentLoop(base(client, { onEvent }));
+    const usage = onEvent.mock.calls.map((c) => c[0]).filter((e) => e.type === "usage");
+    expect(usage).toEqual([]);
+  });
+
+  it("editFile success emits file-changed with changeType modified", async () => {
+    const client = scriptedClient([
+      [{ type: "tool-call", id: "c1", name: "editFile", args: { path: "a.ts", oldText: "hello", newText: "hi" } }],
+      [{ type: "text", text: "done" }],
+    ]);
+    const onEvent = vi.fn();
+    await runAgentLoop(base(client, { onEvent }));
+    const fileChanged = onEvent.mock.calls.map((c) => c[0]).find((e: any) => e.type === "file-changed");
+    expect(fileChanged).toMatchObject({ path: "a.ts", changeType: "modified" });
   });
 });

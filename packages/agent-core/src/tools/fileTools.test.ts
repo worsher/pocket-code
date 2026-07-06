@@ -1,28 +1,6 @@
 import { describe, it, expect, vi } from "vitest";
 import { buildToolRegistry } from "./registry.js";
-import type { RuntimeBackend } from "../types.js";
-
-export function makeFakeBackend(over: Partial<RuntimeBackend> = {}): RuntimeBackend {
-  const files = new Map<string, string>([["/ws/a.ts", "hello world"]]);
-  return {
-    readFile: vi.fn(async (p: string) => {
-      const c = files.get(p);
-      if (c === undefined) throw new Error("ENOENT: " + p);
-      return c;
-    }),
-    writeFile: vi.fn(async (p: string, c: string) => {
-      const isNew = !files.has(p);
-      files.set(p, c);
-      return { isNew };
-    }),
-    listFiles: vi.fn(async () => [
-      { name: "a.ts", type: "file" as const },
-      { name: ".git", type: "dir" as const },
-    ]),
-    exec: vi.fn(async () => ({ stdout: "", stderr: "", exitCode: 0 })),
-    ...over,
-  };
-}
+import { makeFakeBackend } from "./testFakes.js";
 
 // 注:注册表工具接收 workspace 相对路径;fake backend 里用 /ws 前缀模拟 safePath 结果
 describe("file tools", () => {

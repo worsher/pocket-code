@@ -1,7 +1,7 @@
 import { describe, it, expect, vi } from "vitest";
 import { buildToolRegistry } from "./registry.js";
 import { resolveGitCwd } from "./execTools.js";
-import { makeFakeBackend } from "./fileTools.test.js";
+import { makeFakeBackend } from "./testFakes.js";
 
 describe("runCommand", () => {
   it("success path slices stdout/stderr", async () => {

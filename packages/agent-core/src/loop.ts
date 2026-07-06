@@ -64,8 +64,8 @@ export async function runAgentLoop(
             toolCalls.push({ id: delta.id, name: delta.name, args: delta.args });
             break;
           case "usage":
-            totalInputTokens += delta.inputTokens;
-            totalOutputTokens += delta.outputTokens;
+            totalInputTokens += delta.inputTokens || 0;
+            totalOutputTokens += delta.outputTokens || 0;
             break;
         }
       }
@@ -83,6 +83,8 @@ export async function runAgentLoop(
     messages.push(assistantMsg);
 
     if (toolCalls.length === 0) break; // 无 tool calls → 结束
+
+    const executedCallIds = new Set<string>();
 
     for (const call of toolCalls) {
       if (signal?.aborted) break;
@@ -110,9 +112,24 @@ export async function runAgentLoop(
         toolName: call.name,
         content: JSON.stringify(result),
       });
+      executedCallIds.add(call.id);
     }
 
-    if (signal?.aborted) break;
+    // I-1: abort 可能在工具循环中途 break,导致上面 assistant 消息里还有未配对的 toolCalls
+    // (下游 Chat API 要求每个 toolCall 都有对应 tool 消息,否则 400)。为每个未执行的 toolCall
+    // 补一条合成失败结果,只维护消息不变量,不发任何事件。
+    if (signal?.aborted) {
+      for (const call of toolCalls) {
+        if (executedCallIds.has(call.id)) continue;
+        messages.push({
+          role: "tool",
+          toolCallId: call.id,
+          toolName: call.name,
+          content: JSON.stringify({ success: false, error: "aborted" }),
+        });
+      }
+      break;
+    }
   }
 
   // 7. 结束前发一次汇总 usage(累加值;两者均 0 则不发)。不发 done。
