@@ -2,6 +2,7 @@
 // 未知工具与工具内部异常均归一为 {success:false, error} 结构(App 侧渲染依赖此形状)。
 import type { RuntimeBackend, ToolSchema } from "../types.js";
 import { buildFileTools } from "./fileTools.js";
+import { buildExecTools, buildProcessTools } from "./execTools.js";
 
 export interface ToolDef {
   schema: ToolSchema;
@@ -19,7 +20,13 @@ export function buildToolRegistry(backend: RuntimeBackend, workspace: string): T
   for (const def of buildFileTools(workspace)) {
     tools.set(def.schema.name, def);
   }
-  // T3 后:execTools(runCommand/git*)在此追加注册;startProcess/stopProcess 仅当 backend 提供对应方法时注册。
+  for (const def of buildExecTools(workspace)) {
+    tools.set(def.schema.name, def);
+  }
+  // 能力门控:runInBackground/stopProcess 仅当 backend 提供 startProcess/stopProcess 时才注册。
+  for (const def of buildProcessTools(backend)) {
+    tools.set(def.schema.name, def);
+  }
 
   return {
     get schemas(): ToolSchema[] {
