@@ -1,5 +1,6 @@
 import { describe, it, expect } from "vitest";
-import { applyAgentEvent, phaseFor, type Message } from "./chatReducer";
+import { applyAgentEvent, phaseFor, truncateCoreHistory, type Message } from "./chatReducer";
+import type { CoreMessage } from "@pocket-code/agent-core";
 
 const base = (over: Partial<Message> = {}): Message[] => [
   { id: "1", role: "user", content: "hi", timestamp: 1 },
@@ -64,6 +65,46 @@ describe("applyAgentEvent", () => {
     msgs = applyAgentEvent(msgs, { type: "tool-result", callId: "c1", result: 1 });
     const after = applyAgentEvent(msgs, { type: "tool-result", callId: "c9", result: 2 });
     expect(after).toBe(msgs); // 全部已完成,落空 → 原引用
+  });
+});
+
+describe("truncateCoreHistory", () => {
+  const history: CoreMessage[] = [
+    { role: "user", content: "turn1" },
+    { role: "assistant", content: "reply1" },
+    { role: "user", content: "turn2" },
+    { role: "assistant", content: "", toolCalls: [{ id: "c1", name: "readFile", args: {} }] },
+    { role: "tool", toolCallId: "c1", toolName: "readFile", content: "{}" },
+    { role: "assistant", content: "reply2" },
+    { role: "user", content: "turn3" },
+    { role: "assistant", content: "reply3" },
+  ];
+
+  it("keeps everything before the Nth+1 user message", () => {
+    const out = truncateCoreHistory(history, 1);
+    expect(out).toEqual([
+      { role: "user", content: "turn1" },
+      { role: "assistant", content: "reply1" },
+    ]);
+  });
+
+  it("keeps 2 full turns (multi-step turn included) when keepUserTurns=2", () => {
+    const out = truncateCoreHistory(history, 2);
+    expect(out).toEqual(history.slice(0, 6));
+  });
+
+  it("returns empty array when keepUserTurns is 0", () => {
+    expect(truncateCoreHistory(history, 0)).toEqual([]);
+  });
+
+  it("returns the full history (copy) when keepUserTurns >= total user turns", () => {
+    const out = truncateCoreHistory(history, 3);
+    expect(out).toEqual(history);
+    expect(out).not.toBe(history);
+  });
+
+  it("returns empty array for empty history", () => {
+    expect(truncateCoreHistory([], 5)).toEqual([]);
   });
 });
 

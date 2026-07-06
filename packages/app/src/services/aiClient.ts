@@ -2,9 +2,12 @@
 // Direct AI API caller for geek mode.
 // Uses XMLHttpRequest for SSE streaming (React Native doesn't support
 // fetch ReadableStream / response.body.getReader()).
+//
+// P9 Task 10: 缩减为纯 SSE 客户端——system prompt 与 tools 声明改由调用方
+// (rnModelClient,经 agent-core runAgentLoop)传入,不再自建全局工具定义、
+// 内置 system prompt 组装或 chatHistory 构建逻辑。
 
 import { type ModelConfig } from "./modelConfig";
-import type { AppSettings } from "../store/settings";
 
 // ── Types ──────────────────────────────────────────────
 
@@ -47,296 +50,6 @@ export interface StreamCallbacks {
     onError: (error: string) => void;
 }
 
-// ── Tool definitions for AI (matches server tools.ts) ──
-
-export const TOOL_DEFINITIONS: ToolDefinition[] = [
-    {
-        type: "function",
-        function: {
-            name: "readFile",
-            description:
-                "Read the contents of a file at the given path (relative to workspace root)",
-            parameters: {
-                type: "object",
-                properties: {
-                    path: { type: "string", description: "Relative file path" },
-                },
-                required: ["path"],
-            },
-        },
-    },
-    {
-        type: "function",
-        function: {
-            name: "writeFile",
-            description:
-                "Write content to a file at the given path (relative to workspace root). Creates parent directories if needed.",
-            parameters: {
-                type: "object",
-                properties: {
-                    path: { type: "string", description: "Relative file path" },
-                    content: { type: "string", description: "File content to write" },
-                },
-                required: ["path", "content"],
-            },
-        },
-    },
-    {
-        type: "function",
-        function: {
-            name: "listFiles",
-            description:
-                "List files and directories at the given path (relative to workspace root)",
-            parameters: {
-                type: "object",
-                properties: {
-                    path: {
-                        type: "string",
-                        description:
-                            "Relative directory path, defaults to workspace root",
-                        default: ".",
-                    },
-                },
-                required: [],
-            },
-        },
-    },
-    {
-        type: "function",
-        function: {
-            name: "runCommand",
-            description:
-                "Execute a shell command in the workspace directory. ONLY for commands that complete and exit on their own (e.g. npm install, npm run build, npm test, ls, cat, mkdir). NEVER use for long-running processes that block indefinitely such as: npm run dev, npm start, python -m http.server, nodemon, vite, webpack --watch, or any other dev server / file watcher — those will timeout and fail. For development servers, instruct the user to run them manually in the Terminal tab.",
-            parameters: {
-                type: "object",
-                properties: {
-                    command: {
-                        type: "string",
-                        description: "The shell command to execute. Must be a command that exits on its own.",
-                    },
-                },
-                required: ["command"],
-            },
-        },
-    },
-    {
-        type: "function",
-        function: {
-            name: "runInBackground",
-            description:
-                "Start a long-running process in the background (dev server, watcher, etc.) that does NOT exit on its own. Use this for: npm run dev, npm start, vite, python -m http.server, nodemon, webpack --watch, etc. The process starts immediately and streams output in real-time. Returns a processId that can be used with stopProcess. The dev server will be accessible at http://localhost:PORT from the device browser.",
-            parameters: {
-                type: "object",
-                properties: {
-                    command: {
-                        type: "string",
-                        description: "The long-running shell command to start (e.g. 'npm run dev').",
-                    },
-                    cwd: {
-                        type: "string",
-                        description: "Working directory relative to workspace root (e.g. 'vite-example'). Defaults to workspace root.",
-                    },
-                },
-                required: ["command"],
-            },
-        },
-    },
-    {
-        type: "function",
-        function: {
-            name: "stopProcess",
-            description: "Stop a running background process started with runInBackground.",
-            parameters: {
-                type: "object",
-                properties: {
-                    processId: {
-                        type: "number",
-                        description: "The processId returned by runInBackground.",
-                    },
-                },
-                required: ["processId"],
-            },
-        },
-    },
-    // ── Git tools ──
-    {
-        type: "function",
-        function: {
-            name: "gitClone",
-            description: "Clone a git repository into the workspace. Creates a subdirectory named after the repo.",
-            parameters: {
-                type: "object",
-                properties: {
-                    url: { type: "string", description: "Repository URL (HTTPS)" },
-                    dir: { type: "string", description: "Target directory name (optional, defaults to repo name)" },
-                },
-                required: ["url"],
-            },
-        },
-    },
-    {
-        type: "function",
-        function: {
-            name: "gitStatus",
-            description: "Show the working tree status — lists changed, staged, and untracked files. You MUST set 'path' to the repo directory name (e.g. the directory created by gitClone).",
-            parameters: {
-                type: "object",
-                properties: {
-                    path: { type: "string", description: "Subdirectory within workspace (optional, defaults to workspace root)" },
-                },
-                required: [],
-            },
-        },
-    },
-    {
-        type: "function",
-        function: {
-            name: "gitAdd",
-            description: "Stage files for commit. Use filepath '.' to stage all changes. You MUST set 'path' to the repo directory name.",
-            parameters: {
-                type: "object",
-                properties: {
-                    filepath: { type: "string", description: "File path to stage, or '.' for all" },
-                    path: { type: "string", description: "Repository subdirectory (optional)" },
-                },
-                required: ["filepath"],
-            },
-        },
-    },
-    {
-        type: "function",
-        function: {
-            name: "gitCommit",
-            description: "Commit staged changes with a message. You MUST set 'path' to the repo directory name.",
-            parameters: {
-                type: "object",
-                properties: {
-                    message: { type: "string", description: "Commit message" },
-                    path: { type: "string", description: "Repository subdirectory (optional)" },
-                },
-                required: ["message"],
-            },
-        },
-    },
-    {
-        type: "function",
-        function: {
-            name: "gitPush",
-            description: "Push commits to the remote repository. Requires git credentials configured in settings. You MUST set 'path' to the repo directory name.",
-            parameters: {
-                type: "object",
-                properties: {
-                    remote: { type: "string", description: "Remote name (default: origin)" },
-                    branch: { type: "string", description: "Branch name (optional)" },
-                    path: { type: "string", description: "Repository subdirectory (optional)" },
-                },
-                required: [],
-            },
-        },
-    },
-    {
-        type: "function",
-        function: {
-            name: "gitPull",
-            description: "Pull updates from the remote repository. You MUST set 'path' to the repo directory name.",
-            parameters: {
-                type: "object",
-                properties: {
-                    remote: { type: "string", description: "Remote name (default: origin)" },
-                    branch: { type: "string", description: "Branch name (optional)" },
-                    path: { type: "string", description: "Repository subdirectory (optional)" },
-                },
-                required: [],
-            },
-        },
-    },
-    {
-        type: "function",
-        function: {
-            name: "gitLog",
-            description: "Show recent commit history. You MUST set 'path' to the repo directory name.",
-            parameters: {
-                type: "object",
-                properties: {
-                    depth: { type: "number", description: "Number of commits to show (default: 10)" },
-                    path: { type: "string", description: "Repository subdirectory (optional)" },
-                },
-                required: [],
-            },
-        },
-    },
-    {
-        type: "function",
-        function: {
-            name: "gitBranch",
-            description: "List branches (no name param) or create a new branch (with name param). You MUST set 'path' to the repo directory name.",
-            parameters: {
-                type: "object",
-                properties: {
-                    name: { type: "string", description: "New branch name (omit to list branches)" },
-                    path: { type: "string", description: "Repository subdirectory (optional)" },
-                },
-                required: [],
-            },
-        },
-    },
-    {
-        type: "function",
-        function: {
-            name: "gitCheckout",
-            description: "Switch to a different branch or commit. You MUST set 'path' to the repo directory name.",
-            parameters: {
-                type: "object",
-                properties: {
-                    ref: { type: "string", description: "Branch name or commit SHA to checkout" },
-                    path: { type: "string", description: "Repository subdirectory (optional)" },
-                },
-                required: ["ref"],
-            },
-        },
-    },
-];
-
-// ── System prompt ──────────────────────────────────────
-
-function buildSystemPrompt(settings?: AppSettings, customPrompt?: string): string {
-    const isLocal = settings?.workspaceMode === "local";
-    const configuredGit = settings?.gitCredentials?.filter((c) => c.token) || [];
-
-    let prompt = `You are Pocket Code, an AI coding assistant running on a mobile device. You help developers write, debug, and manage code through natural conversation.
-
-You have access to a workspace directory where you can read/write files and perform git operations. Use the tools provided to help the user.
-
-Available tool categories:
-- File operations: readFile, writeFile, listFiles
-- Git: gitClone, gitStatus, gitAdd, gitCommit, gitPush, gitPull, gitLog, gitBranch, gitCheckout`;
-
-    prompt += `\n- Shell: runCommand (one-shot commands that exit), runInBackground (long-running servers/watchers), stopProcess (stop a background process)`;
-
-    if (configuredGit.length > 0) {
-        const platforms = configuredGit.map((c) => `${c.platform} (${c.host})`).join(", ");
-        prompt += `\n\nGit authentication configured for: ${platforms}. You can directly clone, push, and pull repositories from these platforms — authentication is handled automatically.`;
-    }
-
-    prompt += `\n\nGuidelines:
-- Be concise in your responses (mobile screen is small)
-- When modifying files, always read them first to understand the context
-- After making changes, verify by reading the file or running relevant commands
-- Use markdown for code blocks with language tags
-- When executing commands, explain what you're doing briefly
-- If a command fails, try to diagnose and fix the issue
-- ALWAYS use the dedicated git tools (gitClone, gitCommit, etc.) instead of runCommand for git operations
-- NEVER run long-running server/watcher commands via runCommand — use runInBackground instead. Examples: npm run dev, npm start, vite, nodemon, python -m http.server, webpack --watch.
-- After starting a dev server with runInBackground, tell the user the port (e.g. http://localhost:5173) so they can open it in the browser. They can stop it with stopProcess.
-- IMPORTANT: The workspace root is NOT a git repository. When you clone a repo (e.g. gitClone with url "https://gitee.com/user/my-repo"), it creates a subdirectory (e.g. "my-repo"). All subsequent git operations (gitStatus, gitAdd, gitCommit, gitPush, etc.) MUST pass the repo directory name as the "path" parameter (e.g. path: "my-repo").`;
-
-    if (customPrompt?.trim()) {
-        prompt += `\n\n## Project Instructions\n${customPrompt.trim()}`;
-    }
-
-    return prompt;
-}
-
 // ── SSE parser helper ──────────────────────────────────
 
 function parseSSELines(
@@ -374,8 +87,9 @@ export function streamChatOpenAI(params: {
     callbacks: StreamCallbacks;
     signal?: AbortSignal;
     systemPrompt: string;
+    tools: ToolDefinition[];
 }): Promise<void> {
-    const { baseURL, apiKey, modelId, messages, callbacks, signal, systemPrompt } = params;
+    const { baseURL, apiKey, modelId, messages, callbacks, signal, systemPrompt, tools } = params;
 
     return new Promise<void>((resolve) => {
         const xhr = new XMLHttpRequest();
@@ -592,7 +306,7 @@ export function streamChatOpenAI(params: {
 
         // Don't send tools strictly for iFlow/GLM, as it may cause empty responses
         if (!baseURL.includes("iflow.cn") && !modelId.includes("glm-")) {
-            payload.tools = TOOL_DEFINITIONS;
+            payload.tools = tools;
         }
 
         const body = JSON.stringify(payload);
@@ -635,8 +349,9 @@ export function streamChatAnthropic(params: {
     callbacks: StreamCallbacks;
     signal?: AbortSignal;
     systemPrompt: string;
+    tools: ToolDefinition[];
 }): Promise<void> {
-    const { apiKey, modelId, messages, callbacks, signal, systemPrompt } = params;
+    const { apiKey, modelId, messages, callbacks, signal, systemPrompt, tools: toolDefs } = params;
 
     // Convert messages to Anthropic format
     const anthropicMessages = messages
@@ -693,7 +408,7 @@ export function streamChatAnthropic(params: {
             return { role: m.role as "user" | "assistant", content: m.content };
         });
 
-    const tools = TOOL_DEFINITIONS.map((t) => ({
+    const tools = toolDefs.map((t) => ({
         name: t.function.name,
         description: t.function.description,
         input_schema: t.function.parameters,
@@ -833,11 +548,10 @@ export async function streamChat(params: {
     messages: ChatMessage[];
     callbacks: StreamCallbacks;
     signal?: AbortSignal;
-    settings?: AppSettings;
-    customPrompt?: string;
+    systemPrompt: string;
+    tools: ToolDefinition[];
 }): Promise<void> {
-    const { model, apiKey, messages, callbacks, signal, settings, customPrompt } = params;
-    const systemPrompt = buildSystemPrompt(settings, customPrompt);
+    const { model, apiKey, messages, callbacks, signal, systemPrompt, tools } = params;
 
     if (!apiKey) {
         callbacks.onError(
@@ -854,6 +568,7 @@ export async function streamChat(params: {
             callbacks,
             signal,
             systemPrompt,
+            tools,
         });
     }
 
@@ -866,5 +581,6 @@ export async function streamChat(params: {
         callbacks,
         signal,
         systemPrompt,
+        tools,
     });
 }

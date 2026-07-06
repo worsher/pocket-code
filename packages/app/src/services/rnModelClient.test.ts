@@ -1,5 +1,5 @@
-import { describe, it, expect } from "vitest";
-import { callbacksToAsyncIterable, toChatMessages, createRnModelClient } from "./rnModelClient";
+import { describe, it, expect, vi } from "vitest";
+import { callbacksToAsyncIterable, toChatMessages, toToolDefinitions, createRnModelClient } from "./rnModelClient";
 
 // 竞速工具:防止真实挂起把测试拖死——若 for-await 在超时前未终结,race 抛出
 // "TIMEOUT",而不是让 vitest 整个进程挂起。
@@ -66,6 +66,27 @@ describe("callbacksToAsyncIterable", () => {
     expect(after).toEqual({ value: undefined, done: true });
   });
 
+  // ── M2(T9 复审 Minor):return() 后残留 error 需清除,保证之后 next() 恒 done:true ──
+  it("return() after an error was queued but not yet thrown clears the error; next() stays done:true forever", async () => {
+    let onErrorRef!: (msg: string) => void;
+    const it_ = callbacksToAsyncIterable(({ onError }) => {
+      onErrorRef = onError;
+    });
+    const iterator = it_[Symbol.asyncIterator]();
+
+    // 让 onError 触发(排入 error,terminated=true),但不去 next() 消费它——
+    // 模拟 consumer 提前 return() 而不是继续迭代到抛出 error 的那一次 next()。
+    onErrorRef("boom");
+    const ret = await (iterator as any).return();
+    expect(ret).toEqual({ value: undefined, done: true });
+
+    // 之后任意次 next() 都必须是 done:true,不能抛出被清除前留下的 error。
+    const r1 = await iterator.next();
+    expect(r1).toEqual({ value: undefined, done: true });
+    const r2 = await iterator.next();
+    expect(r2).toEqual({ value: undefined, done: true });
+  });
+
   it("for-await break triggers cleanup callback", async () => {
     let cleanedUp = false;
     const it_ = callbacksToAsyncIterable(
@@ -126,6 +147,38 @@ describe("createRnModelClient abort semantics (Critical #1)", () => {
     await expect(withTimeout(run)).rejects.toThrow(/aborted/i);
   });
 
+  // ── M1(T9 复审 Minor):abort 路径本身也要 removeEventListener,不留监听器 ──
+  it("removes the internal abort listener once the abort path itself finishes the iterator", async () => {
+    const controller = new AbortController();
+    // M1 的监听器挂在 rnModelClient 内部创建的 AbortController(非外部传入的
+    // controller.signal)上,因此 spy 全局 AbortSignal.prototype 才能捕获到它。
+    const removeSpy = vi.spyOn(AbortSignal.prototype, "removeEventListener");
+
+    const rnModelClient = await import("./rnModelClient");
+    const client = rnModelClient.createRnModelClientForTest({
+      streamChatImpl: () => new Promise<void>(() => { /* never resolves */ }),
+    });
+
+    const iterable = client.streamStep({
+      system: "s",
+      messages: [{ role: "user", content: "hi" }],
+      tools: [],
+      signal: controller.signal,
+    });
+
+    const run = (async () => {
+      const out: any[] = [];
+      for await (const d of iterable) out.push(d);
+      return out;
+    })();
+
+    controller.abort();
+    await expect(withTimeout(run)).rejects.toThrow(/aborted/i);
+
+    expect(removeSpy).toHaveBeenCalledWith("abort", expect.any(Function));
+    removeSpy.mockRestore();
+  });
+
   it("if signal is already aborted before streamStep starts, iteration terminates promptly", async () => {
     const controller = new AbortController();
     controller.abort();
@@ -149,6 +202,62 @@ describe("createRnModelClient abort semantics (Critical #1)", () => {
     })();
 
     await expect(withTimeout(run)).rejects.toThrow(/aborted/i);
+  });
+});
+
+describe("toToolDefinitions", () => {
+  it("converts core ToolSchema {name,description,parameters} to aiClient ToolDefinition shape", () => {
+    const out = toToolDefinitions([
+      { name: "readFile", description: "read a file", parameters: { type: "object", properties: {} } },
+    ]);
+    expect(out).toEqual([
+      {
+        type: "function",
+        function: {
+          name: "readFile",
+          description: "read a file",
+          parameters: { type: "object", properties: {} },
+        },
+      },
+    ]);
+  });
+
+  it("returns an empty array for an empty input", () => {
+    expect(toToolDefinitions([])).toEqual([]);
+  });
+
+  it("preserves order across multiple schemas", () => {
+    const out = toToolDefinitions([
+      { name: "a", description: "d1", parameters: {} },
+      { name: "b", description: "d2", parameters: {} },
+    ]);
+    expect(out.map((t) => t.function.name)).toEqual(["a", "b"]);
+  });
+});
+
+describe("streamStep wiring: req.system / req.tools passthrough", () => {
+  it("passes req.system as systemPrompt and req.tools (converted) as tools to streamChat", async () => {
+    const rnModelClient = await import("./rnModelClient");
+    const streamChatImpl = vi.fn().mockResolvedValue(undefined);
+    const client = rnModelClient.createRnModelClientForTest({ streamChatImpl });
+
+    const iterable = client.streamStep({
+      system: "you are a helpful agent",
+      messages: [{ role: "user", content: "hi" }],
+      tools: [{ name: "readFile", description: "read", parameters: { type: "object" } }],
+    });
+    // Drain (streamChatImpl resolves immediately without calling any callback,
+    // so the iterator hangs — we only need to inspect the call args, not fully drain).
+    void iterable[Symbol.asyncIterator]().next();
+    await Promise.resolve();
+    await Promise.resolve();
+
+    expect(streamChatImpl).toHaveBeenCalledTimes(1);
+    const callArgs = streamChatImpl.mock.calls[0][0];
+    expect(callArgs.systemPrompt).toBe("you are a helpful agent");
+    expect(callArgs.tools).toEqual([
+      { type: "function", function: { name: "readFile", description: "read", parameters: { type: "object" } } },
+    ]);
   });
 });
 

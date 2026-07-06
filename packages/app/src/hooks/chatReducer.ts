@@ -4,6 +4,7 @@
 
 import type { AgentEventType } from "@pocket-code/wire";
 import type { StreamingPhase } from "../components/StreamingIndicator";
+import type { CoreMessage } from "@pocket-code/agent-core";
 
 export interface ImageAttachment {
   uri: string;
@@ -76,6 +77,29 @@ export function applyAgentEvent(messages: Message[], ev: AgentEventType): Messag
     default:
       return messages;
   }
+}
+
+/**
+ * editAndResend(geek 模式)截断 UI messages 到编辑点之前后,coreHistoryRef
+ * (与 UI messages 并行维护的 CoreMessage 史)也要同步截断,否则重发时仍会
+ * 把已被"分支丢弃"的旧轮次带给模型。
+ *
+ * UI Message[] 与 CoreMessage[] 不是 1:1 的(一轮 user 消息在 CoreMessage 里
+ * 对应 1 条 user + N 条 assistant(每 step 一条)+ N 条 tool),所以不能直接按
+ * 下标截断——而是按"保留的 user 轮次数"对齐:keepUserTurns = truncated 后的
+ * UI messages 里 role==="user" 的条数;在 CoreMessage[] 里保留到第
+ * (keepUserTurns+1) 条 user 消息之前(不含)。
+ */
+export function truncateCoreHistory(history: CoreMessage[], keepUserTurns: number): CoreMessage[] {
+  if (keepUserTurns <= 0) return [];
+  let seen = 0;
+  for (let i = 0; i < history.length; i++) {
+    if (history[i].role === "user") {
+      seen++;
+      if (seen > keepUserTurns) return history.slice(0, i);
+    }
+  }
+  return history.slice();
 }
 
 /** 事件 → streaming phase;null 表示不改变当前 phase。 */

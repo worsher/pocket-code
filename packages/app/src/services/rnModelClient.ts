@@ -1,15 +1,17 @@
 // ── RnModelClient ──────────────────────────────────────
-// P9 Task 9: 把 App 现有 aiClient 的 callbacks 风格 SSE 流适配成
-// agent-core ModelClient 的 AsyncIterable 风格,供后续 App 侧接入
+// P9 Task 9/10: 把 App 现有 aiClient 的 callbacks 风格 SSE 流适配成
+// agent-core ModelClient 的 AsyncIterable 风格,供 App 侧 geek 模式的
 // 同构 agent 循环(runAgentLoop)使用。
 //
-// tools 参数接线留给 T10(aiClient.streamChatOpenAI 目前用全局
-// TOOL_DEFINITIONS,尚未开放为参数)。
+// T10:req.system/req.tools 接线完成——system 直传 aiClient.streamChat 的
+// systemPrompt 参数,tools 经 toToolDefinitions 转换后传入(见下方 streamStep
+// 内部实现)。cfg 不再保留 customPrompt——system 全量来自 req.system 单一来源
+// (useAgent 层用 buildSystemPrompt({customPrompt}) 拼好后经 req.system 传入,
+// 语义等价)。
 
 import type { CoreMessage, ModelClient, ModelDelta, ToolSchema } from "@pocket-code/agent-core";
-import { streamChat, type ChatMessage, type ContentPart as AiContentPart, type ToolCallRequest } from "./aiClient";
+import { streamChat, type ChatMessage, type ContentPart as AiContentPart, type ToolCallRequest, type ToolDefinition } from "./aiClient";
 import type { ModelConfig } from "./modelConfig";
-import type { AppSettings } from "../store/settings";
 
 // ── 队列桥接器:callbacks → AsyncIterable ───────────────
 
@@ -99,6 +101,13 @@ export function callbacksToAsyncIterable(
           const wasTerminated = terminated;
           terminated = true;
           queue.length = 0;
+          // M2(T9 复审 Minor):若此时还有一个尚未抛出的残留 error(consumer 提前
+          // return() 而不是继续 next() 到抛出它的那一次),必须一并清除——否则
+          // 理论上仍有路径能在 return() 之后再抛出这个 error,违反"return() 之后
+          // next() 恒 done:true"的契约。errorThrown 置真即让下面 next() 的
+          // `error !== undefined && !errorThrown` 判断恒假。
+          error = undefined;
+          errorThrown = true;
           wake();
           if (!wasTerminated) onCleanup?.();
           return { value: undefined as any, done: true };
@@ -109,9 +118,7 @@ export function callbacksToAsyncIterable(
 }
 
 // ── 消息转换:CoreMessage(agent-core) → ChatMessage(aiClient) ──
-// 语义对照被删除的 geekLoop.buildChatHistory(方向相反:那边是
-// Message[](App UI 消息)→ ChatMessage[];这里是 CoreMessage[]
-// (agent-core 同构消息)→ ChatMessage[])。
+// 方向:CoreMessage[](agent-core 同构消息)→ ChatMessage[](aiClient 消息)。
 
 function toAiContentParts(parts: import("@pocket-code/agent-core").ContentPart[]): AiContentPart[] {
   return parts.map((p) => {
@@ -159,6 +166,23 @@ export function toChatMessages(messages: CoreMessage[]): ChatMessage[] {
   return out;
 }
 
+// ── 工具转换:core ToolSchema → aiClient ToolDefinition ─
+// core 的 ToolSchema 是 {name,description,parameters}(见 agent-core/src/types.ts);
+// aiClient 的 ToolDefinition 是 OpenAI function-calling 形状
+// {type:"function", function:{name,description,parameters}}(见 aiClient.ts)。
+// streamChatAnthropic 内部会再从这个形状转成 Anthropic 的 {name,description,input_schema}。
+
+export function toToolDefinitions(schemas: ToolSchema[]): ToolDefinition[] {
+  return schemas.map((s) => ({
+    type: "function" as const,
+    function: {
+      name: s.name,
+      description: s.description,
+      parameters: s.parameters,
+    },
+  }));
+}
+
 // ── ModelClient 工厂 ────────────────────────────────────
 
 /** `streamChat` 的类型别名,便于测试注入替身实现(见 createRnModelClientForTest)。 */
@@ -168,12 +192,10 @@ function buildStreamStep(
   cfg: {
     modelConfig: ModelConfig;
     apiKey: string;
-    settings: AppSettings;
-    customPrompt?: string;
   },
   streamChatImpl: StreamChatFn
 ): ModelClient["streamStep"] {
-  const { modelConfig, apiKey, settings, customPrompt } = cfg;
+  const { modelConfig, apiKey } = cfg;
 
   return function streamStep(req: {
     system: string;
@@ -182,6 +204,7 @@ function buildStreamStep(
     signal?: AbortSignal;
   }): AsyncIterable<ModelDelta> {
     const messages = toChatMessages(req.messages);
+    const tools = toToolDefinitions(req.tools);
 
     // Critical #1: aiClient.streamChat 在 signal abort 时只
     // xhr.abort()+resolve()——不调用 onDone/onError 任何回调
@@ -212,12 +235,10 @@ function buildStreamStep(
 
     return callbacksToAsyncIterable(
       ({ onDelta, onDone, onError }) => {
-        // tools 接线留给 T10(aiClient.streamChatOpenAI 目前内部用全局
-        // TOOL_DEFINITIONS,尚不接受 tools 参数)。req.tools 暂不使用。
-        // req.system 同理:aiClient 未暴露"直接使用完整 system 字符串"的
-        // 入口(buildSystemPrompt 未导出,streamChat 内部总会拿 customPrompt
-        // 重新拼装 system),故 system 拼装暂沿用 cfg.customPrompt,由
-        // aiClient 侧的 buildSystemPrompt 组装;req.system 本身不使用。
+        // req.system 直传 aiClient.streamChat 的必传 systemPrompt 参数;req.tools
+        // (core ToolSchema[])经 toToolDefinitions 转换为 aiClient ToolDefinition[]
+        // 再传入(T10 接线;system/tools 单一来源均来自 runAgentLoop 调用方,cfg 不再
+        // 保留 customPrompt——见 createRnModelClient 签名变化)。
 
         let settled = false; // 防止 aiClient 正常完成路径与 abort 路径重复终结
         const finish = (fn: () => void) => {
@@ -226,13 +247,25 @@ function buildStreamStep(
           fn();
         };
 
+        // M1(T9 复审 Minor):无论走哪条终结路径,都要 removeEventListener,
+        // 避免监听器泄漏在已终结的 internalController.signal 上。用一个
+        // 共享的 cleanup 包一层,四条终结路径(onAbort 自身/onDone/onError/
+        // catch)统一调用。
+        const cleanupAbortListener = () =>
+          internalController.signal.removeEventListener("abort", onAbort);
+
         // 独立的 abort 终结通道:与 aiClient 内部的 onDone/onError 完全解耦,
         // 保证即便 aiClient 在 abort 时"什么都不调用",桥接器也能终结。
-        const onAbort = () => finish(() => onError("aborted"));
+        function onAbort() {
+          finish(() => {
+            cleanupAbortListener();
+            onError("aborted");
+          });
+        }
         if (internalController.signal.aborted) {
           // 注册前检查 signal 可能已经 aborted(例如上游在 streamStep 调用
-          // 之前就已经 abort 了)。
-          onAbort();
+          // 之前就已经 abort 了)。未注册监听器,故无需 cleanup。
+          finish(() => onError("aborted"));
           return;
         }
         internalController.signal.addEventListener("abort", onAbort);
@@ -242,17 +275,17 @@ function buildStreamStep(
           apiKey,
           messages,
           signal: internalController.signal,
-          settings,
-          customPrompt,
+          systemPrompt: req.system,
+          tools,
           callbacks: {
             onTextDelta: (text) => onDelta({ type: "text", text }),
             onThinking: (text) => onDelta({ type: "reasoning", text }),
             onToolCall: (id, name, args) => onDelta({ type: "tool-call", id, name, args }),
-            onDone: () => finish(() => { internalController.signal.removeEventListener("abort", onAbort); onDone(); }),
-            onError: (msg) => finish(() => { internalController.signal.removeEventListener("abort", onAbort); onError(msg); }),
+            onDone: () => finish(() => { cleanupAbortListener(); onDone(); }),
+            onError: (msg) => finish(() => { cleanupAbortListener(); onError(msg); }),
           },
         }).catch((err) => finish(() => {
-          internalController.signal.removeEventListener("abort", onAbort);
+          cleanupAbortListener();
           onError(err instanceof Error ? err.message : String(err));
         }));
       },
@@ -265,8 +298,6 @@ function buildStreamStep(
 export function createRnModelClient(cfg: {
   modelConfig: ModelConfig;
   apiKey: string;
-  settings: AppSettings;
-  customPrompt?: string;
 }): ModelClient {
   return { streamStep: buildStreamStep(cfg, streamChat) };
 }
@@ -281,8 +312,6 @@ export function createRnModelClientForTest(
   cfg: {
     modelConfig?: ModelConfig;
     apiKey?: string;
-    settings?: AppSettings;
-    customPrompt?: string;
     streamChatImpl: StreamChatFn;
   }
 ): ModelClient {
@@ -292,8 +321,6 @@ export function createRnModelClientForTest(
       {
         modelConfig: rest.modelConfig ?? ({} as ModelConfig),
         apiKey: rest.apiKey ?? "test-key",
-        settings: rest.settings ?? ({} as AppSettings),
-        customPrompt: rest.customPrompt,
       },
       streamChatImpl
     ),

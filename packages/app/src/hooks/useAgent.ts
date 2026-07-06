@@ -11,9 +11,11 @@ import type { StreamingPhase } from "../components/StreamingIndicator";
 import { enqueueMessage, getQueue, dequeueMessage } from "../services/offlineQueue";
 import { sendLocalNotification } from "../services/notifications";
 import { ServerConnection, type ConnectionConfig, type ConnectionHandlers } from "../services/serverConnection";
-import { applyAgentEvent, phaseFor } from "./chatReducer";
+import { applyAgentEvent, phaseFor, truncateCoreHistory } from "./chatReducer";
 import type { Message, ImageAttachment } from "./chatReducer";
-import { runGeekLoop, buildChatHistory } from "./geekLoop";
+import { createRnModelClient } from "../services/rnModelClient";
+import { createDeviceBackend } from "../services/deviceBackend";
+import { runAgentLoop, buildSystemPrompt, type CoreMessage } from "@pocket-code/agent-core";
 import type { AgentEventType } from "@pocket-code/wire";
 
 // ── Public Types(re-export) ───────────────────────────────
@@ -90,6 +92,13 @@ export function useAgent({ settings, model = "deepseek-v4-flash", customPrompt, 
   const deviceIdRef = useRef(settings.deviceId); deviceIdRef.current = settings.deviceId;
   // callId → toolName(runCommand 后台通知需知道工具名)
   const callNamesRef = useRef(new Map<string, string>());
+  // geek 会话的 CoreMessage 史(与 UI messages 并行维护,供 runAgentLoop 使用)。
+  // 重置点与 setMessages([]) 同点:newSession、项目切换 effect。loadSession
+  // 从存档恢复 UI messages,但旧存档没有 CoreMessage 形态历史,同样重置为
+  // 空——下一轮 geek 发送会以"无历史、仅本轮 user 消息"重新开始(load 后继续
+  // 对话时上下文会略短于云端场景,可接受:与云端历史来源不同构,brief 未要求
+  // 从 StoredMessage 反向重建 CoreMessage)。
+  const coreHistoryRef = useRef<CoreMessage[]>([]);
 
   const serverUrl = settings.mode === "geek"
     ? settings.toolServerUrl
@@ -292,7 +301,7 @@ export function useAgent({ settings, model = "deepseek-v4-flash", customPrompt, 
     if (p) setStreamingPhase(p);
   }, []);
 
-  // ── Geek mode: App drives the agent loop ─────────────
+  // ── Geek mode: App drives the agent loop(agent-core runAgentLoop) ────
   const sendGeekMessage = useCallback(
     async (content: string, images?: ImageAttachment[]) => {
       // Ensure sessionId exists for saving (geek mode may not have server connection)
@@ -311,15 +320,22 @@ export function useAgent({ settings, model = "deepseek-v4-flash", customPrompt, 
       setIsStreaming(true);
       setStreamingPhase("connecting");
 
-      const chatHistory = buildChatHistory([...messages, userMsg]);
       const abortController = new AbortController();
       abortRef.current = abortController;
       try {
-        await runGeekLoop({
-          modelConfig, apiKey, chatHistory, signal: abortController.signal, settings,
-          customPrompt: customPromptRef.current,
-          emitGeek, executeTool, setCurrentToolName, setStreamingPhase,
+        const { messages: nextHistory } = await runAgentLoop({
+          modelClient: createRnModelClient({ modelConfig, apiKey }),
+          backend: createDeviceBackend({ projectId: projectIdRef.current, execTool: executeTool }),
+          workspace: "/", // DeviceBackend 内部已定根,safePath 以 "/" 为界
+          system: buildSystemPrompt({ customPrompt: customPromptRef.current }),
+          history: coreHistoryRef.current, // 新会话/loadSession/newSession/项目切换处重置为 []
+          userMessage: content,
+          images: images?.map((i) => ({ base64: i.base64, mimeType: i.mimeType })),
+          onEvent: emitGeek,
+          signal: abortController.signal,
+          maxSteps: 10, // 保持 geek 现值
         });
+        coreHistoryRef.current = nextHistory;
       } catch (err: any) {
         if (err.name !== "AbortError") emitGeek({ type: "error", message: String(err.message) });
       } finally {
@@ -327,7 +343,7 @@ export function useAgent({ settings, model = "deepseek-v4-flash", customPrompt, 
         finalizeStreaming();
       }
     },
-    [messages, settings, executeTool, emitGeek, finalizeStreaming]
+    [settings, executeTool, emitGeek, finalizeStreaming]
   );
 
   // ── Send message ──────────────────────────────────────
@@ -358,6 +374,11 @@ export function useAgent({ settings, model = "deepseek-v4-flash", customPrompt, 
       const truncated = messagesRef.current.slice(0, idx);
       setMessages(truncated);
       messagesRef.current = truncated;
+      // geek 模式:coreHistoryRef 与 UI messages 并行维护,同步截断到相同的
+      // user 轮次数,否则重发时仍会把已被分支丢弃的旧轮次带给模型(见
+      // truncateCoreHistory 注释)。
+      const keepUserTurns = truncated.filter((m) => m.role === "user").length;
+      coreHistoryRef.current = truncateCoreHistory(coreHistoryRef.current, keepUserTurns);
 
       if (settings.mode === "cloud") {
         await new Promise((r) => setTimeout(r, 50));
@@ -388,6 +409,7 @@ export function useAgent({ settings, model = "deepseek-v4-flash", customPrompt, 
       setIsConnected(false);
       const loaded = await loadChatHistory(targetSessionId);
       setMessages(loaded as Message[]);
+      coreHistoryRef.current = []; // 旧存档无 CoreMessage 形态历史,geek 续聊从空历史开始
       setSessionId(targetSessionId);
       sessionIdRef.current = targetSessionId; // 立即更新,供 connect() 使用
       setIsStreaming(false);
@@ -401,6 +423,7 @@ export function useAgent({ settings, model = "deepseek-v4-flash", customPrompt, 
     abortRef.current?.abort();
     conn.disconnect();
     setMessages([]);
+    coreHistoryRef.current = [];
     setSessionId(null);
     setIsStreaming(false);
   }, [conn]);
@@ -411,6 +434,7 @@ export function useAgent({ settings, model = "deepseek-v4-flash", customPrompt, 
     abortRef.current?.abort();
     conn.disconnect();
     setMessages([]);
+    coreHistoryRef.current = [];
     setSessionId(null);
     sessionIdRef.current = null;
     setIsStreaming(false);
