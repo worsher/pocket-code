@@ -169,6 +169,12 @@ server {
 
 配好后 App 里填 `wss://relay.example.com`（端口 443，省略）；隧道预览走 `https://relay.example.com/t/...`。
 
+> **子路径挂载变体**（relay 挂在 `https://域名/relay` 而非独占域名/端口）：三个 location 缺一不可——
+> ① `location = /relay { proxy_pass http://127.0.0.1:3200/; }`(App 控制通道,剥前缀);
+> ② `location /relay/ { proxy_pass http://127.0.0.1:3200/; }`(隧道,注意尾部 `/` 剥前缀);
+> ③ `location / { proxy_pass http://127.0.0.1:3200; }`(域名根兜底——vite 的绝对路径子资源靠 pc_tunnel cookie 在 relay 内路由,必须让 relay 接管整个域名的未匹配路径)。
+> 三处都要带 WS upgrade 头与 `proxy_buffering off`;**proxy_pass 必须写 `127.0.0.1` 而非 `localhost`**(relay 只监听 IPv4,localhost 会被 nginx 轮询解析到 `::1` 导致一半请求 502)。
+
 ### 2.5 防火墙
 
 ```bash

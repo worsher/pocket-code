@@ -127,6 +127,35 @@ function collectFrames() {
   return { frames, emit, waitFor };
 }
 
+describe("proxyToLocalhost header filtering", () => {
+  it("strips hop-by-hop request headers (connection/upgrade/host) before fetch", async () => {
+    const { createServer } = await import("http");
+    const seen: Record<string, unknown> = {};
+    const srv = createServer((rq, rs) => {
+      Object.assign(seen, rq.headers);
+      rs.writeHead(200, { "content-type": "text/plain" });
+      rs.end("ok");
+    });
+    await new Promise<void>((r) => srv.listen(0, () => r()));
+    const port = (srv.address() as any).port;
+    const frames: any[] = [];
+    await proxyToLocalhost(
+      {
+        tunnelId: "h1", port, method: "GET", path: "/",
+        headers: { host: "evil.example", connection: "upgrade", upgrade: "websocket", cookie: "a=1", "user-agent": "ua" },
+      },
+      (f) => frames.push(f)
+    );
+    srv.close();
+    expect(frames[0]).toMatchObject({ type: "tunnel-response", status: 200 });
+    expect(frames.at(-1).error).toBeUndefined();
+    expect(seen["connection"]).not.toBe("upgrade"); // 逐跳头被剥
+    expect(seen["upgrade"]).toBeUndefined();
+    expect(String(seen["host"])).toContain("localhost"); // host 由 fetch 重置
+    expect(seen["cookie"]).toBe("a=1");                  // 业务头保留
+  });
+});
+
 describe("WS tunnel (daemon side)", () => {
   it("opens local ws, emits opened, round-trips text and binary", async () => {
     const srv = await startEchoServer();

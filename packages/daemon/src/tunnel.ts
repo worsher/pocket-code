@@ -19,14 +19,28 @@ export type TunnelFrame =
   | { type: "tunnel-chunk"; tunnelId: string; data: string }
   | { type: "tunnel-end"; tunnelId: string; error?: string };
 
+// 请求侧逐跳/连接管理头:不可透传给 fetch。
+// connection/upgrade 来自反代(nginx 常无条件设 Connection:upgrade),undici 会直接抛错;
+// host 透传会触发 vite 5+ 的 allowedHosts 拦截,fetch 自会按目标 URL 重置。
+const REQ_HOP_BY_HOP = new Set([
+  "host", "connection", "upgrade", "keep-alive",
+  "transfer-encoding", "content-length", "proxy-connection", "te", "trailer",
+]);
+
 export async function proxyToLocalhost(
   req: TunnelHttpRequest,
   emit: (frame: TunnelFrame) => void,
   fetchImpl: typeof fetch = fetch
 ): Promise<void> {
-  const url = `http://127.0.0.1:${req.port}${req.path}`;
+  // localhost 而非 127.0.0.1:dev server 可能只绑 IPv6 ::1(macOS 常见),
+  // Node>=20 对 localhost 自动双栈选族(Happy Eyeballs),v4/v6 都能连上。
+  const url = `http://localhost:${req.port}${req.path}`;
   try {
-    const init: RequestInit = { method: req.method, headers: req.headers };
+    const reqHeaders: Record<string, string> = {};
+    for (const [k, v] of Object.entries(req.headers)) {
+      if (!REQ_HOP_BY_HOP.has(k.toLowerCase())) reqHeaders[k] = v;
+    }
+    const init: RequestInit = { method: req.method, headers: reqHeaders };
     if (req.body !== undefined && req.method !== "GET" && req.method !== "HEAD") {
       init.body = Buffer.from(req.body, "base64");
     }
@@ -84,11 +98,12 @@ export function openLocalWebSocket(
 ): void {
   const protocols = (req.headers["sec-websocket-protocol"] || "")
     .split(",").map((s) => s.trim()).filter(Boolean);
-  const headers: Record<string, string> = { origin: `http://127.0.0.1:${req.port}` };
+  const headers: Record<string, string> = { origin: `http://localhost:${req.port}` };
   if (req.headers["cookie"]) headers["cookie"] = req.headers["cookie"];
   if (req.headers["user-agent"]) headers["user-agent"] = req.headers["user-agent"];
 
-  const ws = new WebSocket(`ws://127.0.0.1:${req.port}${req.path}`, protocols, { headers });
+  // 同 proxyToLocalhost:localhost 双栈,兼容只绑 ::1 的 dev server
+  const ws = new WebSocket(`ws://localhost:${req.port}${req.path}`, protocols, { headers });
   wsTunnels.set(req.tunnelId, ws);
 
   ws.on("open", () => {
