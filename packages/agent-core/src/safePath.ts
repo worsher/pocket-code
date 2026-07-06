@@ -13,6 +13,10 @@ function resolvePosix(base: string, rel: string): string {
   return "/" + out.join("/");
 }
 
+// 行为差异注记(与旧 server 版 path.resolve 语义):rel 传入绝对路径时,
+// 本实现拼接为 workspace 内相对路径(如 "/etc/x" → "<ws>/etc/x",安全),
+// 旧版会以绝对路径覆盖 base 并被 startsWith 拒绝。两者均不可越权,
+// 但"哪些输入被拒绝"不同——迁移调用方若依赖拒绝行为需注意。
 export function safePath(workspace: string, relativePath: string): string {
   const ws = resolvePosix(workspace, ".");
   const full = resolvePosix(ws, relativePath);
