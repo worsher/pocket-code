@@ -23,7 +23,7 @@ interface ModelConfig {
  * - claude-sonnet / claude-haiku: Anthropic Claude
  * - gpt-4o / gpt-4o-mini: OpenAI
  * - gemini-flash: Google Gemini
- * - deepseek-v3 / deepseek-r1: DeepSeek via SiliconFlow (硅基流动)
+ * - deepseek-v4-pro / deepseek-v4-flash / deepseek-r1: DeepSeek via SiliconFlow (硅基流动)
  * - qwen-coder: Qwen via SiliconFlow
  * - glm-4-6: GLM-4.6 via iFlow (心流)
  */
@@ -37,6 +37,9 @@ const MODEL_MAP: Record<string, ModelConfig> = {
   // Google
   "gemini-flash": { provider: "google", modelId: "gemini-2.5-flash-preview-05-20" },
   // SiliconFlow (硅基流动) — DeepSeek / Qwen etc.
+  "deepseek-v4-pro": { provider: "siliconflow", modelId: "deepseek-ai/DeepSeek-V4-Pro" },
+  "deepseek-v4-flash": { provider: "siliconflow", modelId: "deepseek-ai/DeepSeek-V4-Flash" },
+  // 旧 key 保留:老会话历史里存的 modelKey 仍可解析(App 列表已不展示)
   "deepseek-v3": { provider: "siliconflow", modelId: "deepseek-ai/DeepSeek-V3" },
   "deepseek-r1": { provider: "siliconflow", modelId: "deepseek-ai/DeepSeek-R1" },
   "qwen-coder": { provider: "siliconflow", modelId: "Qwen/Qwen2.5-Coder-32B-Instruct" },
@@ -66,7 +69,7 @@ const openai = createOpenAI({
 });
 
 function getModel(modelKey: string) {
-  const config = MODEL_MAP[modelKey] || MODEL_MAP["deepseek-v3"];
+  const config = MODEL_MAP[modelKey] || MODEL_MAP["deepseek-v4-flash"];
   switch (config.provider) {
     case "anthropic":
       return anthropic(config.modelId);
@@ -140,7 +143,7 @@ export async function createSession(
     projectId,
     workspace,
     messages: [],
-    modelKey: "deepseek-v3",
+    modelKey: "deepseek-v4-flash",
     lastActivity: Date.now(),
   };
 }

@@ -13,8 +13,8 @@ interface RoutingRule {
 }
 
 const DEFAULT_ROUTING: RoutingRule[] = [
-  { complexity: "simple", modelKey: "deepseek-v3", description: "简单问答、文件操作" },
-  { complexity: "medium", modelKey: "deepseek-v3", description: "一般编码任务" },
+  { complexity: "simple", modelKey: "deepseek-v4-flash", description: "简单问答、文件操作" },
+  { complexity: "medium", modelKey: "deepseek-v4-flash", description: "一般编码任务" },
   { complexity: "complex", modelKey: "claude-sonnet", description: "复杂架构、重构" },
   { complexity: "reasoning", modelKey: "deepseek-r1", description: "数学推理、算法" },
 ];
@@ -127,5 +127,5 @@ export function analyzePrompt(
 
 function getModelForComplexity(complexity: ComplexityLevel): string {
   const rule = DEFAULT_ROUTING.find((r) => r.complexity === complexity);
-  return rule?.modelKey || "deepseek-v3";
+  return rule?.modelKey || "deepseek-v4-flash";
 }

@@ -29,11 +29,19 @@ export const MODELS: ModelConfig[] = [
     },
     // SiliconFlow — DeepSeek / Qwen (OpenAI-compatible)
     {
-        key: "deepseek-v3",
-        label: "DeepSeek V3",
-        description: "日常编码，性价比之王",
+        key: "deepseek-v4-pro",
+        label: "DeepSeek V4 Pro",
+        description: "旗舰推理/编码，1M 上下文",
         provider: "siliconflow",
-        modelId: "deepseek-ai/DeepSeek-V3",
+        modelId: "deepseek-ai/DeepSeek-V4-Pro",
+        baseURL: "https://api.siliconflow.cn/v1",
+    },
+    {
+        key: "deepseek-v4-flash",
+        label: "DeepSeek V4 Flash",
+        description: "轻量快速，日常编码性价比",
+        provider: "siliconflow",
+        modelId: "deepseek-ai/DeepSeek-V4-Flash",
         baseURL: "https://api.siliconflow.cn/v1",
     },
     {
@@ -134,7 +142,7 @@ export const MODELS: ModelConfig[] = [
     },
 ];
 
-/** Look up a model config by key, fallback to deepseek-v3 */
+/** Look up a model config by key, fallback to deepseek-v4-flash */
 export function getModelConfig(key: string): ModelConfig {
     return MODELS.find((m) => m.key === key) ?? MODELS[0];
 }
