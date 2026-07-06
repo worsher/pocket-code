@@ -19,7 +19,7 @@ function toolResultText(content: unknown): string {
   return String(content ?? "");
 }
 
-export const claudeCodeAdapter: CliAgentAdapter = {
+export const claudeCodeAdapter = {
   id: "claude-code",
   supportsResume: true,
 
@@ -122,4 +122,4 @@ export const claudeCodeAdapter: CliAgentAdapter = {
     }
     return events;
   },
-};
+} satisfies CliAgentAdapter;
