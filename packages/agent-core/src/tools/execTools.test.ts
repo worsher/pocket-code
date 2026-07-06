@@ -27,6 +27,46 @@ describe("git tools", () => {
     expect(opts.isolateHome).toBe(true);
     expect(opts.env.GIT_TERMINAL_PROMPT).toBe("0");
   });
+
+  it("gitClone success path slices stdout to 5000 / stderr to 2000 (gitClone 专属值,非 runCommand 的 10000/5000)", async () => {
+    const be = makeFakeBackend({
+      exec: vi.fn(async () => ({ stdout: "x".repeat(6000), stderr: "", exitCode: 0 })),
+    });
+    const r: any = await buildToolRegistry(be, "/ws").run("gitClone", { url: "https://example.com/repo.git" });
+    expect(r.success).toBe(true);
+    expect(r.stdout.length).toBe(5000);
+  });
+
+  it("gitClone rejects a path-traversal target directory", async () => {
+    const be = makeFakeBackend();
+    const r: any = await buildToolRegistry(be, "/ws").run("gitClone", {
+      url: "https://example.com/repo.git",
+      dir: "../../evil",
+    });
+    expect(r.success).toBe(false);
+    expect(r.error).toContain("traversal");
+  });
+
+  it("gitPush success path slices stdout/stderr to 2000 (symmetric,对照 tools.ts:428)", async () => {
+    const be = makeFakeBackend({
+      exec: vi.fn(async () => ({ stdout: "x".repeat(3000), stderr: "y".repeat(3000), exitCode: 0 })),
+    });
+    const r: any = await buildToolRegistry(be, "/ws").run("gitPush", {});
+    expect(r.success).toBe(true);
+    expect(r.stdout.length).toBe(2000);
+    expect(r.stderr.length).toBe(2000);
+  });
+});
+
+describe("stopProcess schema", () => {
+  it("declares processId as string (RuntimeBackend.stopProcess 签名,而非 aiClient 旧 schema 的 number)", () => {
+    const registry = buildToolRegistry(
+      makeFakeBackend({ startProcess: vi.fn(async () => ({ processId: "p1" })), stopProcess: vi.fn(async () => {}) }),
+      "/ws"
+    );
+    const schema: any = registry.schemas.find((s) => s.name === "stopProcess");
+    expect(schema?.parameters.properties?.processId?.type).toBe("string");
+  });
 });
 
 describe("resolveGitCwd", () => {

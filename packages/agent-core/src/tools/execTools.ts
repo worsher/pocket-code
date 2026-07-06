@@ -3,6 +3,7 @@
 // core 包零依赖:不直接碰 child_process,而是经由 RuntimeBackend.exec/startProcess/stopProcess 抽象。
 import type { RuntimeBackend, ToolSchema } from "../types.js";
 import type { ToolDef } from "./registry.js";
+import { safePath } from "../safePath.js";
 
 function errorMessage(err: unknown): string {
   return err instanceof Error ? err.message : String(err);
@@ -102,6 +103,8 @@ export function buildExecTools(workspace: string): ToolDef[] {
       const dir = args.dir as string | undefined;
       try {
         const target = dir || url.split("/").pop()?.replace(/\.git$/, "") || "repo";
+        // 防穿越守卫(对照 tools.ts gitClone):target 须校验在 workspace 内,否则抛 "Path traversal not allowed"
+        safePath(workspace, target);
         // gitClone 在 workspace 根跑,不经 resolveGitCwd(尚不存在仓库可解析)
         const r = await backend.exec(`git clone --depth 1 ${url} ${target}`, {
           cwd: workspace,
@@ -110,12 +113,12 @@ export function buildExecTools(workspace: string): ToolDef[] {
           isolateHome: true,
         });
         if (r.exitCode === 0) {
-          return { success: true, stdout: r.stdout.slice(0, 10000), stderr: r.stderr.slice(0, 5000) };
+          return { success: true, stdout: r.stdout.slice(0, 5000), stderr: r.stderr.slice(0, 2000) };
         }
         return {
           success: false,
           error: r.stderr || `exit ${r.exitCode}`,
-          stderr: r.stderr.slice(0, 5000),
+          stderr: r.stderr.slice(0, 2000),
         };
       } catch (err) {
         return { success: false, error: errorMessage(err) };
@@ -254,7 +257,7 @@ export function buildExecTools(workspace: string): ToolDef[] {
         if (r.exitCode !== 0) {
           return { success: false, error: r.stderr || `exit ${r.exitCode}` };
         }
-        return { success: true, stdout: r.stdout.slice(0, 2000), stderr: r.stderr.slice(0, 5000) };
+        return { success: true, stdout: r.stdout.slice(0, 2000), stderr: r.stderr.slice(0, 2000) };
       } catch (err) {
         return { success: false, error: errorMessage(err) };
       }
@@ -290,7 +293,7 @@ export function buildExecTools(workspace: string): ToolDef[] {
         if (r.exitCode !== 0) {
           return { success: false, error: r.stderr || `exit ${r.exitCode}` };
         }
-        return { success: true, stdout: r.stdout.slice(0, 2000), stderr: r.stderr.slice(0, 5000) };
+        return { success: true, stdout: r.stdout.slice(0, 2000), stderr: r.stderr.slice(0, 2000) };
       } catch (err) {
         return { success: false, error: errorMessage(err) };
       }
@@ -468,7 +471,7 @@ export function buildProcessTools(backend: RuntimeBackend): ToolDef[] {
     parameters: {
       type: "object",
       properties: {
-        processId: { type: "number", description: "The processId returned by runInBackground." },
+        processId: { type: "string", description: "The processId returned by runInBackground." },
       },
       required: ["processId"],
     },
