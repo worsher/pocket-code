@@ -15,6 +15,19 @@ describe("runCommand", () => {
     const r: any = await buildToolRegistry(be, "/ws").run("runCommand", { command: "bad" });
     expect(r).toMatchObject({ success: false, error: "boom" });
   });
+
+  // I-1:runCommandTool 是 registry 里唯一不自带 try/catch 的工具;当 backend.exec 同步/异步抛出
+  // (如 App geek 本地路径 native 模块缺失)时,异常此前会穿透 registry.run 直达调用方(runAgentLoop),
+  // 导致整轮被 reject 杀掉,而不是按头注释承诺的 {success:false, error} 喂回模型。
+  it("backend.exec throwing does not throw through registry.run; normalizes to {success:false,error}", async () => {
+    const be = makeFakeBackend({
+      exec: vi.fn(async () => {
+        throw new Error("native module missing");
+      }),
+    });
+    const r: any = await buildToolRegistry(be, "/ws").run("runCommand", { command: "ls" });
+    expect(r).toEqual({ success: false, error: "native module missing" });
+  });
 });
 
 describe("git tools", () => {

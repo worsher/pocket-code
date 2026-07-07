@@ -168,8 +168,11 @@ export function createDeviceBackend(opts: CreateDeviceBackendOpts): RuntimeBacke
     // cwd 翻译(NEW-2 修复:同时兼容原始根/归一化根两种形状):core 的
     // runCommandTool/gitCloneTool/searchFilesTool 等把 `workspace` 参数(**原始**
     // root 字符串,未经 safePath 归一化)或其子路径当作 cwd 传进来;而 8 个 git
-    // 工具经 resolveGitCwd 拼出的 cwd 则是 safePath(root, ...) 产出的**归一化后**
-    // 绝对路径。两者都不是 localFileSystem/executor 认识的相对路径,必须都覆盖到:
+    // 工具经 resolveGitCwd 拼出的 cwd 实际是显式传入的 path 原样值、undefined,
+    // 或根下恰好命中的一级子目录名(见 execTools.ts resolveGitCwd 语义),并非
+    // safePath 归一化后的绝对路径——下面按归一化根(ws)分支处理属前瞻防御,
+    // 覆盖 resolveGitCwd 语义未来变化或调用方直传归一化路径的情况。
+    // 两者都不是 localFileSystem/executor 认识的相对路径,必须都覆盖到:
     //   - cwd === root(原始根)或 cwd === ws(归一化根) → 不转发 cwd(让
     //     executeLocalTool 的 "runCommand" case 走 args.cwd undefined →
     //     localExecutor.resolveCwd 默认解析到 workspace 根)。

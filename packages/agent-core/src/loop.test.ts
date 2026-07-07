@@ -66,6 +66,27 @@ describe("runAgentLoop", () => {
     expect(r.fullText).toBe("recovered");
   });
 
+  // I-1:工具 execute 裸抛(如 runCommandTool 遇 backend.exec 同步抛出,对照 App geek 本地
+  // 路径 native 模块缺失场景)时,registry.run 归一为 {success:false,error},loop 不应 reject,
+  // 应发出 isError 的 tool-result 事件并继续循环到正常结束(对照上面 "failed tool marks isError
+  // and loop continues" 用例)。
+  it("I-1: tool execute throwing does not reject the loop; emits isError tool-result and continues", async () => {
+    const client = scriptedClient([
+      [{ type: "tool-call", id: "c1", name: "runCommand", args: { command: "ls" } }],
+      [{ type: "text", text: "recovered" }],
+    ]);
+    const onEvent = vi.fn();
+    const backend = makeFakeBackend({
+      exec: vi.fn(async () => {
+        throw new Error("native module missing");
+      }),
+    });
+    const r = await runAgentLoop(base(client, { onEvent, backend }));
+    const result = onEvent.mock.calls.map((c) => c[0]).find((e: any) => e.type === "tool-result");
+    expect(result.isError).toBe(true);
+    expect(r.fullText).toBe("recovered");
+  });
+
   it("respects maxSteps", async () => {
     const client = scriptedClient([[{ type: "tool-call", id: "x", name: "listFiles", args: { path: "." } }]]);
     await runAgentLoop(base(client, { maxSteps: 3 }));

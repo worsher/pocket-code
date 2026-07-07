@@ -40,7 +40,15 @@ export function buildToolRegistry(backend: RuntimeBackend, workspace: string): T
       if (!def) {
         return { success: false, error: `Unknown tool: ${name}` };
       }
-      return def.execute(backend, args);
+      try {
+        return await def.execute(backend, args);
+      } catch (err) {
+        // 归一化落网:多数工具已自带 try/catch,但 runCommandTool(execTools.ts)不自带——
+        // App geek 本地路径 native 模块缺失等场景会同步/异步裸抛,若不在此兜底,异常将穿透
+        // registry 直达 runAgentLoop 并 reject 整轮循环,而不是把 {success:false} 喂回模型
+        // 让其继续(兑现头注释"工具内部异常均归一为 {success:false,error}"的契约)。
+        return { success: false, error: err instanceof Error ? err.message : String(err) };
+      }
     },
   };
 }
