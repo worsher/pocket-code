@@ -50,15 +50,15 @@
 | P7 | HMR 热更新隧道（WS upgrade 路由拆分 / WsTunnelHub / daemon 本地 ws 客户端） | specs+plans/2026-07-05-p7 |
 | P8 | codex/gemini-cli 适配器 + 注册表路由 + 删 cliRunner | specs+plans/2026-07-06-p8 |
 | — | DeepSeek V4 升级（Pro/Flash,默认与 auto 路由随迁） | specs/2026-07-06-deepseek-v4 |
+| P9 | agent-core 同构包+双侧接入,三套 loop 收编完成 | specs+plans/2026-07-06-p9 |
 
 ## 待办（按优先级）
 
-1. **P9 agent-core**（进行中）：同构 agent 包 + server/App 双侧接入，三套 loop 收编终局。设计见 specs/2026-07-06-p9。
-2. **P10 候选：多端客户端**：抽 `client-core` 包（serverConnection/chatReducer/relayClient 已平台无关），Web 端作为新消费者。预案见 P9 spec 第一部分候选四。
-3. **esbuild-wasm 离线前端预览**（模式 B/C）。
-4. **端侧 shell spike**（proot/Alpine over SELinux，真机验证）。
-5. **iOS**。
-6. 小增强：DeepSeek V4 think 参数透传、codex MCP/todo 事件精细渲染。
+1. **P10 候选：多端客户端**：抽 `client-core` 包（serverConnection/chatReducer/relayClient 已平台无关），Web 端作为新消费者。预案见 P9 spec 第一部分候选四。
+2. **esbuild-wasm 离线前端预览**（模式 B/C）。
+3. **端侧 shell spike**（proot/Alpine over SELinux，真机验证）。
+4. **iOS**。
+5. 小增强：DeepSeek V4 think 参数透传、codex MCP/todo 事件精细渲染。
 
 ## 拆分路线（评估结论,详见 specs/2026-07-06-p9 第一部分）
 

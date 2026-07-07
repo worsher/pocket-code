@@ -70,11 +70,19 @@
 ### 3. 核心接口
 
 ```ts
-// ── 消息(OpenAI 风格,含工具往返) ──
+// ── 消息(OpenAI 风格,含工具往返;实现落地版——见 packages/agent-core/src/types.ts) ──
+// user content 支持多模态(geek/server 均有 images 场景,纯 string 会丢图)。
+type ContentPart =
+  | { type: "text"; text: string }
+  | { type: "image"; base64: string; mimeType: string };
+
 type CoreMessage =
-  | { role: "system" | "user" | "assistant"; content: string }
-  | { role: "assistant"; content: string; toolCalls: { id: string; name: string; args: Record<string, unknown> }[] }
-  | { role: "tool"; toolCallId: string; content: string };
+  | { role: "system"; content: string }
+  | { role: "user"; content: string | ContentPart[] }
+  | { role: "assistant"; content: string; toolCalls?: ToolCallReq[] }
+  | { role: "tool"; toolCallId: string; toolName: string; content: string };
+
+interface ToolCallReq { id: string; name: string; args: Record<string, unknown> }
 
 // ── 模型客户端:只做"单步"——流一轮 assistant 输出,浮出 tool calls 不执行 ──
 interface ModelClient {
@@ -91,12 +99,21 @@ type ModelDelta =
   | { type: "tool-call"; id: string; name: string; args: Record<string, unknown> }
   | { type: "usage"; inputTokens: number; outputTokens: number };
 
-// ── 运行时后端:平台原语(重构设计 §3.6 裁剪为 MVP 所需) ──
+// ── 运行时后端:平台原语(重构设计 §3.6 裁剪为 MVP 所需;实现落地版) ──
+interface ExecResult { stdout: string; stderr: string; exitCode: number }
+
 interface RuntimeBackend {
   readFile(path: string): Promise<string>;
   writeFile(path: string, content: string): Promise<{ isNew: boolean }>;
   listFiles(path: string): Promise<{ name: string; type: "file" | "dir" }[]>;
-  exec(cmd: string, opts?: { timeoutMs?: number }): Promise<{ stdout: string; stderr: string; exitCode: number }>;
+  // 不抛非零:统一返回 exitCode。cwd/env 供 git 工具需要的子目录与 HOME 隔离;
+  // isolateHome=true 时 HOME 指向工作区等价目录(host/docker 的差异由 backend 消化)。
+  exec(cmd: string, opts?: { cwd?: string; timeoutMs?: number; env?: Record<string, string>; isolateHome?: boolean }): Promise<ExecResult>;
+  // 可选能力:进程级后台任务(App 现有 runInBackground/stopProcess)。ToolRegistry
+  // 按 backend 是否提供这两个方法裁剪对应工具的注册(server NodeBackend 未实现,
+  // App DeviceBackend 已实现)。
+  startProcess?(cmd: string, opts?: { cwd?: string }): Promise<{ processId: string }>;
+  stopProcess?(processId: string): Promise<void>;
 }
 
 // ── 工具注册表:声明+实现一份,实现只调 backend 原语 ──
@@ -107,9 +124,11 @@ type ToolImpl = (backend: RuntimeBackend, args: Record<string, unknown>) => Prom
 function runAgentLoop(opts: {
   modelClient: ModelClient;
   backend: RuntimeBackend;
+  workspace: string;                  // 供 registry 的 safePath
   system: string;
   history: CoreMessage[];             // 不含本轮 user 消息
   userMessage: string;
+  images?: { base64: string; mimeType: string }[];
   onEvent: (ev: AgentEventType) => void;   // wire 类型,import type
   signal?: AbortSignal;
   maxSteps?: number;                  // 默认 25(对齐 server 现值)

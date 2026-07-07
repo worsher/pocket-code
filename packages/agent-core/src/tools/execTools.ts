@@ -1,5 +1,5 @@
 // exec 类工具:行为等价迁移自 packages/server/src/tools.ts(runCommand/git 九件套)
-// 及 packages/app/src/services/aiClient.ts 的 TOOL_DEFINITIONS(runInBackground/stopProcess schema/description)。
+// 及 packages/app/src/services/aiClient.ts 旧版进程工具声明(runInBackground/stopProcess schema/description)。
 // core 包零依赖:不直接碰 child_process,而是经由 RuntimeBackend.exec/startProcess/stopProcess 抽象。
 import type { RuntimeBackend, ToolSchema } from "../types.js";
 import type { ToolDef } from "./registry.js";
@@ -433,7 +433,7 @@ export function buildExecTools(workspace: string): ToolDef[] {
   ];
 }
 
-/** 能力门控的进程工具:仅当 backend 提供 startProcess/stopProcess 时才注册(schema/description 迁自 aiClient TOOL_DEFINITIONS)。 */
+/** 能力门控的进程工具:仅当 backend 提供 startProcess/stopProcess 时才注册(schema/description 迁自 aiClient 旧版进程工具声明)。 */
 export function buildProcessTools(backend: RuntimeBackend): ToolDef[] {
   if (!backend.startProcess || !backend.stopProcess) return [];
 
