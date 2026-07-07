@@ -6,7 +6,7 @@ import { AppState } from "react-native";
 import { getModelConfig, getApiKeyField, MODELS } from "../services/modelConfig";
 import { updateSettings, type AppSettings } from "../store/settings";
 import { saveChatHistory, loadChatHistory, type StoredMessage } from "../store/chatHistory";
-import { executeLocalTool, writeLocalFile, getProjectWorkspaceRoot } from "../services/localFileSystem";
+import { executeLocalTool, writeLocalFile, getProjectWorkspaceRoot, getDefaultWorkspace } from "../services/localFileSystem";
 import type { StreamingPhase } from "../components/StreamingIndicator";
 import { enqueueMessage, getQueue, dequeueMessage } from "../services/offlineQueue";
 import { sendLocalNotification } from "../services/notifications";
@@ -14,7 +14,7 @@ import { ServerConnection, type ConnectionConfig, type ConnectionHandlers } from
 import { applyAgentEvent, phaseFor, truncateCoreHistory, storedToCoreMessages } from "./chatReducer";
 import type { Message, ImageAttachment } from "./chatReducer";
 import { createRnModelClient } from "../services/rnModelClient";
-import { createDeviceBackend, GEEK_WORKSPACE } from "../services/deviceBackend";
+import { createDeviceBackend } from "../services/deviceBackend";
 import { runAgentLoop, buildSystemPrompt, type CoreMessage } from "@pocket-code/agent-core";
 import type { AgentEventType } from "@pocket-code/wire";
 
@@ -319,18 +319,24 @@ export function useAgent({ settings, model = "deepseek-v4-flash", customPrompt, 
       setIsStreaming(true);
       setStreamingPhase("connecting");
 
+      // 复审修复:workspace 改传真实设备工作区根,不再用字面量 "/" 或 sentinel
+      // ("/workspace")。与 createDeviceBackend 内部解析真实路径用的是同一个值
+      // (单一真相),避免该值经 runCommand/git 工具的 cwd、以及 searchFiles 拼进
+      // grep 命令字符串后,泄漏一个真实 shell 不认识的虚拟路径(详见
+      // deviceBackend.ts 顶部注释)。
+      const geekWorkspaceRoot = getProjectWorkspaceRoot(projectIdRef.current) ?? getDefaultWorkspace();
+
       const abortController = new AbortController();
       abortRef.current = abortController;
       try {
         const { messages: nextHistory } = await runAgentLoop({
           modelClient: createRnModelClient({ modelConfig, apiKey }),
-          backend: createDeviceBackend({ projectId: projectIdRef.current, execTool: executeTool }),
-          // C1 修复:workspace 不能是字面量 "/"——core safePath("/", path) 的
-          // `full.startsWith(ws + "/")` 检查在 ws==="/" 时变成 startsWith("//"),
-          // 导致几乎所有正常路径都被误判为路径穿越。GEEK_WORKSPACE("/workspace")
-          // 是纯粹喂给 safePath 的哨兵根,真实路径解析仍由 DeviceBackend 内部的
-          // workspaceRoot()(projectId → 真实目录)完成,见 deviceBackend.ts。
-          workspace: GEEK_WORKSPACE,
+          backend: createDeviceBackend({
+            projectId: projectIdRef.current,
+            execTool: executeTool,
+            workspaceRoot: geekWorkspaceRoot,
+          }),
+          workspace: geekWorkspaceRoot,
           system: buildSystemPrompt({ customPrompt: customPromptRef.current }),
           history: coreHistoryRef.current, // newSession/项目切换处重置为 [];loadSession 重建自存档(I1)
           userMessage: content,

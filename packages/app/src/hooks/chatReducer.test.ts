@@ -190,7 +190,7 @@ describe("storedToCoreMessages (I1: loadSession core history reconstruction)", (
     expect(storedToCoreMessages(stored)).toEqual([{ role: "assistant", content: "ok" }]);
   });
 
-  it("skips a tool message when the stored toolCall has no result yet", () => {
+  it("backfills a synthetic aborted tool message when the stored toolCall has no result yet (parity with agent-core loop.ts abort backfill)", () => {
     const stored: StoredMessage[] = [
       {
         id: "1",
@@ -203,7 +203,17 @@ describe("storedToCoreMessages (I1: loadSession core history reconstruction)", (
     const out = storedToCoreMessages(stored);
     expect(out).toEqual([
       { role: "assistant", content: "", toolCalls: [{ id: "stored-0-0", name: "readFile", args: { path: "a.ts" } }] },
+      {
+        role: "tool",
+        toolCallId: "stored-0-0",
+        toolName: "readFile",
+        content: JSON.stringify({ success: false, error: "aborted" }),
+      },
     ]);
+    // toolCallId must line up with the assistant's toolCalls[i].id.
+    const assistantMsg = out[0] as { toolCalls: { id: string }[] };
+    const toolMsg = out[1] as { toolCallId: string };
+    expect(toolMsg.toolCallId).toBe(assistantMsg.toolCalls[0].id);
   });
 
   it("returns an empty array for an empty session", () => {

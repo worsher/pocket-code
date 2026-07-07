@@ -116,6 +116,11 @@ export function truncateCoreHistory(history: CoreMessage[], keepUserTurns: numbe
  *   toolCalls[i].id 对齐;result 非 string 时 JSON.stringify)。StoredMessage 的
  *   toolCalls 不含 id(旧存档字段),这里合成稳定 id `stored-${msgIndex}-${i}`,
  *   assistant 消息与紧随的 tool 消息必须使用同一个 id。
+ * - 复审裁定:无 result 的 toolCall(异常中断的旧存档)也必须补一条配对 tool 消息,
+ *   而不是跳过——下游 runAgentLoop/ModelClient 的消息不变量要求每个
+ *   assistant.toolCalls[i] 都有对应的 tool 消息,否则 Chat API 400。与
+ *   agent-core loop.ts 的 abort 补齐先例一致(见该文件"I-1"注释),补齐内容为
+ *   `JSON.stringify({success:false, error:"aborted"})`。
  * - assistant 纯文本(无 toolCalls 或为空数组)→ assistant(content)。
  */
 export function storedToCoreMessages(stored: StoredMessage[]): CoreMessage[] {
@@ -150,8 +155,12 @@ export function storedToCoreMessages(stored: StoredMessage[]): CoreMessage[] {
       }));
       result.push({ role: "assistant", content: msg.content, toolCalls });
       msg.toolCalls.forEach((tc, i) => {
-        if (tc.result === undefined) return;
-        const content = typeof tc.result === "string" ? tc.result : JSON.stringify(tc.result);
+        const content =
+          tc.result === undefined
+            ? JSON.stringify({ success: false, error: "aborted" })
+            : typeof tc.result === "string"
+              ? tc.result
+              : JSON.stringify(tc.result);
         result.push({
           role: "tool",
           toolCallId: `stored-${index}-${i}`,
