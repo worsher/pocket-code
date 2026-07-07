@@ -3,7 +3,8 @@
 // 对照 packages/server/src/nodeBackend.ts(server 侧 RuntimeBackend 实现)。
 //
 // readFile/writeFile/listFiles → localFileSystem 的 readLocalFile/writeLocalFile/
-// listLocalFiles(路径基 getProjectWorkspaceRoot(projectId) ?? getDefaultWorkspace())。
+// listLocalFiles(路径基:调用方传入的 opts.workspaceRoot,单一真相,见
+// CreateDeviceBackendOpts 与下方 NEW-2 修复说明)。
 // exec → execTool("runCommand", {command}),解析其 {success,stdout,stderr,error} 回
 // ExecResult(core registry 的 runCommandTool 按 exitCode===0 判定成功——见
 // packages/agent-core/src/tools/execTools.ts runCommandTool)。
@@ -23,9 +24,20 @@
 // 把哨兵串重新解析回真实根——于是 runCommand/git 在不存在的 "/workspace" 目录下必然
 // 失败,searchFiles 拼出的 grep 目标路径在真实文件系统里也不存在。
 //
-// 修复:workspace 改传真实设备工作区根(与本文件内 workspaceRoot() 同源:
-// getProjectWorkspaceRoot(projectId) ?? getDefaultWorkspace()),不再使用任何 sentinel。
-// toRelativePath 剥离的前缀就是这个真实根,exec 的 cwd 翻译也以它为界(见 exec 实现)。
+// 修复:workspace 改传真实设备工作区根(调用方——useAgent.ts——算好后同时传给
+// runAgentLoop 的 workspace 与 createDeviceBackend 的 workspaceRoot),不再使用
+// 任何 sentinel。toRelativePath 剥离的前缀就是这个真实根,exec 的 cwd 翻译也以它
+// 为界(见 exec 实现)。
+//
+// ── 三次复审修复(NEW-2):exec 的 cwd 翻译需同时兼容"原始根"与"归一化根"两种形状 ──
+// core 工具(runCommandTool/gitCloneTool/searchFilesTool 等)传给 backend.exec 的
+// cwd 是原始 workspace 字符串(真机上形如 `file:///data/.../workspace`,未经
+// safePath 归一化),而不是 buildToolRegistry 内部 safePath(root, relPath) 产出的
+// 归一化路径。之前的实现只把 opts.cwd 与 normalizedRoot(root)(即 `ws`)比较,
+// 导致原始 root 形状的 cwd(两个分支都不匹配)落入 else 原样转发,
+// localExecutor.resolveCwd 把 `file:///...`(不以单个 "/" 开头的形态)当相对路径
+// 拼接,产出错误 cwd。修复为对 root(原始根)与 ws(归一化根)两种形状都做判断
+// (见 exec 实现里的三段 if/else if/else)。
 //
 // 已知边界(不做处理):当 workspaceMode !== "local" 时,executeTool 会经
 // conn.execTool 走 Termux/WS 远端执行,而 searchFiles 拼进 grep 命令里的路径是本
@@ -34,13 +46,7 @@
 // 而言这个路径可能并不存在/不匹配。这是本轮修复范围之外的已知限制。
 import { safePath } from "@pocket-code/agent-core";
 import type { ExecResult, RuntimeBackend } from "@pocket-code/agent-core";
-import {
-  readLocalFile,
-  writeLocalFile,
-  listLocalFiles,
-  getProjectWorkspaceRoot,
-  getDefaultWorkspace,
-} from "./localFileSystem";
+import { readLocalFile, writeLocalFile, listLocalFiles } from "./localFileSystem";
 
 /**
  * core 的 safePath(workspace, ".") 内部先对 `workspace` 做 POSIX 归一化
@@ -60,8 +66,8 @@ function normalizedRoot(root: string): string {
  * 把 core safePath(workspaceRoot, path) 产出的绝对路径转换为相对于
  * localFileSystem workspaceRoot 的相对路径。
  *
- * `root` 必须与喂给 runAgentLoop 的 `workspace` 参数、以及本文件
- * `workspaceRoot()` 闭包产出的值是同一个真实根(单一真相,见 createDeviceBackend)。
+ * `root` 必须与喂给 runAgentLoop 的 `workspace` 参数、以及
+ * `createDeviceBackend` 的 `opts.workspaceRoot` 是同一个真实根(单一真相)。
  * 比较前先对 `root` 做与 core safePath 相同的归一化(见 normalizedRoot)。
  *
  * 边界情况:
@@ -101,24 +107,30 @@ export function parseExecResult(result: unknown): ExecResult {
 }
 
 export interface CreateDeviceBackendOpts {
+  /**
+   * 不再被内部使用(Minor 修复:统一改用 workspaceRoot 单源,避免与内部重新求根
+   * 的闭包出现"双真相")。字段保留仅为兼容调用方现有传参,不参与路径解析。
+   */
   projectId?: string;
   execTool: (name: string, args: Record<string, unknown>) => Promise<unknown>;
   /**
    * 真实设备工作区根,须与调用方传给 runAgentLoop 的 `workspace` 参数是同一个值
    * (单一真相)。通常是 `getProjectWorkspaceRoot(projectId) ?? getDefaultWorkspace()`。
+   * 本文件内部的路径解析(readFile/writeFile/listFiles 的 base、exec 的 cwd
+   * 翻译)一律只使用这个传入值,不在内部重新调用 getProjectWorkspaceRoot/
+   * getDefaultWorkspace 求根。
    */
   workspaceRoot: string;
 }
 
 export function createDeviceBackend(opts: CreateDeviceBackendOpts): RuntimeBackend {
-  const { projectId, execTool, workspaceRoot: root } = opts;
+  const { execTool, workspaceRoot: root } = opts;
   const ws = normalizedRoot(root);
-  const workspaceRoot = () => getProjectWorkspaceRoot(projectId) ?? getDefaultWorkspace();
 
   return {
     async readFile(path: string): Promise<string> {
       const rel = toRelativePath(path, root);
-      const result = await readLocalFile(rel, workspaceRoot());
+      const result = await readLocalFile(rel, root);
       if (!result.success) {
         throw new Error(result.error || "Failed to read file");
       }
@@ -130,10 +142,10 @@ export function createDeviceBackend(opts: CreateDeviceBackendOpts): RuntimeBacke
       // localFileSystem.writeLocalFile 不返回 isNew;沿用 core writeFileTool 的
       // "写入前先 readFile 探测存在性" 模式来判定(见 fileTools.ts writeFileTool)。
       let isNew = false;
-      const before = await readLocalFile(rel, workspaceRoot());
+      const before = await readLocalFile(rel, root);
       if (!before.success) isNew = true;
 
-      const result = await writeLocalFile(rel, content, workspaceRoot());
+      const result = await writeLocalFile(rel, content, root);
       if (!result.success) {
         throw new Error(result.error || "Failed to write file");
       }
@@ -142,7 +154,7 @@ export function createDeviceBackend(opts: CreateDeviceBackendOpts): RuntimeBacke
 
     async listFiles(path: string): Promise<{ name: string; type: "file" | "dir" }[]> {
       const rel = toRelativePath(path, root);
-      const result = await listLocalFiles(rel, workspaceRoot());
+      const result = await listLocalFiles(rel, root);
       if (!result.success) {
         throw new Error(result.error || "Failed to list files");
       }
@@ -153,13 +165,21 @@ export function createDeviceBackend(opts: CreateDeviceBackendOpts): RuntimeBacke
     },
 
     // M-obs1 修复:此前完全丢弃 opts,exec 里的 cwd/timeoutMs 调用方设置无效。
-    // cwd 翻译(本轮修复新增):core 的 runCommandTool/git 工具会把 `workspace`
-    // (真实根 root)或其子路径当作 cwd 传进来——这些是 core safePath 产出的
-    // "workspace 视角"路径,不是 localFileSystem/executor 认识的相对路径:
-    //   - cwd === root → 不转发 cwd(让 executeLocalTool 的 "runCommand" case
-    //     走 args.cwd undefined → localExecutor.resolveCwd 默认解析到 workspace 根)。
-    //   - cwd startsWith root + "/" → 剥成相对路径转发(如 "sub/dir")。
-    //   - 其他值(理论上不应出现,如显式子目录名的 git resolveGitCwd 结果)原样转发。
+    // cwd 翻译(NEW-2 修复:同时兼容原始根/归一化根两种形状):core 的
+    // runCommandTool/gitCloneTool/searchFilesTool 等把 `workspace` 参数(**原始**
+    // root 字符串,未经 safePath 归一化)或其子路径当作 cwd 传进来;而 8 个 git
+    // 工具经 resolveGitCwd 拼出的 cwd 则是 safePath(root, ...) 产出的**归一化后**
+    // 绝对路径。两者都不是 localFileSystem/executor 认识的相对路径,必须都覆盖到:
+    //   - cwd === root(原始根)或 cwd === ws(归一化根) → 不转发 cwd(让
+    //     executeLocalTool 的 "runCommand" case 走 args.cwd undefined →
+    //     localExecutor.resolveCwd 默认解析到 workspace 根)。
+    //   - cwd startsWith root + "/" → 按原始根剥成相对路径转发(如 "sub/dir")。
+    //   - cwd startsWith ws + "/" → 按归一化根剥成相对路径转发。
+    //   - 其他值(理论上不应出现)原样转发。
+    // 真机上 root(如 `file:///data/.../workspace`)与 ws(经 core resolvePosix
+    // 折叠三斜杠后如 `/file:/data/.../workspace`)不同,只比较其中一个会让另一个
+    // 形状的 cwd 落入 else 原样转发,localExecutor.resolveCwd 把不以单个 "/" 开头
+    // 的 `file://...` 当相对路径拼接,产出错误 cwd——这正是 NEW-2 的根因。
     // timeoutMs 透传给 execTool 的 args——"runCommand" 在 localFileSystem.executeLocalTool
     // 里本就读 args.cwd(见该文件 "runCommand" case),timeoutMs 目前
     // executeLocalTool 尚未消费(仍固定 60s 超时),但透传本身对不认识该字段的
@@ -171,8 +191,15 @@ export function createDeviceBackend(opts: CreateDeviceBackendOpts): RuntimeBacke
     async exec(cmd: string, opts?: { cwd?: string; timeoutMs?: number; env?: Record<string, string>; isolateHome?: boolean }): Promise<ExecResult> {
       const args: Record<string, unknown> = { command: cmd };
       if (opts?.cwd !== undefined) {
-        if (opts.cwd === ws) {
+        if (opts.cwd === root || opts.cwd === ws) {
           // 不转发:executor 默认 cwd 即工作区根。
+          // 两种形状都判断:core 传入的 cwd 可能是原始 root(如 execTools.ts
+          // runCommandTool 恒传的 `cwd: workspace` 字面量),也可能是经
+          // safePath 归一化后的绝对路径(如 resolveGitCwd 拼出的路径)。真实
+          // 设备根形如 `file:///data/.../workspace` 时 root !== ws(见
+          // normalizedRoot 顶部注释),两者都必须命中才能覆盖真实场景。
+        } else if (opts.cwd.startsWith(root + "/")) {
+          args.cwd = opts.cwd.slice(root.length + 1);
         } else if (opts.cwd.startsWith(ws + "/")) {
           args.cwd = opts.cwd.slice(ws.length + 1);
         } else {
