@@ -150,9 +150,11 @@ setInterval(cleanupStaleDaemons, 20 * 1000);
 
 // ── Connection Handling ───────────────────────────────
 
-wss.on("connection", (ws: WebSocket) => {
+wss.on("connection", (ws: WebSocket, req) => {
   const state = createConnState();
-  console.log("[Relay] New connection");
+  const remote = req.headers["x-forwarded-for"] || req.socket.remoteAddress || "unknown";
+  const ua = req.headers["user-agent"] || "-";
+  console.log(`[Relay] New connection from ${remote} ua=${ua}`);
 
   ws.on("message", (raw: Buffer) => {
     handleRelayInbound(ws, raw.toString(), state, {
@@ -163,8 +165,10 @@ wss.on("connection", (ws: WebSocket) => {
     });
   });
 
-  ws.on("close", () => {
-    console.log(`[Relay] Connection closed (role: ${state.role})`);
+  ws.on("close", (code: number, reason: Buffer) => {
+    console.log(
+      `[Relay] Connection closed (role: ${state.role}, code: ${code}, reason: ${reason.toString() || "-"})`
+    );
     if (state.role === "daemon") {
       unregisterDaemon(ws);
       // 只中止该 daemon 的隧道(原 abortAll 全断)

@@ -13,7 +13,7 @@ import { WebSocket } from "ws";
 
 // Mock WebSocket
 class MockWebSocket {
-  readyState = WebSocket.OPEN;
+  readyState: number = WebSocket.OPEN;
   sent: any[] = [];
   closeCalled = false;
   
@@ -114,6 +114,33 @@ describe("Relay Routing & Discovery", () => {
     const mAppWs = appWs as unknown as MockWebSocket;
     expect(mAppWs.sent.length).toBe(1);
     expect(mAppWs.sent[0]).toEqual(responsePayload);
+
+    unregisterDaemon(daemonWs);
+  });
+
+  it("should fail pairing immediately when the selected daemon socket is closed", () => {
+    const daemonWs = new MockWebSocket() as unknown as WebSocket;
+    registerDaemon(daemonWs, "m_closed_pair", "ClosedPairingTarget");
+    (daemonWs as unknown as MockWebSocket).readyState = WebSocket.CLOSED;
+
+    const appWs = new MockWebSocket() as unknown as WebSocket;
+
+    const pairForwarded = forwardPairRequest(
+      appWs,
+      "ABCD2345",
+      "iphone_1",
+      "My iPhone",
+      "m_closed_pair"
+    );
+
+    expect(pairForwarded).toBe(false);
+    expect((daemonWs as unknown as MockWebSocket).sent).toHaveLength(0);
+    expect((appWs as unknown as MockWebSocket).sent.at(-1)).toEqual({
+      type: "pair-response",
+      success: false,
+      error: "Daemon m_closed_pair is not online.",
+    });
+    expect(forwardPairResponse("m_closed_pair", { type: "pair-response", success: true })).toBe(false);
 
     unregisterDaemon(daemonWs);
   });

@@ -3,6 +3,7 @@
 // and forwards pairing requests/responses.
 
 import { WebSocket } from "ws";
+import { relayLog } from "./log.js";
 
 // ── Types ─────────────────────────────────────────────
 
@@ -169,6 +170,7 @@ export function forwardPairRequest(
   } else if (daemons.size === 1) {
     targetDaemon = daemons.values().next().value;
   } else if (daemons.size === 0) {
+    relayLog("Pair request rejected: no daemon online");
     sendJSON(appSocket, {
       type: "pair-response",
       success: false,
@@ -176,6 +178,7 @@ export function forwardPairRequest(
     });
     return false;
   } else {
+    relayLog(`Pair request rejected: multiple daemons online (${daemons.size})`);
     sendJSON(appSocket, {
       type: "pair-response",
       success: false,
@@ -186,6 +189,7 @@ export function forwardPairRequest(
   }
 
   if (!targetDaemon) {
+    relayLog(`Pair request rejected: daemon ${machineId} is not online`);
     sendJSON(appSocket, {
       type: "pair-response",
       success: false,
@@ -194,18 +198,31 @@ export function forwardPairRequest(
     return false;
   }
 
-  // Track this pending pair request so we can route the response back
-  const pending = pendingPairs.get(targetDaemon.machineId) || [];
-  pending.push({ appSocket, requestedAt: Date.now() });
-  pendingPairs.set(targetDaemon.machineId, pending);
-
   // Forward to daemon
-  return sendJSON(targetDaemon.socket, {
+  const forwarded = sendJSON(targetDaemon.socket, {
     type: "pair-request",
     pairingCode,
     deviceId,
     deviceName,
   });
+  if (!forwarded) {
+    relayLog(`Pair request rejected: daemon ${targetDaemon.machineId} socket is not open`);
+    sendJSON(appSocket, {
+      type: "pair-response",
+      success: false,
+      error: `Daemon ${targetDaemon.machineId} is not online.`,
+    });
+    return false;
+  }
+
+  relayLog(`Pair request forwarded to daemon ${targetDaemon.machineId}`);
+
+  // Track this pending pair request so we can route the response back
+  const pending = pendingPairs.get(targetDaemon.machineId) || [];
+  pending.push({ appSocket, requestedAt: Date.now() });
+  pendingPairs.set(targetDaemon.machineId, pending);
+
+  return true;
 }
 
 /**
@@ -227,7 +244,9 @@ export function forwardPairResponse(
     pendingPairs.delete(machineId);
   }
 
-  return sendJSON(request.appSocket, response);
+  const sent = sendJSON(request.appSocket, response);
+  relayLog(`Pair response from daemon ${machineId} sentToApp=${sent}`);
+  return sent;
 }
 
 // ── Heartbeat Cleanup ─────────────────────────────────

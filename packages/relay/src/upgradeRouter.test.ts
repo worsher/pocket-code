@@ -80,6 +80,28 @@ describe("upgrade routing", () => {
     ws.close();
   });
 
+  it("routes /relay upgrades to the control channel even when a tunnel cookie exists", async () => {
+    const ctx = await startRelay(); ctxs.push(ctx);
+    const ws = new WebSocket(`ws://127.0.0.1:${ctx.port}/relay`, {
+      headers: { cookie: "pc_tunnel=m_Y:3000" },
+    });
+    await waitOpen(ws);
+    await until(() => ctx.controlConnections === 1);
+    expect(ctx.daemonFrames).toHaveLength(0);
+    ws.close();
+  });
+
+  it("routes /relay/ (trailing slash) upgrades to the control channel even when a tunnel cookie exists", async () => {
+    const ctx = await startRelay(); ctxs.push(ctx);
+    const ws = new WebSocket(`ws://127.0.0.1:${ctx.port}/relay/`, {
+      headers: { cookie: "pc_tunnel=m_Y:3000" },
+    });
+    await waitOpen(ws);
+    await until(() => ctx.controlConnections === 1);
+    expect(ctx.daemonFrames).toHaveLength(0);
+    ws.close();
+  });
+
   it("routes plain upgrades to the control channel", async () => {
     const ctx = await startRelay(); ctxs.push(ctx);
     const ws = new WebSocket(`ws://127.0.0.1:${ctx.port}/`);

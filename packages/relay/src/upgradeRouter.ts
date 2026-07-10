@@ -56,12 +56,13 @@ function dispatchUpgrade(
     let port = 0;
     let path = "";
 
+    const isControlPath = url.pathname === "/relay" || url.pathname === "/relay/";
     const m = url.pathname.match(TUNNEL_PATH_RE);
     if (m) {
       machineId = m[1];
       port = parseInt(m[2], 10);
       path = (m[3] || "/") + (url.search || "");
-    } else {
+    } else if (!isControlPath) {
       const c = (req.headers.cookie || "").match(TUNNEL_COOKIE_RE);
       if (c) {
         machineId = c[1];

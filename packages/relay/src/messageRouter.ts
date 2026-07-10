@@ -5,6 +5,7 @@
 import { WebSocket } from "ws";
 import { RelayInbound } from "@pocket-code/wire";
 import { verifyDaemonAuth } from "./config.js";
+import { relayLog } from "./log.js";
 import type { RequestTracker } from "./requestTracker.js";
 import type { TunnelHub } from "./tunnelHub.js";
 import { WsTunnelHub } from "./wsTunnelHub.js";
@@ -63,6 +64,7 @@ export function handleRelayInbound(
     const t = (json as Record<string, unknown> | null)?.type;
     // 配对请求格式非法时回 pair-response,App 配对 UI 才能显示失败
     if (t === "pair-request") {
+      relayLog("Rejected invalid pair-request format");
       sendJSON(ws, { type: "pair-response", success: false, error: "Invalid pairing request format" });
     } else {
       console.warn(`[Relay] Rejected invalid message (type=${String(t)}): ${raw.slice(0, 200)}`);
@@ -184,6 +186,7 @@ export function handleRelayInbound(
         return;
       }
       state.role = "app";
+      relayLog(`App list-machines; online=${getOnlineMachines().length}`);
       sendJSON(ws, { type: "machines-list", machines: getOnlineMachines() });
       return;
     }
@@ -196,6 +199,9 @@ export function handleRelayInbound(
         return;
       }
       state.role = "app";
+      relayLog(
+        `App pair-request target=${msg.machineId || "<auto>"} device=${msg.deviceName}`
+      );
       forwardPairRequest(ws, msg.pairingCode, msg.deviceId, msg.deviceName, msg.machineId);
       return;
     }
@@ -208,6 +214,9 @@ export function handleRelayInbound(
         return;
       }
       state.role = "app";
+      relayLog(
+        `App relay-request machine=${msg.machineId} request=${msg.requestId} payload=${(msg.payload as Record<string, unknown>)?.type || "<unknown>"}`
+      );
       deps.requests.track(msg.requestId, ws, msg.machineId);
       const forwarded = forwardToDaemon(msg.machineId, msg.requestId, msg.token, msg.payload);
       if (!forwarded) {
