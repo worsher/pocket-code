@@ -12,3 +12,153 @@
 * { box-sizing: border-box; }
 body { margin: 0; background: var(--bg); color: var(--fg); font: 14px/1.5 -apple-system, sans-serif; }
 .app { display: flex; flex-direction: column; height: 100vh; }
+
+/* ConnectPage */
+.connect-page {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  height: 100vh;
+  padding: 20px;
+}
+.connect-page h1 {
+  margin: 0 0 30px 0;
+  font-size: 32px;
+  font-weight: 600;
+}
+.connect-page label {
+  display: flex;
+  flex-direction: column;
+  margin: 15px 0;
+  width: 100%;
+  max-width: 400px;
+}
+.connect-page label input {
+  margin-top: 8px;
+  padding: 8px 12px;
+  background: var(--bg-panel);
+  border: 1px solid var(--border);
+  color: var(--fg);
+  border-radius: 4px;
+  font: inherit;
+}
+.connect-page label input:focus {
+  outline: none;
+  border-color: var(--accent);
+}
+.connect-page button {
+  margin: 15px 0;
+  padding: 8px 16px;
+  background: var(--bg-panel);
+  border: 1px solid var(--border);
+  color: var(--fg);
+  cursor: pointer;
+  border-radius: 4px;
+  font: inherit;
+}
+.connect-page button:hover:not(:disabled) {
+  background: #252d36;
+}
+.connect-page button:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+.connect-page button.primary {
+  background: var(--accent);
+  color: #000;
+  border-color: var(--accent);
+  font-weight: 600;
+  width: 100%;
+  max-width: 400px;
+}
+.connect-page .mode-switch {
+  display: flex;
+  gap: 10px;
+  margin-bottom: 20px;
+  width: 100%;
+  max-width: 400px;
+}
+.connect-page .mode-switch button {
+  flex: 1;
+  margin: 0;
+}
+.connect-page .mode-switch button.active {
+  border-color: var(--accent);
+}
+.connect-page .hint {
+  color: var(--fg-dim);
+  font-size: 12px;
+  margin: 15px 0;
+  max-width: 400px;
+  text-align: center;
+}
+.connect-page .status {
+  color: var(--fg-dim);
+  margin: 10px 0;
+  max-width: 400px;
+  text-align: center;
+}
+
+/* TopBar */
+.topbar {
+  display: flex;
+  flex-direction: row;
+  align-items: center;
+  gap: 20px;
+  padding: 12px 16px;
+  background: var(--bg-panel);
+  border-bottom: 1px solid var(--border);
+}
+.topbar nav {
+  display: flex;
+  gap: 10px;
+}
+.topbar button {
+  padding: 6px 12px;
+  background: transparent;
+  border: 1px solid transparent;
+  color: var(--fg);
+  cursor: pointer;
+  border-radius: 4px;
+  font: inherit;
+}
+.topbar button:hover {
+  background: #252d36;
+}
+.topbar button.active {
+  border-color: var(--accent);
+}
+.topbar button:last-child {
+  margin-left: auto;
+}
+
+/* Connection dot */
+.conn-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  display: inline-block;
+}
+.conn-dot.on {
+  background: var(--green);
+}
+.conn-dot.off {
+  background: var(--red);
+}
+
+/* Auth error bar */
+.auth-error {
+  background: var(--red);
+  color: #000;
+  padding: 12px 16px;
+  font-weight: 600;
+  text-align: center;
+}
+
+/* Content area */
+.content {
+  flex: 1;
+  overflow: auto;
+  padding: 16px;
+}
