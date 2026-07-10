@@ -46,9 +46,13 @@ export async function proxyToLocalhost(
     }
     const resp = await fetchImpl(url, init);
 
+    // fetch(undici) 已自动解压 body,但 headers 仍保留压缩响应的
+    // content-encoding/content-length——原样转发会让浏览器按 gzip 解码明文
+    // (ERR_CONTENT_DECODING_FAILED)。体已变,头必须跟着变。
+    const RESP_STRIP = new Set(["content-encoding", "content-length"]);
     const headers: Record<string, string> = {};
     resp.headers.forEach((v, k) => {
-      headers[k] = v;
+      if (!RESP_STRIP.has(k.toLowerCase())) headers[k] = v;
     });
     emit({ type: "tunnel-response", tunnelId: req.tunnelId, status: resp.status, headers });
 

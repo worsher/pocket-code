@@ -79,6 +79,38 @@ describe("proxyToLocalhost", () => {
     expect(body).toBe("got:ping");
   });
 
+  it("strips content-encoding/content-length from forwarded headers (fetch 已自动解压,原头是谎言)", async () => {
+    // 模拟 undici fetch 的行为:body 已解压为明文,但 headers 仍保留压缩响应的
+    // content-encoding/content-length。若原样转发,浏览器会按 gzip 解码明文而
+    // ERR_CONTENT_DECODING_FAILED(真机 Payload/Next.js 复现)。
+    const fakeFetch = (async () =>
+      new Response("<!DOCTYPE html><p>plain</p>", {
+        status: 200,
+        headers: {
+          "content-encoding": "gzip",
+          "content-length": "999",
+          "content-type": "text/html; charset=utf-8",
+        },
+      })) as unknown as typeof fetch;
+
+    const frames: HttpReplyFrame[] = [];
+    await proxyToLocalhost(
+      { tunnelId: "t_enc", port: 1, method: "GET", path: "/", headers: {} },
+      collect(frames),
+      fakeFetch
+    );
+    const resp = frames.find((f) => f.type === "tunnel-response") as any;
+    expect(resp.status).toBe(200);
+    expect(resp.headers["content-encoding"]).toBeUndefined();
+    expect(resp.headers["content-length"]).toBeUndefined();
+    expect(resp.headers["content-type"]).toBe("text/html; charset=utf-8");
+    const body = frames
+      .filter((f) => f.type === "tunnel-chunk")
+      .map((f: any) => Buffer.from(f.data, "base64").toString("utf-8"))
+      .join("");
+    expect(body).toBe("<!DOCTYPE html><p>plain</p>");
+  });
+
   it("emits tunnel-end with error when the upstream is unreachable", async () => {
     const frames: HttpReplyFrame[] = [];
     // 关掉 server,端口不可达
