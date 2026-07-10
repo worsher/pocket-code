@@ -1,0 +1,14 @@
+:root {
+  --bg: #111418;
+  --bg-panel: #1a1f26;
+  --fg: #e6e6e6;
+  --fg-dim: #8a919c;
+  --accent: #4f9cf9;
+  --green: #3fb950;
+  --red: #f85149;
+  --border: #2b3138;
+  --mono: ui-monospace, SFMono-Regular, Menlo, monospace;
+}
+* { box-sizing: border-box; }
+body { margin: 0; background: var(--bg); color: var(--fg); font: 14px/1.5 -apple-system, sans-serif; }
+.app { display: flex; flex-direction: column; height: 100vh; }
