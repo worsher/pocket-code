@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import type { WebAgentStore } from "../webAgentStore";
 
 interface Entry { name: string; type: "directory" | "file" }
@@ -9,27 +9,35 @@ export default function FilesPage({ store }: { store: WebAgentStore }) {
   const [error, setError] = useState("");
   const [filePath, setFilePath] = useState<string | null>(null);
   const [content, setContent] = useState("");
+  const dirGen = useRef(0);
+  const fileGen = useRef(0);
 
   async function loadDir(path: string) {
+    const gen = ++dirGen.current;
     setError("");
     try {
       const resp = await store.conn.listFiles(path);
+      if (gen !== dirGen.current) return; // 已被更新的导航取代,丢弃过期响应
       if (resp.success === false) throw new Error(resp.error || "列目录失败");
       setDir(path);
       setEntries((resp.items ?? []) as Entry[]);
     } catch (err) {
+      if (gen !== dirGen.current) return;
       setError(err instanceof Error ? err.message : String(err));
     }
   }
 
   async function openFile(path: string) {
+    const gen = ++fileGen.current;
     setError("");
     try {
       const resp = await store.conn.readFile(path);
+      if (gen !== fileGen.current) return; // 丢弃过期响应
       if (resp.success === false) throw new Error(resp.error || "读文件失败");
       setFilePath(path);
       setContent(String(resp.content ?? ""));
     } catch (err) {
+      if (gen !== fileGen.current) return;
       setError(err instanceof Error ? err.message : String(err));
     }
   }
