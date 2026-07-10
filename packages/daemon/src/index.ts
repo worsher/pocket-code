@@ -18,7 +18,7 @@ import crypto from "crypto";
 import { readFileSync, writeFileSync, mkdirSync } from "fs";
 import { join, resolve } from "path";
 import { homedir } from "os";
-import { RelayConnection } from "./connection.js";
+import { startTunnelClient, type TunnelClientHandle } from "@pocket-code/tunnel-client";
 import {
   generatePairingCode,
   verifyPairingCode,
@@ -26,7 +26,6 @@ import {
   getPairingCodeInfo,
 } from "./pairing.js";
 import { loadDevices, getDevices } from "./deviceStore.js";
-import { proxyToLocalhost, openLocalWebSocket, onWsTunnelData, onWsTunnelClose, closeAllWsTunnels } from "./tunnel.js";
 import { createMessageHandler, type MessageHandler } from "@pocket-code/server/messageHandler";
 import { initDb } from "@pocket-code/server/db";
 import { requireRelaySecret } from "./config.js";
@@ -126,7 +125,7 @@ if (devices.length > 0) {
 
 // ── Connect to Relay ──────────────────────────────────
 
-const connection = new RelayConnection({
+const connection: TunnelClientHandle = startTunnelClient({
   relayUrl: RELAY_URL,
   machineId: MACHINE_ID,
   machineName: MACHINE_NAME,
@@ -138,15 +137,13 @@ const connection = new RelayConnection({
 
   onDisconnected() {
     console.log("[Daemon] Lost connection to relay.");
-    closeAllWsTunnels();
   },
 
+  // 隧道帧由 tunnel-client 自消化;这里只接业务消息(pair-request/forward-request)
   onMessage(msg: DaemonInboundType) {
     handleRelayMessage(msg);
   },
 });
-
-connection.connect();
 
 // ── Device Handler Pool ──────────────────────────────
 // Maintain one handler per device so session/auth state persists across requests.
@@ -177,11 +174,6 @@ setInterval(() => {
 
 function handleRelayMessage(msg: DaemonInboundType) {
   switch (msg.type) {
-    case "daemon-registered": {
-      console.log("[Daemon] Registration confirmed by relay");
-      break;
-    }
-
     // ── Pairing request from App ──────────────────
     case "pair-request": {
       console.log(
@@ -288,46 +280,6 @@ function handleRelayMessage(msg: DaemonInboundType) {
       break;
     }
 
-    // ── 反向 HTTP 隧道请求 ───────────────────────
-    case "tunnel-request": {
-      proxyToLocalhost(
-        {
-          tunnelId: msg.tunnelId,
-          port: msg.port,
-          method: msg.method,
-          path: msg.path,
-          headers: msg.headers || {},
-          body: msg.body,
-        },
-        (frame) => connection.send(frame)
-      ).catch((err: any) => {
-        connection.send({ type: "tunnel-end", tunnelId: msg.tunnelId, error: err?.message ?? "tunnel error" });
-      });
-      break;
-    }
-
-    // ── WS 隧道(P7 HMR) ──────────────────────────
-    case "tunnel-ws-open": {
-      openLocalWebSocket(
-        { tunnelId: msg.tunnelId, port: msg.port, path: msg.path, headers: msg.headers },
-        (frame) => connection.send(frame)
-      );
-      break;
-    }
-    case "tunnel-ws-data": {
-      onWsTunnelData(msg.tunnelId, msg.data, msg.binary);
-      break;
-    }
-    case "tunnel-ws-close": {
-      onWsTunnelClose(msg.tunnelId, msg.code, msg.reason);
-      break;
-    }
-
-    case "error": {
-      console.error("[Daemon] Relay error:", msg.error);
-      break;
-    }
-
     default: {
       // DaemonInbound 已穷尽;此分支仅为将来 wire 扩展时的兜底日志
       console.log("[Daemon] Unhandled message from relay:", (msg as { type: string }).type);
@@ -339,7 +291,7 @@ function handleRelayMessage(msg: DaemonInboundType) {
 
 function shutdown() {
   console.log("\n[Daemon] Shutting down...");
-  connection.disconnect();
+  connection.stop();
   process.exit(0);
 }
 

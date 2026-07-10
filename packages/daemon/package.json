@@ -14,7 +14,8 @@
     "jsonwebtoken": "^9.0.3",
     "ws": "^8.18.0",
     "@pocket-code/wire": "workspace:*",
-    "@pocket-code/server": "workspace:*"
+    "@pocket-code/server": "workspace:*",
+    "@pocket-code/tunnel-client": "workspace:*"
   },
   "devDependencies": {
     "@types/jsonwebtoken": "^9.0.10",
