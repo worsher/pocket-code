@@ -52,6 +52,7 @@
 | — | DeepSeek V4 升级（Pro/Flash,默认与 auto 路由随迁） | specs/2026-07-06-deepseek-v4 |
 | P9 | agent-core 同构包+双侧接入,三套 loop 收编完成 | specs+plans/2026-07-06-p9 |
 | P10 | client-core 同构包(三模块正典迁移+去 RN 化)+Web 端 Chat/Files/Diff | specs+plans/2026-07-10-p10 |
+| — | relay 拆分:protocol-core 拆层+tunnel-client(pocket-tunnel CLI)+发布就绪+DISCOVERY/TUNNEL_TOKEN 加固 | specs+plans/2026-07-10-relay拆分 |
 
 ## 待办（按优先级）
 
@@ -64,14 +65,14 @@
 ## 拆分路线（评估结论,详见 specs/2026-07-06-p9 第一部分）
 
 单人期不拆仓库,包边界按"随时可拆"标准维护。触发信号:开源/第三方复用/多人协作。
-- **relay** → 独立中继服务(类 ngrok):前置 wire 拆 protocol-core 层,约 1-2 天。
+- **relay** → 已达"随时可迁"终态(specs/2026-07-10-relay拆分):依赖图自足(protocol-core+ws)、发布件齐、隧道入口可鉴权;真正开源仅剩 git subtree 迁移+npm 发布。
 - **cli 适配层** → 独立 OSS 库(驱动 claude-code/codex/gemini 的归一化事件流):约 1 天,价值最高。
 - **agent-core** → P9 即按可拆标准建包(运行时零依赖)。
 - **client-core + Web 端** → P10 候选。
 
 ## 安全后置（多用户/公开部署前必做）
 
-- App→relay 连接鉴权（`list-machines` 当前对任意连接可见）
+- App→relay 连接鉴权（list-machines 对任意连接可见;纯隧道部署可用 `RELAY_DISCOVERY=off` 整体关闭,自用部署维持现状）
 - per-daemon TOFU 指纹（当前靠共享 RELAY_SECRET）
 - wss/TLS 代码层强制（当前靠 nginx，见部署文档）
 - SaaS 全家桶：Docker 沙箱默认开、配额完整化、凭证加密、审计、计费
