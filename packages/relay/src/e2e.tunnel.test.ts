@@ -69,7 +69,7 @@ describe("E2E: relay + tunnel-client 反向隧道", () => {
     let client: TunnelClientHandle;
 
     beforeAll(async () => {
-      relay = spawnRelay({ PORT: String(relayPort), RELAY_SECRET: SECRET, RELAY_DISCOVERY: "off" });
+      relay = spawnRelay({ PORT: String(relayPort), RELAY_SECRET: SECRET, RELAY_DISCOVERY: "off", TUNNEL_TOKEN: "" });
       await waitHealthy(relayPort);
       target = await startTarget();
       client = startTunnelClient({
@@ -113,7 +113,7 @@ describe("E2E: relay + tunnel-client 反向隧道", () => {
     let client: TunnelClientHandle;
 
     beforeAll(async () => {
-      relay = spawnRelay({ PORT: String(relayPort), RELAY_SECRET: SECRET, TUNNEL_TOKEN: TOKEN });
+      relay = spawnRelay({ PORT: String(relayPort), RELAY_SECRET: SECRET, TUNNEL_TOKEN: TOKEN, RELAY_DISCOVERY: "" });
       await waitHealthy(relayPort);
       target = await startTarget();
       client = startTunnelClient({
