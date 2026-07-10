@@ -129,7 +129,12 @@ export function openLocalWebSocket(
   });
   ws.on("error", (err: Error) => {
     // 连接失败时 'close' 会随后触发(1006)并发 close 帧;这里只记日志
-    console.warn(`[Daemon] WS tunnel ${req.tunnelId} error: ${err.message}`);
+    // AggregateError(双栈 ECONNREFUSED 等)的 message 为空,需展开子错误
+    const detail =
+      err.message ||
+      (err instanceof AggregateError && err.errors.map((e: any) => e?.message ?? String(e)).join("; ")) ||
+      String(err);
+    console.warn(`[Daemon] WS tunnel ${req.tunnelId} (localhost:${req.port}${req.path}) error: ${detail}`);
   });
 }
 
