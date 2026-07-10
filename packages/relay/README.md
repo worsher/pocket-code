@@ -9,11 +9,14 @@
 
 ```
 浏览器 ──HTTP/WS──► relay(公网) ◄──WS 控制连接── tunnel-client / daemon(内网)
-   /t/<machineId>/<port>/...          │ daemon-register(HMAC) + heartbeat
-   或 pc_tunnel cookie 路由            │ tunnel-request/response/chunk/end
+   subdomain(默认): <id>-<port>.<域>   │ daemon-register(HMAC) + heartbeat
+   path: /t/<id>/<port>/(+pc_tunnel)  │ tunnel-request/response/chunk/end
                                       │ tunnel-ws-open/data/close(HMR)
 App ──ws /relay──► relay ──forward──► daemon(配对/业务转发,可用 RELAY_DISCOVERY 关闭)
 ```
+
+隧道寻址有两种模式(`TUNNEL_MODE`,默认 `subdomain`),形态与取舍见下方
+[隧道寻址模式](#隧道寻址模式)一节。
 
 ## 快速开始（纯隧道用法）
 
@@ -27,8 +30,9 @@ pnpm --filter @pocket-code/relay build && node packages/relay/dist/index.js
 # 内网机:起隧道客户端(同一 RELAY_SECRET;未发布 npm 前在本仓内用:
 #   node packages/tunnel-client/dist/cli.js ...)
 pocket-tunnel --relay wss://your-host/relay --secret $RELAY_SECRET
-# 输出 machineId 后,浏览器访问:
-#   https://your-host/t/<machineId>/<本机端口>/?pc_token=<TUNNEL_TOKEN>
+# 输出 machineId 后,浏览器访问(取决于 TUNNEL_MODE):
+#   subdomain(默认): https://<machineId>-<本机端口>.<TUNNEL_BASE_DOMAIN>/?pc_token=<TUNNEL_TOKEN>
+#   path:            https://your-host/t/<machineId>/<本机端口>/?pc_token=<TUNNEL_TOKEN>
 ```
 
 ## 配置（env）
