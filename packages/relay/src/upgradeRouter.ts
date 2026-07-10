@@ -8,10 +8,9 @@ import type { IncomingMessage } from "http";
 import type { Duplex } from "stream";
 import { WebSocketServer, type WebSocket } from "ws";
 import type { WsTunnelHub } from "./wsTunnelHub.js";
-import { verifyTunnelToken } from "./config.js";
+import { verifyTunnelToken, type TunnelMode } from "./config.js";
+import { resolveTunnelTarget } from "./tunnelAddress.js";
 
-const TUNNEL_PATH_RE = /^\/t\/([^/]+)\/(\d+)(\/.*)?$/;
-const TUNNEL_COOKIE_RE = /(?:^|;\s*)pc_tunnel=([^:;]+):(\d+)/;
 const TUNNEL_TOKEN_COOKIE_RE = /(?:^|;\s*)pc_tunnel_token=([^;]+)/;
 
 export interface UpgradeDeps {
@@ -22,6 +21,8 @@ export interface UpgradeDeps {
   port: number;
   /** null=不启用隧道入口鉴权 */
   tunnelToken: string | null;
+  tunnelMode: TunnelMode;
+  tunnelBaseDomain: string | null;
 }
 
 /** 隧道握手用 WSS:回显浏览器请求的首个子协议(vite 的 "vite-hmr" 等)。 */
@@ -56,24 +57,24 @@ function dispatchUpgrade(
 ): void {
     const url = new URL(req.url || "", `http://localhost:${deps.port || 80}`);
 
+    const resolved = resolveTunnelTarget(
+      deps.tunnelMode,
+      req.headers.host,
+      url.pathname,
+      req.headers.cookie,
+      deps.tunnelBaseDomain
+    );
+
     let machineId: string | null = null;
     let port = 0;
     let path = "";
-
-    const isControlPath = url.pathname === "/relay" || url.pathname === "/relay/";
-    const m = url.pathname.match(TUNNEL_PATH_RE);
-    if (m) {
-      machineId = m[1];
-      port = parseInt(m[2], 10);
-      path = (m[3] || "/") + (url.search || "");
-    } else if (!isControlPath) {
-      const c = (req.headers.cookie || "").match(TUNNEL_COOKIE_RE);
-      if (c) {
-        machineId = c[1];
-        port = parseInt(c[2], 10);
-        path = url.pathname + (url.search || "");
-      }
+    if (resolved.kind === "tunnel") {
+      machineId = resolved.target.machineId;
+      port = resolved.target.port;
+      path = resolved.target.forwardPath + (url.search || "");
     }
+    // control / none 都不当隧道:落控制通道(与原 isControlPath 行为一致——
+    // 非隧道的 upgrade 交给 controlWss,由其协议层决定是否接纳)。
 
     if (machineId) {
       const queryToken = url.searchParams.get("pc_token");
@@ -104,6 +105,7 @@ function dispatchUpgrade(
 
     // ── WS 隧道 ──
     deps.tunnelWss.handleUpgrade(req, socket, head, (browserWs: WebSocket) => {
+      deps.tunnelWss.emit("connection", browserWs, req);
       const tunnelId = `ws_${crypto.randomUUID()}`;
       const headers: Record<string, string> = {};
       if (req.headers.cookie) headers["cookie"] = req.headers.cookie;

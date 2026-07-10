@@ -93,6 +93,8 @@ httpServer.on(
     sendToDaemon: sendRawToDaemon,
     port: PORT,
     tunnelToken: TUNNEL_TOKEN,
+    tunnelMode: TUNNEL_MODE,
+    tunnelBaseDomain: TUNNEL_BASE_DOMAIN,
   })
 );
 

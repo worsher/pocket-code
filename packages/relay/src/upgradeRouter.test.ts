@@ -12,7 +12,11 @@ interface Ctx {
   controlConnections: number;
 }
 
-async function startRelay(tunnelToken: string | null = null): Promise<Ctx> {
+async function startRelay(
+  tunnelToken: string | null = null,
+  tunnelMode: "subdomain" | "path" = "path",
+  tunnelBaseDomain: string | null = null
+): Promise<Ctx> {
   const daemonFrames: any[] = [];
   const hub = new WsTunnelHub((machineId, frame) => {
     daemonFrames.push({ machineId, frame });
@@ -29,6 +33,8 @@ async function startRelay(tunnelToken: string | null = null): Promise<Ctx> {
     sendToDaemon: (m, f) => { daemonFrames.push({ machineId: m, frame: f }); return true; },
     port: 0,
     tunnelToken,
+    tunnelMode,
+    tunnelBaseDomain,
   }));
   await new Promise<void>((r) => server.listen(0, () => r()));
   const addr = server.address();
@@ -171,5 +177,65 @@ describe("upgrade routing", () => {
     await waitOpen(ws);
     await until(() => ctx.daemonFrames.some((d) => d.frame.type === "tunnel-ws-open"));
     ws.close();
+  });
+});
+
+// ── 两模式寻址判定(是否落到 tunnel/control) ──────────────
+// 与上面的 startRelay 套件(转发细节/鉴权)不同,这里只关心 dispatchUpgrade
+// 把请求分到哪个 wss——起一个挂了 createUpgradeHandler 的 http server,
+// 用两个 controlWss/tunnelWss 各自 connection 事件计数,发起 ws 握手断言落到哪个 wss。
+
+interface ModeCtx { server: Server; port: number; controlHits: string[]; tunnelHits: number; }
+const modeCtxs: ModeCtx[] = [];
+afterEach(() => { for (const c of modeCtxs.splice(0)) c.server.close(); });
+
+async function startWs(mode: "subdomain" | "path", baseDomain: string | null): Promise<ModeCtx> {
+  const controlWss = new WebSocketServer({ noServer: true });
+  const tunnelWss = makeTunnelWss();
+  const ctx: ModeCtx = { server: null as any, port: 0, controlHits: [], tunnelHits: 0 };
+  controlWss.on("connection", (_ws, req) => ctx.controlHits.push(req.url || ""));
+  const wsTunnelHub = new WsTunnelHub(() => true); // sendToDaemon 恒真,open 后不真正连
+  tunnelWss.on("connection", () => { ctx.tunnelHits++; });
+  const server = createServer();
+  server.on("upgrade", createUpgradeHandler({
+    controlWss, tunnelWss, wsTunnelHub,
+    sendToDaemon: () => true, port: 0,
+    tunnelToken: null, tunnelMode: mode, tunnelBaseDomain: baseDomain,
+  }));
+  await new Promise<void>((r) => server.listen(0, () => r()));
+  const addr = server.address();
+  ctx.server = server; ctx.port = typeof addr === "object" && addr ? addr.port : 0;
+  return ctx;
+}
+
+function tryWs(port: number, path: string, host?: string): Promise<void> {
+  return new Promise((resolve) => {
+    const ws = new WebSocket(`ws://127.0.0.1:${port}${path}`, host ? { headers: { host } } : {});
+    ws.on("open", () => { ws.close(); resolve(); });
+    ws.on("error", () => resolve()); // 404/destroy 也算完成
+    setTimeout(resolve, 800);
+  });
+}
+
+describe("createUpgradeHandler 寻址(两模式)", () => {
+  it("path 模式:/relay → control", async () => {
+    const ctx = await startWs("path", null); modeCtxs.push(ctx);
+    await tryWs(ctx.port, "/relay");
+    expect(ctx.controlHits.some((u) => u.startsWith("/relay"))).toBe(true);
+  });
+  it("path 模式:/t/abc123/5173/ → tunnel", async () => {
+    const ctx = await startWs("path", null); modeCtxs.push(ctx);
+    await tryWs(ctx.port, "/t/abc123/5173/");
+    expect(ctx.tunnelHits).toBe(1);
+  });
+  it("subdomain 模式:隧道子域 Host → tunnel", async () => {
+    const ctx = await startWs("subdomain", "tunnel.aigc.zj.cn"); modeCtxs.push(ctx);
+    await tryWs(ctx.port, "/", "aa11bb22-5173.tunnel.aigc.zj.cn");
+    expect(ctx.tunnelHits).toBe(1);
+  });
+  it("subdomain 模式:控制 Host(主站)+ /relay → control", async () => {
+    const ctx = await startWs("subdomain", "tunnel.aigc.zj.cn"); modeCtxs.push(ctx);
+    await tryWs(ctx.port, "/relay", "aigc.zj.cn");
+    expect(ctx.controlHits.some((u) => u.startsWith("/relay"))).toBe(true);
   });
 });
