@@ -39,8 +39,9 @@ export class RelayClient {
 
   /** Connect to the VPS Relay Server */
   public connect() {
-    console.log(`[RelayClient] Connecting to relay: ${this.opts.relayUrl}`);
-    this.ws = new WebSocket(this.opts.relayUrl);
+    const relayUrl = toWebSocketUrl(this.opts.relayUrl);
+    console.log(`[RelayClient] Connecting to relay: ${relayUrl}`);
+    this.ws = new WebSocket(relayUrl);
 
     this.ws.onopen = () => {
       console.log("[RelayClient] WebSocket connected");
@@ -81,6 +82,7 @@ export class RelayClient {
 
           case "error": {
             console.error("[RelayClient] Relay level error:", raw.error);
+            this.rejectAllPending(new Error(raw.error || "Relay error"));
             this.onerror?.({ message: raw.error });
             break;
           }
@@ -92,6 +94,7 @@ export class RelayClient {
 
     this.ws.onclose = (event) => {
       console.log(`[RelayClient] Closed. Code=${event.code}`);
+      this.rejectAllPending(new Error(`Relay connection closed (code ${event.code})`));
       this.onclose?.({ code: event.code, reason: event.reason });
     };
 
@@ -99,6 +102,17 @@ export class RelayClient {
       console.error("[RelayClient] Error.");
       this.onerror?.({ message: "Network error" });
     };
+  }
+
+  /**
+   * relay 的 error/close 消息不携带 requestId,无法定位到具体请求;
+   * 挂起的只有 pairing/machines 两类且不会并发进行,全部拒绝是有意为之。
+   */
+  private rejectAllPending(error: Error) {
+    for (const [key, req] of this.pendingRequests) {
+      req.reject(error);
+      this.pendingRequests.delete(key);
+    }
   }
 
   public close() {
@@ -203,5 +217,17 @@ export class RelayClient {
       relayToken: token,
       relayMachineId: machineId
     });
+  }
+}
+
+function toWebSocketUrl(url: string): string {
+  const wsUrl = url.replace(/^https:\/\//i, "wss://").replace(/^http:\/\//i, "ws://");
+  try {
+    const parsed = new URL(wsUrl);
+    // 尾斜杠归一("/relay/" 会匹配不上 relay 侧控制路径判定);空路径补默认 /relay
+    parsed.pathname = parsed.pathname.replace(/\/+$/, "") || "/relay";
+    return parsed.toString();
+  } catch {
+    return wsUrl;
   }
 }
