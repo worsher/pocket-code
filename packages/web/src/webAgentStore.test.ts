@@ -71,6 +71,21 @@ describe("WebAgentStore", () => {
     expect(seen).toContain("generating");
   });
 
+  it("marks pending message as error and resets phase when socket is closed", () => {
+    const store = new WebAgentStore(SETTINGS);
+    store.connect();
+    const ws = FakeWebSocket.instances[0];
+    ws.open();
+    ws.readyState = FakeWebSocket.CLOSED;
+
+    store.sendMessage("hi");
+
+    expect(ws.sent.some((raw) => JSON.parse(raw).type === "message")).toBe(false);
+    const state = store.getState();
+    expect(state.messages.at(-1)!.content).toContain("未发送");
+    expect(state.phase).toBe("idle");
+  });
+
   it("captures sessionId and surfaces auth errors", () => {
     const store = new WebAgentStore(SETTINGS);
     store.connect();

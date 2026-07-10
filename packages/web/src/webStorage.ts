@@ -25,7 +25,8 @@ export function createSettingsStore(storage: Pick<Storage, "getItem" | "setItem"
   function load(): WebSettings {
     let parsed: Partial<WebSettings> = {};
     try {
-      parsed = JSON.parse(storage.getItem(KEY) || "{}");
+      const raw = JSON.parse(storage.getItem(KEY) || "{}");
+      if (raw && typeof raw === "object" && !Array.isArray(raw)) parsed = raw;
     } catch {
       /* 损坏的存档按空处理 */
     }

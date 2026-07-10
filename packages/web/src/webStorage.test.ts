@@ -17,6 +17,14 @@ describe("createSettingsStore", () => {
     expect(s.deviceId).toMatch(/^web_/);
   });
 
+  it("falls back to defaults when storage holds a non-object JSON literal", () => {
+    const storage = fakeStorage();
+    storage.setItem("pocket-code-web-settings", "null");
+    const s = createSettingsStore(storage).load();
+    expect(s.mode).toBe("lan");
+    expect(s.deviceId).toMatch(/^web_/);
+  });
+
   it("persists patches and keeps deviceId stable across loads", () => {
     const storage = fakeStorage();
     const s1 = createSettingsStore(storage).load();

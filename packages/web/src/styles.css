@@ -374,8 +374,7 @@ body { margin: 0; background: var(--bg); color: var(--fg); font: 14px/1.5 -apple
 /* FilesPage */
 .files-page {
   display: flex;
-  flex: 1;
-  min-height: 0;
+  height: 100%;
 }
 
 .file-tree {

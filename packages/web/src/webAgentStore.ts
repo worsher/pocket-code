@@ -82,11 +82,22 @@ export class WebAgentStore {
     const now = Date.now();
     const user: Message = { id: `u_${now}`, role: "user", content, timestamp: now };
     const pending: Message = { id: `a_${now}`, role: "assistant", content: "", timestamp: now, pending: true };
+    const sent = this.conn.sendRaw({ type: "message", content });
+    if (!sent) {
+      this.setState({
+        messages: [
+          ...this.state.messages,
+          user,
+          { ...pending, pending: false, content: "Error: 未连接,消息未发送" },
+        ],
+        phase: "idle",
+      });
+      return;
+    }
     this.setState({
       messages: [...this.state.messages, user, pending],
       phase: "connecting",
     });
-    this.conn.sendRaw({ type: "message", content });
   }
 
   private setState(patch: Partial<AgentState>): void {
