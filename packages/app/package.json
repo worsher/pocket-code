@@ -36,6 +36,7 @@
     "react-native-webview": "^13.16.1"
   },
   "devDependencies": {
+    "@pocket-code/client-core": "workspace:*",
     "@pocket-code/wire": "workspace:*",
     "@types/react": "~19.1.0",
     "typescript": "~5.9.2",

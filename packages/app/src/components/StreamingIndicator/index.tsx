@@ -1,13 +1,8 @@
 import React, { useEffect, useRef, useState } from "react";
 import { View, Text, Animated, StyleSheet } from "react-native";
+import type { StreamingPhase } from "@pocket-code/client-core";
 
-export type StreamingPhase =
-  | "connecting"
-  | "thinking"
-  | "generating"
-  | "tool-calling"
-  | "tool-running"
-  | "idle";
+export type { StreamingPhase } from "@pocket-code/client-core";
 
 interface StreamingIndicatorProps {
   phase: StreamingPhase;

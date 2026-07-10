@@ -1,3 +1,5 @@
+// 【冻结副本】已被 @pocket-code/client-core 收编为正典(P10)。此副本冻结:
+// 只修 bug 且必须双侧同步;P11 RN 切换消费 client-core 时删除本文件。
 // ── 归一化 AgentEvent → 消息列表 reducer(纯函数,零 RN 依赖) ──
 // P6b:云端与 geek 两条路径共用的 UI 更新逻辑。只更新末尾 assistant
 // 消息;无变化时返回原引用(避免无谓渲染)。phase 推导同理。

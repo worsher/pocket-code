@@ -2,27 +2,8 @@ import AsyncStorage from "@react-native-async-storage/async-storage";
 
 // ── Types ──────────────────────────────────────────────
 
-export interface StoredImageAttachment {
-    uri: string;
-    base64: string;
-    mimeType: "image/jpeg" | "image/png";
-}
-
-export interface StoredMessage {
-    id: string;
-    role: "user" | "assistant";
-    content: string;
-    thinking?: string;
-    toolCalls?: {
-        toolName: string;
-        args: Record<string, unknown>;
-        result?: unknown;
-    }[];
-    images?: StoredImageAttachment[];
-    timestamp: number;
-    pending?: boolean;
-    modelUsed?: string;
-}
+import type { StoredMessage } from "@pocket-code/client-core";
+export type { StoredMessage, StoredImageAttachment } from "@pocket-code/client-core";
 
 export interface SessionInfo {
     id: string;

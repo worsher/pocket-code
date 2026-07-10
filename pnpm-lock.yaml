@@ -114,6 +114,9 @@ importers:
         specifier: ^13.16.1
         version: 13.16.1(react-native@0.81.5(@babel/core@7.29.0)(@types/react@19.1.17)(react@19.1.0))(react@19.1.0)
     devDependencies:
+      '@pocket-code/client-core':
+        specifier: workspace:*
+        version: link:../client-core
       '@pocket-code/wire':
         specifier: workspace:*
         version: link:../wire

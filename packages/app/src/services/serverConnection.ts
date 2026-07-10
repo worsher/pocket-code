@@ -1,3 +1,5 @@
+// 【冻结副本】已被 @pocket-code/client-core 收编为正典(P10)。此副本冻结:
+// 只修 bug 且必须双侧同步;P11 RN 切换消费 client-core 时删除本文件。
 // ── 服务端连接(传输层,零 React 依赖) ─────────────────────────
 // P6b:从 useAgent 抽出——WS/Relay 生命周期、指数退避重连、鉴权握手
 // (register→auth→init / relay 免 token init)、_reqId RPC、消息分发。

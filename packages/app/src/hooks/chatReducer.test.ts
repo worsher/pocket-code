@@ -1,3 +1,5 @@
+// 【冻结副本】已被 @pocket-code/client-core 收编为正典(P10)。此副本冻结:
+// 只修 bug 且必须双侧同步;P11 RN 切换消费 client-core 时删除本文件。
 import { describe, it, expect } from "vitest";
 import { applyAgentEvent, phaseFor, truncateCoreHistory, storedToCoreMessages, type Message } from "./chatReducer";
 import type { CoreMessage } from "@pocket-code/agent-core";
