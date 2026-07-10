@@ -77,3 +77,21 @@ export function isTunnelCookieSecure(
 ): boolean {
   return (env.TUNNEL_COOKIE_SECURE || "on").trim().toLowerCase() !== "off";
 }
+
+/** 隧道寻址模式:子域(默认)或路径前缀。 */
+export type TunnelMode = "subdomain" | "path";
+
+/** TUNNEL_MODE:默认 subdomain,仅显式 "path" 切换(同 isDiscoveryEnabled 风格)。 */
+export function getTunnelMode(
+  env: Record<string, string | undefined> = process.env
+): TunnelMode {
+  return (env.TUNNEL_MODE || "").trim().toLowerCase() === "path" ? "path" : "subdomain";
+}
+
+/** TUNNEL_BASE_DOMAIN:子域模式必需(如 "tunnel.aigc.zj.cn");trim 后空 → null。 */
+export function getTunnelBaseDomain(
+  env: Record<string, string | undefined> = process.env
+): string | null {
+  const d = (env.TUNNEL_BASE_DOMAIN || "").trim();
+  return d || null;
+}

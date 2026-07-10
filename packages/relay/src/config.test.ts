@@ -1,6 +1,6 @@
 import { describe, it, expect } from "vitest";
 import crypto from "crypto";
-import { requireRelaySecret, verifyDaemonAuth, HMAC_TIME_WINDOW_MS, isDiscoveryEnabled, getTunnelToken, verifyTunnelToken, isTunnelCookieSecure } from "./config.js";
+import { requireRelaySecret, verifyDaemonAuth, HMAC_TIME_WINDOW_MS, isDiscoveryEnabled, getTunnelToken, verifyTunnelToken, isTunnelCookieSecure, getTunnelMode, getTunnelBaseDomain, type TunnelMode } from "./config.js";
 
 describe("requireRelaySecret", () => {
   it("returns the secret when set", () => {
@@ -77,5 +77,25 @@ describe("isTunnelCookieSecure", () => {
   it("turns off only on 'off' (case/space insensitive) — VPS 裸 IP/纯 http 场景", () => {
     expect(isTunnelCookieSecure({ TUNNEL_COOKIE_SECURE: "off" })).toBe(false);
     expect(isTunnelCookieSecure({ TUNNEL_COOKIE_SECURE: " OFF " })).toBe(false);
+  });
+});
+
+describe("getTunnelMode", () => {
+  it("默认 subdomain(未设置/空/其他值)", () => {
+    expect(getTunnelMode({})).toBe("subdomain");
+    expect(getTunnelMode({ TUNNEL_MODE: "" })).toBe("subdomain");
+    expect(getTunnelMode({ TUNNEL_MODE: "weird" })).toBe("subdomain");
+  });
+  it("仅 'path' 切换(大小写/空格不敏感)", () => {
+    expect(getTunnelMode({ TUNNEL_MODE: "path" })).toBe("path");
+    expect(getTunnelMode({ TUNNEL_MODE: " PATH " })).toBe("path");
+  });
+});
+
+describe("getTunnelBaseDomain", () => {
+  it("trim 后非空返回,空/未设置返回 null", () => {
+    expect(getTunnelBaseDomain({})).toBeNull();
+    expect(getTunnelBaseDomain({ TUNNEL_BASE_DOMAIN: "  " })).toBeNull();
+    expect(getTunnelBaseDomain({ TUNNEL_BASE_DOMAIN: " tunnel.aigc.zj.cn " })).toBe("tunnel.aigc.zj.cn");
   });
 });
