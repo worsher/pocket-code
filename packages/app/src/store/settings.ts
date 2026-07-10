@@ -48,6 +48,12 @@ export interface AppSettings {
     /** 极客模式：当前配对的机器 ID */
     relayMachineId?: string;
 
+    /** 极客模式:relay 隧道模式(运行时从 /health 拉取,不落盘持久化) */
+    relayTunnelMode?: "subdomain" | "path";
+
+    /** 极客模式:relay 子域基础域名(subdomain 模式,运行时拉取) */
+    relayTunnelBaseDomain?: string | null;
+
     /** 极客模式：各 AI 厂商 API Key */
     apiKeys: ApiKeys;
 

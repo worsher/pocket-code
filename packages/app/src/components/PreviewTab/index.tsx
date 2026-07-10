@@ -9,47 +9,13 @@ import {
 } from "react-native";
 import { WebView } from "react-native-webview";
 import type { AppSettings } from "../../store/settings";
+import { maybeRewriteToTunnel } from "./tunnelUrl";
 
 interface Props {
   /** URL to load initially, set externally when a dev server is detected */
   initialUrl?: string;
   /** App 设置:relay 模式下用于构造中继隧道预览 URL */
   settings?: AppSettings;
-}
-
-// relayServerUrl 形如 ws://host:3200 → http://host:3200/t/<machineId>/<port>/
-function buildTunnelUrl(relayServerUrl: string, machineId: string, port: number): string {
-  const httpBase = relayServerUrl.replace(/^ws:\/\//, "http://").replace(/^wss:\/\//, "https://");
-  return `${httpBase.replace(/\/$/, "")}/t/${machineId}/${port}/`;
-}
-
-/**
- * relay 模式下,把用户输入的 `localhost:N` / `127.0.0.1:N` / 裸端口 `N`
- * 改写为中继隧道 URL。非 localhost/裸端口的输入保持原样。
- * 非 relay 模式或缺少 relay 配置时返回 null(不改写)。
- */
-function maybeRewriteToTunnel(input: string, settings?: AppSettings): string | null {
-  if (!settings || settings.workspaceMode !== "relay") return null;
-  const { relayServerUrl, relayMachineId } = settings;
-  if (!relayServerUrl || !relayMachineId) return null;
-
-  // 已经是隧道 URL,不重复改写
-  if (/\/t\/[^/]+\/\d+/.test(input)) return null;
-
-  // 裸端口: "3000"
-  const bare = input.match(/^(\d{1,5})$/);
-  if (bare) {
-    return buildTunnelUrl(relayServerUrl, relayMachineId, parseInt(bare[1], 10));
-  }
-  // localhost / 127.0.0.1 (可带 http:// 前缀) + 端口 + 可选路径
-  const loc = input.match(/^(?:https?:\/\/)?(?:localhost|127\.0\.0\.1)(?::(\d{1,5}))?(\/.*)?$/i);
-  if (loc) {
-    const port = loc[1] ? parseInt(loc[1], 10) : 80;
-    const base = buildTunnelUrl(relayServerUrl, relayMachineId, port);
-    const rest = loc[2] ? loc[2].replace(/^\//, "") : "";
-    return base + rest;
-  }
-  return null;
 }
 
 export default function PreviewTab({ initialUrl, settings }: Props) {
@@ -60,6 +26,7 @@ export default function PreviewTab({ initialUrl, settings }: Props) {
   const [canGoBack, setCanGoBack] = useState(false);
   const [canGoForward, setCanGoForward] = useState(false);
   const webViewRef = useRef<WebView>(null);
+  const [tunnelInfo, setTunnelInfo] = useState<{ relayTunnelMode?: "subdomain" | "path"; relayTunnelBaseDomain?: string | null }>({});
 
   // Sync when initialUrl changes from outside
   React.useEffect(() => {
@@ -70,11 +37,26 @@ export default function PreviewTab({ initialUrl, settings }: Props) {
     }
   }, [initialUrl]);
 
+  // relay 模式下一次性拉取 /health,取隧道模式(subdomain/path)与子域基础域名。
+  // 旧 relay 不返回这些字段 / 请求失败时静默回退 path 模式(buildTunnelUrl 的默认行为)。
+  React.useEffect(() => {
+    if (!settings || settings.workspaceMode !== "relay" || !settings.relayServerUrl) return;
+    const httpBase = settings.relayServerUrl.replace(/^ws:\/\//, "http://").replace(/^wss:\/\//, "https://").replace(/\/relay\/?$/, "");
+    let cancelled = false;
+    fetch(`${httpBase}/health`)
+      .then((r) => r.json())
+      .then((j) => { if (!cancelled && j && (j.tunnelMode === "subdomain" || j.tunnelMode === "path")) {
+        setTunnelInfo({ relayTunnelMode: j.tunnelMode, relayTunnelBaseDomain: j.tunnelBaseDomain ?? null });
+      }})
+      .catch(() => { /* 旧 relay / 拉取失败:静默,buildTunnelUrl 回退 path */ });
+    return () => { cancelled = true; };
+  }, [settings?.relayServerUrl, settings?.workspaceMode]);
+
   const handleGo = useCallback(() => {
     let target = inputUrl.trim();
     if (!target) return;
     // relay 模式:把 localhost/裸端口改写为中继隧道 URL
-    const tunnel = maybeRewriteToTunnel(target, settings);
+    const tunnel = maybeRewriteToTunnel(target, settings ? { ...settings, ...tunnelInfo } : undefined);
     if (tunnel) {
       target = tunnel;
     } else if (!target.startsWith("http://") && !target.startsWith("https://")) {
@@ -83,7 +65,7 @@ export default function PreviewTab({ initialUrl, settings }: Props) {
     setUrl(target);
     setInputUrl(target);
     setError(null);
-  }, [inputUrl, settings]);
+  }, [inputUrl, settings, tunnelInfo]);
 
   const handleRefresh = useCallback(() => {
     webViewRef.current?.reload();
