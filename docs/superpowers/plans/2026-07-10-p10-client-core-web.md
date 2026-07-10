@@ -273,6 +273,8 @@ class FakeWebSocket {
     this.sent.push(data);
   }
   close() {
+    // 真实 WebSocket 语义:close 后 readyState 变 CLOSED(否则 isOpen 仍 true,connect() 早退,重连测试失真)
+    this.readyState = FakeWebSocket.CLOSED;
     this.onclose?.();
   }
   /** 测试辅助:模拟服务端握手完成 */
@@ -403,10 +405,10 @@ describe("ServerConnection", () => {
     const conn = new ServerConnection(makeConfig(), makeHandlers());
     conn.connect();
     FakeWebSocket.instances[0].open();
-    FakeWebSocket.instances[0].onclose?.(); // 意外断开
+    FakeWebSocket.instances[0].close(); // 意外断开(close 置 CLOSED 再触发 onclose)
     vi.advanceTimersByTime(2_000); // 第 1 次退避 2s
     expect(FakeWebSocket.instances).toHaveLength(2);
-    FakeWebSocket.instances[1].onclose?.();
+    FakeWebSocket.instances[1].close();
     vi.advanceTimersByTime(3_999);
     expect(FakeWebSocket.instances).toHaveLength(2); // 第 2 次退避 4s,未到
     vi.advanceTimersByTime(1);
