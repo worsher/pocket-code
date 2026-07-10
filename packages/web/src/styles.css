@@ -370,3 +370,135 @@ body { margin: 0; background: var(--bg); color: var(--fg); font: 14px/1.5 -apple
   opacity: 0.5;
   cursor: not-allowed;
 }
+
+/* FilesPage */
+.files-page {
+  display: flex;
+  flex: 1;
+  min-height: 0;
+}
+
+.file-tree {
+  width: 280px;
+  overflow-y: auto;
+  border-right: 1px solid var(--border);
+  display: flex;
+  flex-direction: column;
+}
+
+.file-tree .dir-bar {
+  display: flex;
+  gap: 8px;
+  padding: 8px;
+  border-bottom: 1px solid var(--border);
+  flex-shrink: 0;
+}
+
+.file-tree .dir-bar button {
+  padding: 4px 8px;
+  background: var(--bg-panel);
+  border: 1px solid var(--border);
+  color: var(--fg);
+  cursor: pointer;
+  border-radius: 4px;
+  font: inherit;
+  font-size: 12px;
+}
+
+.file-tree .dir-bar button:hover:not(:disabled) {
+  background: #252d36;
+}
+
+.file-tree .dir-bar button:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.file-tree .dir-path {
+  flex: 1;
+  padding: 4px 8px;
+  font-size: 12px;
+  color: var(--fg-dim);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.file-tree ul {
+  list-style: none;
+  margin: 0;
+  padding: 4px;
+  flex: 1;
+  overflow-y: auto;
+}
+
+.file-tree li {
+  margin: 0;
+}
+
+.file-tree .entry {
+  display: block;
+  width: 100%;
+  padding: 4px 8px;
+  text-align: left;
+  background: transparent;
+  border: 1px solid transparent;
+  color: var(--fg);
+  cursor: pointer;
+  border-radius: 4px;
+  font: inherit;
+  font-size: 12px;
+  margin: 2px 0;
+}
+
+.file-tree .entry:hover {
+  background: var(--bg-panel);
+}
+
+.file-tree .entry.directory {
+  font-weight: 500;
+}
+
+.file-error {
+  padding: 8px;
+  background: rgba(248, 81, 73, 0.15);
+  color: var(--red);
+  font-size: 12px;
+  border-bottom: 1px solid var(--border);
+  flex-shrink: 0;
+}
+
+.file-viewer {
+  flex: 1;
+  overflow: auto;
+  display: flex;
+  flex-direction: column;
+}
+
+.file-viewer .viewer-path {
+  padding: 8px 12px;
+  background: var(--bg-panel);
+  border-bottom: 1px solid var(--border);
+  font-size: 12px;
+  color: var(--fg-dim);
+  flex-shrink: 0;
+  font-weight: 600;
+}
+
+.file-viewer pre {
+  margin: 0;
+  padding: 12px;
+  font-family: var(--mono);
+  font-size: 12px;
+  line-height: 1.4;
+  overflow-x: auto;
+  flex: 1;
+}
+
+.file-viewer .viewer-empty {
+  flex: 1;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--fg-dim);
+}
