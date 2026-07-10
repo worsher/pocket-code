@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import type { Message, ToolCall } from "@pocket-code/client-core";
 import { computeLineDiff } from "../lineDiff";
 import { useWebAgent } from "../useWebAgent";
@@ -85,7 +85,7 @@ function ToolCard({ tool }: { tool: ToolCall }) {
 }
 
 function DiffBlock({ path, oldContent, newContent }: { path: string; oldContent: string; newContent: string }) {
-  const lines = computeLineDiff(oldContent, newContent);
+  const lines = useMemo(() => computeLineDiff(oldContent, newContent), [oldContent, newContent]);
   return (
     <div className="diff-block">
       <div className="diff-path">{path}</div>
