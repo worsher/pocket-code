@@ -27,7 +27,7 @@ export function loadOrCreateIdentity(
     /* 首次运行或损坏:重建 */
   }
   const identity: TunnelIdentity = {
-    machineId: `m_${crypto.randomBytes(8).toString("hex")}`,
+    machineId: crypto.randomBytes(8).toString("hex"),
     machineName: defaultName,
   };
   mkdirSync(dirname(filePath), { recursive: true });

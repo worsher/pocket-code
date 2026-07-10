@@ -54,7 +54,7 @@ function loadOrGenerateMachineId(): string {
   try {
     return readFileSync(path, "utf-8").trim();
   } catch {
-    const id = `m_${crypto.randomBytes(8).toString("hex")}`;
+    const id = crypto.randomBytes(8).toString("hex");
     mkdirSync(POCKET_HOME, { recursive: true });
     writeFileSync(path, id, { mode: 0o600 });
     return id;
