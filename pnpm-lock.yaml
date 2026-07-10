@@ -220,6 +220,9 @@ importers:
         specifier: ^3.24.0
         version: 3.25.76
     devDependencies:
+      '@pocket-code/tunnel-client':
+        specifier: workspace:*
+        version: link:../tunnel-client
       '@types/node':
         specifier: ^22.0.0
         version: 22.19.11

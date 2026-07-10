@@ -16,6 +16,7 @@
     "@pocket-code/protocol-core": "workspace:*"
   },
   "devDependencies": {
+    "@pocket-code/tunnel-client": "workspace:*",
     "@types/node": "^22.0.0",
     "@types/ws": "^8.5.0",
     "tsx": "^4.19.0",
