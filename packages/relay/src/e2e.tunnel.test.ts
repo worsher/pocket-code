@@ -69,13 +69,13 @@ describe("E2E: relay + tunnel-client 反向隧道", () => {
     let client: TunnelClientHandle;
 
     beforeAll(async () => {
-      relay = spawnRelay({ PORT: String(relayPort), RELAY_SECRET: SECRET, RELAY_DISCOVERY: "off", TUNNEL_TOKEN: "" });
+      relay = spawnRelay({ PORT: String(relayPort), RELAY_SECRET: SECRET, RELAY_DISCOVERY: "off", TUNNEL_TOKEN: "", TUNNEL_MODE: "path" });
       await waitHealthy(relayPort);
       target = await startTarget();
       client = startTunnelClient({
         relayUrl: `ws://127.0.0.1:${relayPort}/relay`,
         relaySecret: SECRET,
-        machineId: "m_e2e_a",
+        machineId: "e2eaaa1",
         machineName: "e2e-a",
       });
       await waitMachines(relayPort, 1);
@@ -88,7 +88,7 @@ describe("E2E: relay + tunnel-client 反向隧道", () => {
     });
 
     it("HTTP 经隧道穿透取回目标响应(含 query)", async () => {
-      const resp = await fetch(`http://127.0.0.1:${relayPort}/t/m_e2e_a/${target.port}/hello?x=1`);
+      const resp = await fetch(`http://127.0.0.1:${relayPort}/t/e2eaaa1/${target.port}/hello?x=1`);
       expect(resp.status).toBe(200);
       expect(await resp.text()).toBe("hello-tunnel:/hello?x=1");
     }, 15000);
@@ -113,13 +113,13 @@ describe("E2E: relay + tunnel-client 反向隧道", () => {
     let client: TunnelClientHandle;
 
     beforeAll(async () => {
-      relay = spawnRelay({ PORT: String(relayPort), RELAY_SECRET: SECRET, TUNNEL_TOKEN: TOKEN, RELAY_DISCOVERY: "" });
+      relay = spawnRelay({ PORT: String(relayPort), RELAY_SECRET: SECRET, TUNNEL_TOKEN: TOKEN, RELAY_DISCOVERY: "", TUNNEL_MODE: "path" });
       await waitHealthy(relayPort);
       target = await startTarget();
       client = startTunnelClient({
         relayUrl: `ws://127.0.0.1:${relayPort}/relay`,
         relaySecret: SECRET,
-        machineId: "m_e2e_b",
+        machineId: "e2ebbb2",
         machineName: "e2e-b",
       });
       await waitMachines(relayPort, 1);
@@ -132,10 +132,10 @@ describe("E2E: relay + tunnel-client 反向隧道", () => {
     });
 
     it("无 token → 404;带 pc_token → 200 且种 pc_tunnel_token cookie", async () => {
-      const denied = await fetch(`http://127.0.0.1:${relayPort}/t/m_e2e_b/${target.port}/`);
+      const denied = await fetch(`http://127.0.0.1:${relayPort}/t/e2ebbb2/${target.port}/`);
       expect(denied.status).toBe(404);
 
-      const ok = await fetch(`http://127.0.0.1:${relayPort}/t/m_e2e_b/${target.port}/?pc_token=${TOKEN}`);
+      const ok = await fetch(`http://127.0.0.1:${relayPort}/t/e2ebbb2/${target.port}/?pc_token=${TOKEN}`);
       expect(ok.status).toBe(200);
       expect(await ok.text()).toBe("hello-tunnel:/");
       expect(ok.headers.getSetCookie().join(";;")).toContain(`pc_tunnel_token=${TOKEN}`);
@@ -143,13 +143,13 @@ describe("E2E: relay + tunnel-client 反向隧道", () => {
 
     it("cookie 路径:合法 token cookie 通过,错误 token 404", async () => {
       const ok = await fetch(`http://127.0.0.1:${relayPort}/sub.js`, {
-        headers: { cookie: `pc_tunnel=m_e2e_b:${target.port}; pc_tunnel_token=${TOKEN}` },
+        headers: { cookie: `pc_tunnel=e2ebbb2:${target.port}; pc_tunnel_token=${TOKEN}` },
       });
       expect(ok.status).toBe(200);
       expect(await ok.text()).toBe("hello-tunnel:/sub.js");
 
       const bad = await fetch(`http://127.0.0.1:${relayPort}/sub.js`, {
-        headers: { cookie: `pc_tunnel=m_e2e_b:${target.port}; pc_tunnel_token=wrong` },
+        headers: { cookie: `pc_tunnel=e2ebbb2:${target.port}; pc_tunnel_token=wrong` },
       });
       expect(bad.status).toBe(404);
     }, 15000);

@@ -27,7 +27,7 @@ import { TunnelHub } from "./tunnelHub.js";
 import { WsTunnelHub } from "./wsTunnelHub.js";
 import { createUpgradeHandler, makeTunnelWss } from "./upgradeRouter.js";
 import { createHttpHandler } from "./httpRouter.js";
-import { requireRelaySecret, isDiscoveryEnabled, getTunnelToken, isTunnelCookieSecure } from "./config.js";
+import { requireRelaySecret, isDiscoveryEnabled, getTunnelToken, isTunnelCookieSecure, getTunnelMode, getTunnelBaseDomain } from "./config.js";
 import { createConnState, handleRelayInbound } from "./messageRouter.js";
 
 const PORT = parseInt(process.env.PORT || "3200", 10);
@@ -49,6 +49,14 @@ console.log(
   `[Relay] Tunnel ingress auth: ${TUNNEL_TOKEN ? `TUNNEL_TOKEN required (cookie Secure: ${TUNNEL_COOKIE_SECURE ? "on" : "off"})` : "open (machineId is the capability)"}`
 );
 
+const TUNNEL_MODE = getTunnelMode();
+const TUNNEL_BASE_DOMAIN = getTunnelBaseDomain();
+if (TUNNEL_MODE === "subdomain" && TUNNEL_BASE_DOMAIN === null) {
+  console.error("[Relay] 启动失败:TUNNEL_BASE_DOMAIN required when TUNNEL_MODE=subdomain (e.g. tunnel.example.com)");
+  process.exit(1);
+}
+console.log(`[Relay] Tunnel mode: ${TUNNEL_MODE}${TUNNEL_MODE === "subdomain" ? ` (base=${TUNNEL_BASE_DOMAIN})` : ""}`);
+
 // ── 反向 HTTP 隧道枢纽(关联 http 请求与 tunnelId) ──
 const tunnelHub = new TunnelHub();
 
@@ -67,6 +75,8 @@ const httpServer = createServer(
     port: PORT,
     tunnelToken: TUNNEL_TOKEN,
     tunnelCookieSecure: TUNNEL_COOKIE_SECURE,
+    tunnelMode: TUNNEL_MODE,
+    tunnelBaseDomain: TUNNEL_BASE_DOMAIN,
   })
 );
 

@@ -1,4 +1,6 @@
 import { describe, it, expect, vi } from "vitest";
+import { ServerResponse, IncomingMessage } from "http";
+import { Socket } from "net";
 import { TunnelHub } from "./tunnelHub.js";
 
 function mockRes() {
@@ -93,5 +95,33 @@ describe("TunnelHub", () => {
     expect(rA.end).toHaveBeenCalled();
     expect(rB.end).not.toHaveBeenCalled();
     expect(hub.size).toBe(1);
+  });
+});
+
+function fakeRes() {
+  const res = new ServerResponse(new IncomingMessage(new Socket()));
+  const captured: { status?: number; headers?: any } = {};
+  (res as any).writeHead = (s: number, h: any) => { captured.status = s; captured.headers = h; return res; };
+  (res as any).write = () => true;
+  (res as any).end = () => res;
+  return { res, captured };
+}
+
+describe("TunnelHub.onResponse rewrite 回调", () => {
+  it("open 传入 rewriteHeaders 时,onResponse 用它改写后再 writeHead", () => {
+    const hub = new TunnelHub();
+    const { res, captured } = fakeRes();
+    hub.open("t1", res, "m1", undefined, (h) => ({ ...h, location: "/t/m1/3000" + (h.location ?? "") }));
+    hub.onResponse("t1", 307, { location: "/admin" }, "m1");
+    expect(captured.status).toBe(307);
+    expect(captured.headers.location).toBe("/t/m1/3000/admin");
+  });
+  it("无 rewriteHeaders 时 onResponse 原样写头(现状回归)", () => {
+    const hub = new TunnelHub();
+    const { res, captured } = fakeRes();
+    hub.open("t2", res, "m1");
+    hub.onResponse("t2", 200, { "content-type": "text/plain" }, "m1");
+    expect(captured.status).toBe(200);
+    expect(captured.headers["content-type"]).toBe("text/plain");
   });
 });
