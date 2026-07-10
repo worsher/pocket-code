@@ -133,6 +133,12 @@ pm2 startup                                 # 生成开机自启命令(按提示
 
 > 现有 `docker/nginx.conf` 是给「云端 server 模式」的(代理到 server:3100)，**Relay 模式要用下面这份**(代理到 relay:3200，且兼顾 WebSocket 与隧道流式)。
 
+relay 支持两种隧道寻址模式(`TUNNEL_MODE`,默认 `subdomain`),nginx 配置**不同**：
+- **path 模式**(`TUNNEL_MODE=path`)：单一 `server` 块即可，只需 `location /relay`(App 控制通道)+ `location /t/`(隧道)——见下方 2.4.1。
+- **subdomain 模式**(默认)：还需**额外一个泛域名 `server` 块**(`server_name *.tunnel.<domain>`)承接 `<machineId>-<port>.<domain>` 请求，见 2.4.2；证书需覆盖二级通配 `*.tunnel.<domain>`(见 `packages/relay/README.md` 的 Cloudflare DNS-01 一节)。
+
+#### 2.4.1 path 模式（裸 IP / 无泛证书回退）
+
 ```nginx
 server {
     listen 443 ssl;
@@ -176,6 +182,36 @@ server {
 > ② `location /relay/ { proxy_pass http://127.0.0.1:3200/; }`(隧道,注意尾部 `/` 剥前缀);
 > ③ `location / { proxy_pass http://127.0.0.1:3200; }`(域名根兜底——vite 的绝对路径子资源靠 pc_tunnel cookie 在 relay 内路由,必须让 relay 接管整个域名的未匹配路径)。
 > 三处都要带 WS upgrade 头与 `proxy_buffering off`;**proxy_pass 必须写 `127.0.0.1` 而非 `localhost`**(relay 只监听 IPv4,localhost 会被 nginx 轮询解析到 `::1` 导致一半请求 502)。
+
+#### 2.4.2 subdomain 模式（默认，完整解法，需泛域名 + 泛证书）
+
+在 2.4.1 的独占域名 server 块**之外**，额外加一个泛域名 server 块承接 `<machineId>-<port>.tunnel.example.com` 请求（域名/证书路径按需替换；泛证书签发见 `packages/relay/README.md` 的「子域模式证书」一节，Cloudflare DNS-01 免费方案）：
+
+```nginx
+server {
+    listen 443 ssl;
+    server_name *.tunnel.example.com;
+
+    ssl_certificate     /etc/letsencrypt/live/tunnel.example.com/fullchain.pem;
+    ssl_certificate_key /etc/letsencrypt/live/tunnel.example.com/privkey.pem;
+
+    # 子域即隧道:relay 从 Host 头解析 <machineId>-<port>,forwardPath=完整 pathname
+    location / {
+        proxy_pass http://127.0.0.1:3200;
+        proxy_http_version 1.1;
+        proxy_set_header Upgrade $http_upgrade;
+        proxy_set_header Connection "upgrade";
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_buffering off;          # 隧道是分片流,不要缓冲
+        proxy_request_buffering off;
+        proxy_read_timeout 3600s;
+    }
+}
+# 泛证书由 certbot + dns-cloudflare 插件签发(非 --nginx 单域名模式,见 README「子域模式证书」)
+```
+
+relay 侧需设置 `TUNNEL_MODE=subdomain`(默认)与 `TUNNEL_BASE_DOMAIN=tunnel.example.com`；DNS 侧需一条泛记录 `*.tunnel.example.com` → relay VPS IP。配好后浏览器访问 `https://<machineId>-<port>.tunnel.example.com/` 即隧道到对应内网端口；App 控制通道仍走 2.4.1 的独占域名 server 块(`wss://relay.example.com`)，两个 server 块可以并存于同一 nginx 实例。
 
 ### 2.5 防火墙
 
@@ -302,10 +338,10 @@ pm2 save && pm2 startup         # 开机自启(按 startup 提示执行一次)
 ## 5. 远程预览（P5 隧道）用法
 
 开发机上 agent 启动了 dev server（如 `npm run dev` 在 `:5173`）后：
-- App → Preview 页，地址栏输入端口 `5173`（或 `localhost:5173`）。**relay 模式下 App 会自动改写**为隧道 URL：`https://relay.example.com/t/<machineId>/5173/`。
+- App → Preview 页，地址栏输入端口 `5173`（或 `localhost:5173`）。**App 会按 relay 的 `/health` 上报的 `TUNNEL_MODE` 自动改写**为隧道 URL：subdomain 模式(默认)→ `https://<machineId>-5173.tunnel.example.com/`；path 模式(`TUNNEL_MODE=path`)→ `https://relay.example.com/t/<machineId>/5173/`。
 - Relay 把请求经 Daemon 隧道转给开发机 `127.0.0.1:5173`，流式回传到 WebView。
 
-**已知限制：** 路径式隧道对「绝对路径子资源」(如 vite 的 `/src/main.tsx`)会失效，**相对路径页面 / `vite build` 后的静态产物**可正常预览；HMR(热更新)暂不支持。需要完整 SPA 远程预览时，建议先 `vite build` 再预览 `dist/`（或用代码同步把 `dist/` 拉到手机本地预览）。
+**已知限制（仅 path 模式）：** 路径式隧道对「绝对路径子资源」(如 vite 的 `/src/main.tsx`)、SPA 纯客户端 `pushState` 路由、多机器同时使用会有掉前缀/串号问题；HMR(热更新)暂不支持。完整解请用 subdomain 模式（默认，见 §2.4.2）——绝对路径子资源与 SPA 路由天然正确。仍需 path 模式时（裸 IP/无泛证书），建议先 `vite build` 再预览 `dist/`（或用代码同步把 `dist/` 拉到手机本地预览）以规避绝对路径子资源问题。
 
 ---
 

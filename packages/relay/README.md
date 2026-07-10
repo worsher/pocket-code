@@ -40,6 +40,36 @@ pocket-tunnel --relay wss://your-host/relay --secret $RELAY_SECRET
 | `RELAY_DISCOVERY` | on | `off` 时拒绝 list-machines 与 pair-request 转发（纯隧道部署姿态） |
 | `TUNNEL_TOKEN` | 关闭 | 设置后隧道入口强制鉴权：首次 `?pc_token=<值>`，校验通过种 `pc_tunnel_token` HttpOnly cookie；失败一律 404 |
 | `TUNNEL_COOKIE_SECURE` | on | `pc_tunnel_token` cookie 是否附加 `Secure`。VPS 裸 IP/纯 http 部署设 `off`（否则浏览器拒存 cookie，后续子资源 404；首次带 `?pc_token` 的请求不受影响） |
+| `TUNNEL_MODE` | 隧道寻址模式:`subdomain`(默认,完整解法)/ `path`(路径前缀,裸 IP/无泛证书回退) | `subdomain` |
+| `TUNNEL_BASE_DOMAIN` | 子域模式必需,如 `tunnel.example.com`;缺失则启动失败 | (无) |
+
+## 隧道寻址模式
+
+- **subdomain(默认)**:`https://<machineId>-<port>.<TUNNEL_BASE_DOMAIN>/`。应用绝对路径天然正确、
+  链接可分享、SPA 客户端路由不掉前缀。需泛域名 + 泛证书。
+- **path**(`TUNNEL_MODE=path`):`https://<host>/t/<machineId>/<port>/`。用于裸 IP / 无泛证书部署。
+  服务端 3xx 重定向经 relay 补 `/t/<id>/<port>` 前缀不掉出;但 SPA 纯客户端 `pushState`、
+  多机器并用会串——完整解请用 subdomain 模式。
+
+> **破坏性变更**:默认模式为 `subdomain`。现有靠 `/t/` 路径的部署升级后**必须显式设 `TUNNEL_MODE=path`**,
+> 否则启动会因缺 `TUNNEL_BASE_DOMAIN` 而失败(subdomain 模式硬要求 baseDomain)。
+
+## 子域模式证书(Cloudflare DNS-01 泛证书,推荐)
+
+要覆盖 `*.<TUNNEL_BASE_DOMAIN>`(二级子域通配)。Cloudflare 免费 Universal SSL **不覆盖**二级通配,
+推荐让 Cloudflare 只当 DNS 供应商,证书由 Let's Encrypt DNS-01 签(免费,TLS 在自管 nginx 终止):
+
+1. Cloudflare 建 API Token,权限 `Zone.DNS:Edit`。
+2. VPS 装 `certbot` + `python3-certbot-dns-cloudflare`,用该 token 签 `*.tunnel.example.com`(+ `tunnel.example.com`)。
+3. nginx `server { server_name *.tunnel.example.com; ... }` 反代 relay,证书指向泛证书;certbot 定时续签。
+4. 泛 DNS 记录 `*.tunnel.example.com` → relay VPS IP。
+
+备选:Cloudflare 付费 ACM(边缘终止,需橙云代理)。
+
+## machineId 迁移(纯 hex)
+
+machineId 从 `m_<hex>` 改为纯 `<hex>`(DNS-safe)。升级后**已配对设备需重新配对**:
+删除 `~/.pocket-code/machine-id`(daemon)与 `~/.pocket-tunnel.json`(pocket-tunnel CLI),重启后自动生成新 id 并重新配对。
 
 ## 安全模型（务必阅读）
 

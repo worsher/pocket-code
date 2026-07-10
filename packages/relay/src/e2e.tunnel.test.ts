@@ -3,7 +3,7 @@
 
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { spawn, type ChildProcess } from "child_process";
-import { createServer, type Server } from "http";
+import { createServer, request as httpRequest, type Server } from "http";
 import { fileURLToPath } from "url";
 import { dirname, join } from "path";
 import WebSocket from "ws";
@@ -46,6 +46,32 @@ function spawnRelay(env: Record<string, string>): ChildProcess {
     stdio: "ignore",
   });
   return child;
+}
+
+/**
+ * 用 Node 原生 http.request 发起请求(仅供需要自定义 Host 头的子域寻址测试使用)——
+ * fetch()/undici 把 Host 当禁止头处理,静默丢弃覆盖(始终发实际连接 host),
+ * 子域场景必须真正改变 Host 才能验证路由,故绕过 fetch 走底层 http.request。
+ * 镜像 httpRouter.test.ts 的同名 helper。
+ */
+function requestWithHost(port: number, path: string, headers: Record<string, string>): Promise<{
+  status: number;
+  text: () => Promise<string>;
+}> {
+  return new Promise((resolve, reject) => {
+    const req = httpRequest({ host: "127.0.0.1", port, path, headers }, (res) => {
+      const chunks: Buffer[] = [];
+      res.on("data", (c) => chunks.push(c as Buffer));
+      res.on("end", () => {
+        resolve({
+          status: res.statusCode || 0,
+          text: async () => Buffer.concat(chunks).toString("utf-8"),
+        });
+      });
+    });
+    req.on("error", reject);
+    req.end();
+  });
 }
 
 function startTarget(): Promise<{ server: Server; port: number }> {
@@ -153,5 +179,51 @@ describe("E2E: relay + tunnel-client 反向隧道", () => {
       });
       expect(bad.status).toBe(404);
     }, 15000);
+  });
+
+  describe("场景C: 子域模式(TUNNEL_MODE=subdomain)", () => {
+    const relayPort = randPort();
+    const BASE = "tunnel.localhost";
+    const MID = "aa11bb22cc33dd44";
+    let relay: ChildProcess;
+    let target: { server: Server; port: number };
+    let client: TunnelClientHandle;
+
+    beforeAll(async () => {
+      relay = spawnRelay({
+        PORT: String(relayPort), RELAY_SECRET: SECRET,
+        RELAY_DISCOVERY: "off", TUNNEL_TOKEN: "",
+        TUNNEL_MODE: "subdomain", TUNNEL_BASE_DOMAIN: BASE,
+      });
+      await waitHealthy(relayPort);
+      target = await startTarget();
+      client = startTunnelClient({
+        relayUrl: `ws://127.0.0.1:${relayPort}/relay`,
+        relaySecret: SECRET, machineId: MID, machineName: "e2e-c",
+      });
+      await waitMachines(relayPort, 1);
+    }, 30000);
+
+    afterAll(() => { client?.stop(); target?.server.close(); relay?.kill(); });
+
+    it("/health 报告 subdomain 模式 + baseDomain", async () => {
+      const j = await (await fetch(`http://127.0.0.1:${relayPort}/health`)).json();
+      expect(j.tunnelMode).toBe("subdomain");
+      expect(j.tunnelBaseDomain).toBe(BASE);
+    }, 10000);
+
+    it("Host 驱动路由:<id>-<port>.<base> 经隧道取回目标响应", async () => {
+      // relay 从 Host 解析目标;path 直达根,forwardPath=/hello
+      const resp = await requestWithHost(relayPort, `/hello?x=1`, {
+        host: `${MID}-${target.port}.${BASE}`,
+      });
+      expect(resp.status).toBe(200);
+      expect(await resp.text()).toBe("hello-tunnel:/hello?x=1");
+    }, 15000);
+
+    it("主站 Host + 非 /health 路径 → 404(非隧道)", async () => {
+      const resp = await requestWithHost(relayPort, "/whatever", { host: BASE });
+      expect(resp.status).toBe(404);
+    }, 10000);
   });
 });
