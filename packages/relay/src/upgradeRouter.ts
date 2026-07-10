@@ -8,9 +8,11 @@ import type { IncomingMessage } from "http";
 import type { Duplex } from "stream";
 import { WebSocketServer, type WebSocket } from "ws";
 import type { WsTunnelHub } from "./wsTunnelHub.js";
+import { verifyTunnelToken } from "./config.js";
 
 const TUNNEL_PATH_RE = /^\/t\/([^/]+)\/(\d+)(\/.*)?$/;
 const TUNNEL_COOKIE_RE = /(?:^|;\s*)pc_tunnel=([^:;]+):(\d+)/;
+const TUNNEL_TOKEN_COOKIE_RE = /(?:^|;\s*)pc_tunnel_token=([^;]+)/;
 
 export interface UpgradeDeps {
   controlWss: WebSocketServer;
@@ -18,6 +20,8 @@ export interface UpgradeDeps {
   wsTunnelHub: WsTunnelHub;
   sendToDaemon: (machineId: string, frame: unknown) => boolean;
   port: number;
+  /** null=不启用隧道入口鉴权 */
+  tunnelToken: string | null;
 }
 
 /** 隧道握手用 WSS:回显浏览器请求的首个子协议(vite 的 "vite-hmr" 等)。 */
@@ -69,6 +73,25 @@ function dispatchUpgrade(
         port = parseInt(c[2], 10);
         path = url.pathname + (url.search || "");
       }
+    }
+
+    if (machineId) {
+      const queryToken = url.searchParams.get("pc_token");
+      const cookieToken = ((req.headers.cookie || "").match(TUNNEL_TOKEN_COOKIE_RE) || [])[1];
+      const ok =
+        deps.tunnelToken === null ||
+        verifyTunnelToken(deps.tunnelToken, queryToken) ||
+        verifyTunnelToken(deps.tunnelToken, cookieToken);
+      if (!ok) {
+        // 与 HTTP 路径同语义:一律 404,不给探测信号
+        socket.write("HTTP/1.1 404 Not Found\r\nConnection: close\r\n\r\n");
+        socket.destroy();
+        return;
+      }
+      // pc_token 只用于鉴权,不进转发 path
+      url.searchParams.delete("pc_token");
+      const cleaned = url.searchParams.toString() ? `?${url.searchParams.toString()}` : "";
+      path = path.split("?")[0] + cleaned;
     }
 
     if (!machineId) {

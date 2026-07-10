@@ -12,7 +12,7 @@ interface Ctx {
   controlConnections: number;
 }
 
-async function startRelay(): Promise<Ctx> {
+async function startRelay(tunnelToken: string | null = null): Promise<Ctx> {
   const daemonFrames: any[] = [];
   const hub = new WsTunnelHub((machineId, frame) => {
     daemonFrames.push({ machineId, frame });
@@ -28,6 +28,7 @@ async function startRelay(): Promise<Ctx> {
     wsTunnelHub: hub,
     sendToDaemon: (m, f) => { daemonFrames.push({ machineId: m, frame: f }); return true; },
     port: 0,
+    tunnelToken,
   }));
   await new Promise<void>((r) => server.listen(0, () => r()));
   const addr = server.address();
@@ -137,6 +138,38 @@ describe("upgrade routing", () => {
     const ws = new WebSocket(`ws://127.0.0.1:${ctx.port}/t/m_P/5173/`, ["vite-hmr"]);
     await waitOpen(ws);
     expect(ws.protocol).toBe("vite-hmr");
+    ws.close();
+  });
+
+  it("TUNNEL_TOKEN 开启:无 token 的隧道 upgrade 被 404 拒绝", async () => {
+    const ctx = await startRelay("tok"); ctxs.push(ctx);
+    const ws = new WebSocket(`ws://127.0.0.1:${ctx.port}/t/m_X/5173/hmr`);
+    await new Promise<void>((res) => ws.on("error", () => res()));
+    expect(ctx.daemonFrames).toHaveLength(0);
+  });
+
+  it("TUNNEL_TOKEN 开启:pc_token 查询参数通过且不进转发 path;控制通道不受影响", async () => {
+    const ctx = await startRelay("tok"); ctxs.push(ctx);
+    const ws = new WebSocket(`ws://127.0.0.1:${ctx.port}/t/m_X/5173/hmr?pc_token=tok&y=2`);
+    await waitOpen(ws);
+    await until(() => ctx.daemonFrames.some((d) => d.frame.type === "tunnel-ws-open"));
+    const open = ctx.daemonFrames.find((d) => d.frame.type === "tunnel-ws-open");
+    expect(open.frame.path).toBe("/hmr?y=2");
+    ws.close();
+
+    const ctrl = new WebSocket(`ws://127.0.0.1:${ctx.port}/relay`);
+    await waitOpen(ctrl);
+    await until(() => ctx.controlConnections === 1);
+    ctrl.close();
+  });
+
+  it("TUNNEL_TOKEN 开启:pc_tunnel_token cookie 通过", async () => {
+    const ctx = await startRelay("tok"); ctxs.push(ctx);
+    const ws = new WebSocket(`ws://127.0.0.1:${ctx.port}/`, {
+      headers: { cookie: "pc_tunnel=m_Y:3000; pc_tunnel_token=tok" },
+    });
+    await waitOpen(ws);
+    await until(() => ctx.daemonFrames.some((d) => d.frame.type === "tunnel-ws-open"));
     ws.close();
   });
 });

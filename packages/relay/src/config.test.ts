@@ -1,6 +1,6 @@
 import { describe, it, expect } from "vitest";
 import crypto from "crypto";
-import { requireRelaySecret, verifyDaemonAuth, HMAC_TIME_WINDOW_MS, isDiscoveryEnabled } from "./config.js";
+import { requireRelaySecret, verifyDaemonAuth, HMAC_TIME_WINDOW_MS, isDiscoveryEnabled, getTunnelToken, verifyTunnelToken } from "./config.js";
 
 describe("requireRelaySecret", () => {
   it("returns the secret when set", () => {
@@ -50,5 +50,20 @@ describe("isDiscoveryEnabled", () => {
   it("turns off only on 'off' (case/space insensitive)", () => {
     expect(isDiscoveryEnabled({ RELAY_DISCOVERY: "off" })).toBe(false);
     expect(isDiscoveryEnabled({ RELAY_DISCOVERY: " OFF " })).toBe(false);
+  });
+});
+
+describe("tunnel token", () => {
+  it("getTunnelToken: 空/未设置 → null(不启用)", () => {
+    expect(getTunnelToken({})).toBeNull();
+    expect(getTunnelToken({ TUNNEL_TOKEN: "  " })).toBeNull();
+    expect(getTunnelToken({ TUNNEL_TOKEN: " tok " })).toBe("tok");
+  });
+  it("verifyTunnelToken: 等值通过,错值/缺失/前缀不通过", () => {
+    expect(verifyTunnelToken("tok", "tok")).toBe(true);
+    expect(verifyTunnelToken("tok", "bad")).toBe(false);
+    expect(verifyTunnelToken("tok", "to")).toBe(false);
+    expect(verifyTunnelToken("tok", undefined)).toBe(false);
+    expect(verifyTunnelToken("tok", null)).toBe(false);
   });
 });

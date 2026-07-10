@@ -10,7 +10,7 @@ interface PendingTunnel {
   /** 该隧道归属的 daemon(P6a:回帧必须来自它) */
   machineId: string;
   /** relay 侧注入的附加响应头(如 Set-Cookie 记忆隧道目标)。 */
-  extraHeaders?: Record<string, string>;
+  extraHeaders?: Record<string, string | string[]>;
 }
 
 // 逐跳头:不应原样透传(我们用 write/end 隐式 chunked)。
@@ -23,7 +23,7 @@ export class TunnelHub {
     tunnelId: string,
     res: ServerResponse,
     machineId: string,
-    extraHeaders?: Record<string, string>
+    extraHeaders?: Record<string, string | string[]>
   ): void {
     this.tunnels.set(tunnelId, { res, responded: false, machineId, extraHeaders });
   }
@@ -45,7 +45,7 @@ export class TunnelHub {
     const t = this.owned(tunnelId, senderMachineId);
     if (!t || t.responded) return;
     t.responded = true;
-    const safe: Record<string, string> = {};
+    const safe: Record<string, string | string[]> = {};
     for (const [k, v] of Object.entries(headers)) {
       if (!HOP_BY_HOP.has(k.toLowerCase())) safe[k] = v;
     }

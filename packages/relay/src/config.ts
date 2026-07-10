@@ -54,3 +54,19 @@ export function isDiscoveryEnabled(
 ): boolean {
   return (env.RELAY_DISCOVERY || "on").trim().toLowerCase() !== "off";
 }
+
+/** TUNNEL_TOKEN:trim 后非空才启用隧道入口鉴权;否则 null(现状:machineId 即能力凭证)。 */
+export function getTunnelToken(
+  env: Record<string, string | undefined> = process.env
+): string | null {
+  const t = (env.TUNNEL_TOKEN || "").trim();
+  return t || null;
+}
+
+/** 常量时间比较隧道 token(等长前置短路,同 verifyDaemonAuth 手法)。 */
+export function verifyTunnelToken(expected: string, given: string | null | undefined): boolean {
+  if (!given) return false;
+  const a = Buffer.from(given);
+  const b = Buffer.from(expected);
+  return a.length === b.length && crypto.timingSafeEqual(a, b);
+}
