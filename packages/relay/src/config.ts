@@ -70,3 +70,10 @@ export function verifyTunnelToken(expected: string, given: string | null | undef
   const b = Buffer.from(expected);
   return a.length === b.length && crypto.timingSafeEqual(a, b);
 }
+
+/** pc_tunnel_token cookie 是否附加 Secure(默认 on;VPS 裸 IP/纯 http 部署设 off,否则浏览器拒存)。 */
+export function isTunnelCookieSecure(
+  env: Record<string, string | undefined> = process.env
+): boolean {
+  return (env.TUNNEL_COOKIE_SECURE || "on").trim().toLowerCase() !== "off";
+}

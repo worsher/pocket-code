@@ -24,7 +24,8 @@ export RELAY_DISCOVERY=off
 export TUNNEL_TOKEN=$(openssl rand -hex 16)   # 强烈建议:隧道入口鉴权
 pnpm --filter @pocket-code/relay build && node packages/relay/dist/index.js
 
-# 内网机:起隧道客户端(同一 RELAY_SECRET)
+# 内网机:起隧道客户端(同一 RELAY_SECRET;未发布 npm 前在本仓内用:
+#   node packages/tunnel-client/dist/cli.js ...)
 pocket-tunnel --relay wss://your-host/relay --secret $RELAY_SECRET
 # 输出 machineId 后,浏览器访问:
 #   https://your-host/t/<machineId>/<本机端口>/?pc_token=<TUNNEL_TOKEN>
@@ -38,6 +39,7 @@ pocket-tunnel --relay wss://your-host/relay --secret $RELAY_SECRET
 | `RELAY_SECRET` | 必填 | 与所有 tunnel-client/daemon 共享的注册密钥（HMAC-SHA256） |
 | `RELAY_DISCOVERY` | on | `off` 时拒绝 list-machines 与 pair-request 转发（纯隧道部署姿态） |
 | `TUNNEL_TOKEN` | 关闭 | 设置后隧道入口强制鉴权：首次 `?pc_token=<值>`，校验通过种 `pc_tunnel_token` HttpOnly cookie；失败一律 404 |
+| `TUNNEL_COOKIE_SECURE` | on | `pc_tunnel_token` cookie 是否附加 `Secure`。VPS 裸 IP/纯 http 部署设 `off`（否则浏览器拒存 cookie，后续子资源 404；首次带 `?pc_token` 的请求不受影响） |
 
 ## 安全模型（务必阅读）
 
@@ -48,7 +50,7 @@ pocket-tunnel --relay wss://your-host/relay --secret $RELAY_SECRET
    这是**单租户共享密钥**设计：知道密钥即可注册端点，不适合直接多租户开放。
 2. **传输**：TLS/wss 由前置反代（nginx）承担，见部署一节。
 3. **浏览器侧隧道入口（默认弱，建议加固）**：未设 `TUNNEL_TOKEN` 时，
-   `machineId`（64 位随机）就是唯一能力凭证——知道它即可浏览对应内网端口。
+   `machineId`（64 位熵,16 个 hex 字符）就是唯一能力凭证——知道它即可浏览对应内网端口。
    它会出现在 URL/日志/浏览器历史中，请视为秘密；公网部署强烈建议设置
    `TUNNEL_TOKEN` 并配合 `RELAY_DISCOVERY=off`（否则任意 WS 连接可枚举在线 machineId）。
 

@@ -5,7 +5,7 @@ import { TunnelHub } from "./tunnelHub.js";
 
 interface Ctx { server: Server; port: number; hub: TunnelHub; frames: any[]; }
 
-async function startHttp(tunnelToken: string | null): Promise<Ctx> {
+async function startHttp(tunnelToken: string | null, tunnelCookieSecure = true): Promise<Ctx> {
   const hub = new TunnelHub();
   const frames: any[] = [];
   const server = createServer(
@@ -15,6 +15,7 @@ async function startHttp(tunnelToken: string | null): Promise<Ctx> {
       getOnlineMachineCount: () => 1,
       port: 0,
       tunnelToken,
+      tunnelCookieSecure,
     })
   );
   await new Promise<void>((r) => server.listen(0, () => r()));
@@ -87,5 +88,23 @@ describe("createHttpHandler", () => {
     });
     expect(bad.status).toBe(404);
     expect(ctx2.frames).toHaveLength(0);
+  });
+
+  it("token 开启:Secure 默认附加在 pc_tunnel_token cookie(路由 cookie pc_tunnel 不受影响)", async () => {
+    const ctx = await startHttp("tok"); ctxs.push(ctx);
+    const resp = await fetchViaTunnel(ctx, "/t/m_1/5173/?pc_token=tok");
+    const cookies = resp.headers.getSetCookie();
+    const tokenCookie = cookies.find((c) => c.startsWith("pc_tunnel_token="));
+    expect(tokenCookie).toContain("; Secure");
+    const routeCookie = cookies.find((c) => c.startsWith("pc_tunnel="));
+    expect(routeCookie).not.toContain("Secure");
+  });
+
+  it("TUNNEL_COOKIE_SECURE=off:pc_tunnel_token 不带 Secure(VPS 裸 IP/纯 http 部署)", async () => {
+    const ctx = await startHttp("tok", false); ctxs.push(ctx);
+    const resp = await fetchViaTunnel(ctx, "/t/m_1/5173/?pc_token=tok");
+    const tokenCookie = resp.headers.getSetCookie().find((c) => c.startsWith("pc_tunnel_token="));
+    expect(tokenCookie).toBeDefined();
+    expect(tokenCookie).not.toContain("Secure");
   });
 });

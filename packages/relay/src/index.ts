@@ -27,7 +27,7 @@ import { TunnelHub } from "./tunnelHub.js";
 import { WsTunnelHub } from "./wsTunnelHub.js";
 import { createUpgradeHandler, makeTunnelWss } from "./upgradeRouter.js";
 import { createHttpHandler } from "./httpRouter.js";
-import { requireRelaySecret, isDiscoveryEnabled, getTunnelToken } from "./config.js";
+import { requireRelaySecret, isDiscoveryEnabled, getTunnelToken, isTunnelCookieSecure } from "./config.js";
 import { createConnState, handleRelayInbound } from "./messageRouter.js";
 
 const PORT = parseInt(process.env.PORT || "3200", 10);
@@ -44,7 +44,10 @@ const DISCOVERY = isDiscoveryEnabled();
 console.log(`[Relay] Discovery: ${DISCOVERY ? "on" : "off"}`);
 
 const TUNNEL_TOKEN = getTunnelToken();
-console.log(`[Relay] Tunnel ingress auth: ${TUNNEL_TOKEN ? "TUNNEL_TOKEN required" : "open (machineId is the capability)"}`);
+const TUNNEL_COOKIE_SECURE = isTunnelCookieSecure();
+console.log(
+  `[Relay] Tunnel ingress auth: ${TUNNEL_TOKEN ? `TUNNEL_TOKEN required (cookie Secure: ${TUNNEL_COOKIE_SECURE ? "on" : "off"})` : "open (machineId is the capability)"}`
+);
 
 // ── 反向 HTTP 隧道枢纽(关联 http 请求与 tunnelId) ──
 const tunnelHub = new TunnelHub();
@@ -63,6 +66,7 @@ const httpServer = createServer(
     getOnlineMachineCount: () => getOnlineMachines().length,
     port: PORT,
     tunnelToken: TUNNEL_TOKEN,
+    tunnelCookieSecure: TUNNEL_COOKIE_SECURE,
   })
 );
 

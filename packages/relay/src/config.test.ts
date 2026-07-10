@@ -1,6 +1,6 @@
 import { describe, it, expect } from "vitest";
 import crypto from "crypto";
-import { requireRelaySecret, verifyDaemonAuth, HMAC_TIME_WINDOW_MS, isDiscoveryEnabled, getTunnelToken, verifyTunnelToken } from "./config.js";
+import { requireRelaySecret, verifyDaemonAuth, HMAC_TIME_WINDOW_MS, isDiscoveryEnabled, getTunnelToken, verifyTunnelToken, isTunnelCookieSecure } from "./config.js";
 
 describe("requireRelaySecret", () => {
   it("returns the secret when set", () => {
@@ -65,5 +65,17 @@ describe("tunnel token", () => {
     expect(verifyTunnelToken("tok", "to")).toBe(false);
     expect(verifyTunnelToken("tok", undefined)).toBe(false);
     expect(verifyTunnelToken("tok", null)).toBe(false);
+  });
+});
+
+describe("isTunnelCookieSecure", () => {
+  it("defaults to on when unset/empty/other values", () => {
+    expect(isTunnelCookieSecure({})).toBe(true);
+    expect(isTunnelCookieSecure({ TUNNEL_COOKIE_SECURE: "" })).toBe(true);
+    expect(isTunnelCookieSecure({ TUNNEL_COOKIE_SECURE: "on" })).toBe(true);
+  });
+  it("turns off only on 'off' (case/space insensitive) — VPS 裸 IP/纯 http 场景", () => {
+    expect(isTunnelCookieSecure({ TUNNEL_COOKIE_SECURE: "off" })).toBe(false);
+    expect(isTunnelCookieSecure({ TUNNEL_COOKIE_SECURE: " OFF " })).toBe(false);
   });
 });

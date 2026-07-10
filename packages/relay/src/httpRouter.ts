@@ -14,6 +14,8 @@ export interface HttpRouterDeps {
   port: number;
   /** null=不启用隧道入口鉴权(默认,与现状一致) */
   tunnelToken: string | null;
+  /** pc_tunnel_token cookie 是否附加 Secure(TUNNEL_COOKIE_SECURE,默认 true;裸 IP/纯 http 部署关) */
+  tunnelCookieSecure: boolean;
 }
 
 const TUNNEL_TOKEN_COOKIE_RE = /(?:^|;\s*)pc_tunnel_token=([^;]+)/;
@@ -95,7 +97,9 @@ export function createHttpHandler(deps: HttpRouterDeps) {
       const port = parseInt(portStr, 10);
       const setCookies = [`pc_tunnel=${machineId}:${port}; Path=/; SameSite=Lax`];
       if (deps.tunnelToken !== null && queryToken && verifyTunnelToken(deps.tunnelToken, queryToken)) {
-        setCookies.push(`pc_tunnel_token=${queryToken}; Path=/; HttpOnly; SameSite=Lax`);
+        // Secure 防明文 http 泄漏 token;裸 IP/纯 http 部署经 TUNNEL_COOKIE_SECURE=off 关闭(否则浏览器拒存)
+        const secure = deps.tunnelCookieSecure ? "; Secure" : "";
+        setCookies.push(`pc_tunnel_token=${queryToken}; Path=/; HttpOnly; SameSite=Lax${secure}`);
       }
       startTunnel(machineId, port, (rest || "/") + search, { "Set-Cookie": setCookies });
       return;
