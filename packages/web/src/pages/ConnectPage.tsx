@@ -14,9 +14,11 @@ export default function ConnectPage({ settings, onSave, onConnect }: Props) {
   const [relayUrl, setRelayUrl] = useState(settings.relayUrl);
   const [pairCode, setPairCode] = useState("");
   const [status, setStatus] = useState("");
-  const paired = !!(settings.relayToken && settings.relayMachineId);
+  const [paired, setPaired] = useState(!!(settings.relayToken && settings.relayMachineId));
+  const [pairing, setPairing] = useState(false);
 
   async function pair() {
+    setPairing(true);
     setStatus("配对中…");
     const saved = onSave({ mode: "relay", relayUrl });
     const client = new RelayClient({
@@ -30,8 +32,9 @@ export default function ConnectPage({ settings, onSave, onConnect }: Props) {
     client.connect();
     try {
       await new Promise<void>((res, rej) => {
-        client.onopen = () => res();
-        client.onerror = (e) => rej(new Error(e.message));
+        const timer = setTimeout(() => rej(new Error("连接 relay 超时")), 10000);
+        client.onopen = () => { clearTimeout(timer); res(); };
+        client.onerror = (e) => { clearTimeout(timer); rej(new Error(e.message)); };
       });
       const resp = await client.pairDevice(pairCode.trim());
       if (!resp.success || !resp.token || !resp.machineId) {
@@ -39,10 +42,12 @@ export default function ConnectPage({ settings, onSave, onConnect }: Props) {
       }
       client.updateToken(resp.token, resp.machineId);
       setStatus(`已配对:${resp.machineName || resp.machineId}`);
+      setPaired(true);
     } catch (err) {
       setStatus(`配对失败:${err instanceof Error ? err.message : String(err)}`);
     } finally {
       client.close();
+      setPairing(false);
     }
   }
 
@@ -70,11 +75,11 @@ export default function ConnectPage({ settings, onSave, onConnect }: Props) {
           <label>配对码
             <input value={pairCode} onChange={(e) => setPairCode(e.target.value)} placeholder="daemon 显示的 8 位码" />
           </label>
-          <button onClick={pair} disabled={!relayUrl || !pairCode}>配对</button>
+          <button onClick={pair} disabled={!relayUrl || !pairCode || pairing}>{pairing ? "配对中…" : "配对"}</button>
           {paired && <div className="hint">已有配对凭证,可直接连接</div>}
         </>
       )}
-      <button className="primary" onClick={connect} disabled={mode === "relay" && !paired && !pairCode}>
+      <button className="primary" onClick={connect} disabled={mode === "relay" && !paired}>
         连接
       </button>
       {status && <div className="status">{status}</div>}
