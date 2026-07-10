@@ -11,6 +11,7 @@
     "test": "vitest run src"
   },
   "dependencies": {
+    "@pocket-code/protocol-core": "workspace:*",
     "zod": "^3.24.0"
   },
   "devDependencies": {

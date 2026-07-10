@@ -204,9 +204,9 @@ importers:
 
   packages/relay:
     dependencies:
-      '@pocket-code/wire':
+      '@pocket-code/protocol-core':
         specifier: workspace:*
-        version: link:../wire
+        version: link:../protocol-core
       dotenv:
         specifier: ^16.4.0
         version: 16.6.1
@@ -333,6 +333,9 @@ importers:
 
   packages/wire:
     dependencies:
+      '@pocket-code/protocol-core':
+        specifier: workspace:*
+        version: link:../protocol-core
       zod:
         specifier: ^3.24.0
         version: 3.25.76

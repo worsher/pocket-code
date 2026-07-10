@@ -192,7 +192,11 @@ describe("boundary validation (safeParse)", () => {
     expect(ws.sent.at(-1).success).toBe(false);
   });
 
-  it("rejects relay-request whose payload is not a valid WsMessage", () => {
+  // relay 拆分(protocol-core): RelayRequest.payload 放宽为 z.record(z.unknown()),
+  // 中继不再校验业务 payload 形状(业务校验下沉到 daemon 的 WsMessage.safeParse 兜底)。
+  // 故此处不透 WsMessage 的 payload 在边界层已合法通过,仅在路由到达 daemon-not-online
+  // 分支时按常规离线错误处理(而非旧版的 boundary "error")。
+  it("routes relay-request with a non-WsMessage payload (boundary no longer validates payload shape)", () => {
     const deps = makeDeps();
     const ws = new MockWs();
     const state = createConnState();
@@ -200,7 +204,7 @@ describe("boundary validation (safeParse)", () => {
       type: "relay-request", token: "j", machineId: "m_A", requestId: "r9",
       payload: { type: "not-a-real-type" },
     }), state, deps);
-    expect(ws.sent.at(-1).type).toBe("error");
+    expect(ws.sent.at(-1).type).toBe("relay-response");
     expect(deps.requests.get("r9")).toBeUndefined();
   });
 

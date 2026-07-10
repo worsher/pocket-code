@@ -3,7 +3,7 @@
 // forward-response/stream、tunnel 回帧、heartbeat 与发送者身份绑定。
 
 import { WebSocket } from "ws";
-import { RelayInbound } from "@pocket-code/wire";
+import { RelayInbound } from "@pocket-code/protocol-core";
 import { verifyDaemonAuth } from "./config.js";
 import { relayLog } from "./log.js";
 import type { RequestTracker } from "./requestTracker.js";
