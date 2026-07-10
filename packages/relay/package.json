@@ -1,7 +1,20 @@
 {
   "name": "@pocket-code/relay",
   "version": "0.1.0",
+  "description": "Device pairing + message relay + HTTP/WS reverse tunnel server (ngrok-style, single-tenant shared-secret)",
   "private": true,
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/worsher/pocket-code.git",
+    "directory": "packages/relay"
+  },
+  "keywords": [
+    "reverse-tunnel",
+    "relay",
+    "ngrok-alternative",
+    "websocket"
+  ],
   "type": "module",
   "scripts": {
     "dev": "tsx watch src/index.ts",

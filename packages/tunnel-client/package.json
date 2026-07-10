@@ -1,7 +1,20 @@
 {
   "name": "@pocket-code/tunnel-client",
   "version": "0.1.0",
+  "description": "Reverse-tunnel client for the pocket-code relay: registration, heartbeat, HTTP/WS tunnel frames + pocket-tunnel CLI",
   "private": true,
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/worsher/pocket-code.git",
+    "directory": "packages/tunnel-client"
+  },
+  "keywords": [
+    "reverse-tunnel",
+    "relay",
+    "ngrok-alternative",
+    "websocket"
+  ],
   "type": "module",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",

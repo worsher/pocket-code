@@ -1,5 +1,7 @@
 # 部署说明：代理服务器(Relay) + 开发机器(Daemon)
 
+> 纯隧道部署（不跑 agent 业务）：relay 侧建议 `RELAY_DISCOVERY=off` + `TUNNEL_TOKEN`，内网侧用 `pocket-tunnel` CLI 替代 daemon——见 `packages/relay/README.md` 与 `packages/tunnel-client/README.md`。
+
 > 适用于「公网中继」模式：手机 App ──► **Relay(VPS 公网)** ──► **Daemon(开发机/内网)**。
 > Relay 只做转发与隧道，不执行业务；Daemon 内嵌 server 核心逻辑，AI 调用与工具执行都在开发机本地。
 

@@ -1,7 +1,20 @@
 {
   "name": "@pocket-code/protocol-core",
   "version": "0.1.0",
+  "description": "Business-agnostic relay protocol schemas: envelopes, pairing/discovery, tunnel frames, boundary unions (zod)",
   "private": true,
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/worsher/pocket-code.git",
+    "directory": "packages/protocol-core"
+  },
+  "keywords": [
+    "reverse-tunnel",
+    "relay",
+    "ngrok-alternative",
+    "websocket"
+  ],
   "type": "module",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
