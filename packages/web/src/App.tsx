@@ -1,5 +1,6 @@
 import { useMemo, useState } from "react";
 import ConnectPage from "./pages/ConnectPage";
+import ChatPage from "./pages/ChatPage";
 import { createSettingsStore } from "./webStorage";
 import { WebAgentStore } from "./webAgentStore";
 import { useWebAgent } from "./useWebAgent";
@@ -42,7 +43,7 @@ function Main({ store, tab, onTab, onDisconnect }: {
         <button onClick={onDisconnect}>断开</button>
       </header>
       {state.authError && <div className="auth-error">{state.authError}</div>}
-      <main className="content">{tab === "chat" ? <div>Chat(Task 8)</div> : <div>Files(Task 9)</div>}</main>
+      <main className="content">{tab === "chat" ? <ChatPage store={store} /> : <div>Files(Task 9)</div>}</main>
     </div>
   );
 }

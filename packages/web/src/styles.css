@@ -162,3 +162,211 @@ body { margin: 0; background: var(--bg); color: var(--fg); font: 14px/1.5 -apple
   overflow: auto;
   padding: 16px;
 }
+
+/* ChatPage */
+.chat-page {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  gap: 12px;
+}
+
+.chat-page .messages {
+  flex: 1;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.chat-page .phase-indicator {
+  padding: 8px 12px;
+  background: var(--bg-panel);
+  border-left: 3px solid var(--accent);
+  color: var(--fg-dim);
+  font-size: 13px;
+  align-self: flex-start;
+}
+
+/* Messages */
+.msg {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.msg.user .bubble {
+  align-self: flex-end;
+  max-width: 70%;
+  padding: 8px 12px;
+  background: var(--accent);
+  color: #000;
+  border-radius: 8px;
+  font-weight: 500;
+}
+
+.msg.assistant .bubble {
+  align-self: flex-start;
+  max-width: 70%;
+  padding: 8px 12px;
+  background: var(--bg-panel);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+}
+
+.msg .thinking {
+  align-self: flex-start;
+  max-width: 70%;
+  padding: 0;
+  margin: 0;
+}
+
+.msg .thinking summary {
+  cursor: pointer;
+  padding: 4px 8px;
+  color: var(--fg-dim);
+  font-size: 12px;
+  user-select: none;
+}
+
+.msg .thinking pre {
+  margin: 4px 0 0 0;
+  padding: 8px;
+  background: var(--bg-panel);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  overflow-x: auto;
+  font-size: 12px;
+  line-height: 1.4;
+}
+
+/* Tool Card */
+.tool-card {
+  align-self: flex-start;
+  max-width: 70%;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  overflow: hidden;
+}
+
+.tool-card .tool-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 8px 12px;
+  background: var(--bg-panel);
+  border-bottom: 1px solid var(--border);
+  font-size: 13px;
+}
+
+.tool-card .tool-name {
+  font-weight: 600;
+  color: var(--fg);
+}
+
+.tool-card .tool-status {
+  font-size: 12px;
+  color: var(--fg-dim);
+}
+
+.tool-card .tool-result {
+  margin: 0;
+  padding: 8px 12px;
+  background: var(--bg);
+  overflow-x: auto;
+  font-size: 12px;
+  line-height: 1.4;
+  max-height: 300px;
+}
+
+/* Diff Block */
+.diff-block {
+  margin: 0;
+  border-top: 1px solid var(--border);
+}
+
+.diff-block .diff-path {
+  padding: 8px 12px;
+  background: var(--bg);
+  font-size: 12px;
+  color: var(--fg-dim);
+  font-weight: 600;
+  border-bottom: 1px solid var(--border);
+}
+
+.diff-block pre {
+  margin: 0;
+  padding: 8px 0;
+  background: var(--bg);
+  overflow-x: auto;
+  font-size: 12px;
+  line-height: 1.4;
+}
+
+.diff-line {
+  padding: 0 12px;
+  white-space: pre-wrap;
+  word-break: break-all;
+}
+
+.diff-line.add {
+  background-color: rgba(63, 185, 80, 0.15);
+  color: var(--green);
+}
+
+.diff-line.del {
+  background-color: rgba(248, 81, 73, 0.15);
+  color: var(--red);
+}
+
+.diff-line.same {
+  color: var(--fg);
+}
+
+/* Composer */
+.chat-page .composer {
+  display: flex;
+  gap: 8px;
+  padding: 12px 0;
+  border-top: 1px solid var(--border);
+  max-height: 150px;
+}
+
+.chat-page .composer textarea {
+  flex: 1;
+  padding: 8px 12px;
+  background: var(--bg-panel);
+  border: 1px solid var(--border);
+  color: var(--fg);
+  border-radius: 4px;
+  font: inherit;
+  resize: none;
+  max-height: 120px;
+}
+
+.chat-page .composer textarea:focus {
+  outline: none;
+  border-color: var(--accent);
+}
+
+.chat-page .composer button {
+  padding: 8px 16px;
+  background: var(--accent);
+  border: none;
+  color: #000;
+  border-radius: 4px;
+  font: inherit;
+  font-weight: 600;
+  cursor: pointer;
+  white-space: nowrap;
+  min-height: 36px;
+}
+
+.chat-page .composer button:hover:not(:disabled) {
+  opacity: 0.9;
+}
+
+.chat-page .composer button:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
