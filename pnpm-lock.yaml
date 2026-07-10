@@ -166,9 +166,6 @@ importers:
       jsonwebtoken:
         specifier: ^9.0.3
         version: 9.0.3
-      ws:
-        specifier: ^8.18.0
-        version: 8.19.0
     devDependencies:
       '@types/jsonwebtoken':
         specifier: ^9.0.10
@@ -176,9 +173,6 @@ importers:
       '@types/node':
         specifier: ^22.0.0
         version: 22.19.11
-      '@types/ws':
-        specifier: ^8.5.0
-        version: 8.18.1
       tsx:
         specifier: ^4.19.0
         version: 4.21.0
@@ -216,9 +210,6 @@ importers:
       ws:
         specifier: ^8.18.0
         version: 8.19.0
-      zod:
-        specifier: ^3.24.0
-        version: 3.25.76
     devDependencies:
       '@pocket-code/tunnel-client':
         specifier: workspace:*

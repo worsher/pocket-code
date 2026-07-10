@@ -86,6 +86,9 @@ export function handleTunnelClientMessage(
       }
       return;
     }
+    default:
+      // DaemonInbound 已穷尽;此分支仅为将来协议扩展时的兜底日志
+      console.log("[Tunnel] Unhandled message from relay:", (msg as { type: string }).type);
   }
 }
 

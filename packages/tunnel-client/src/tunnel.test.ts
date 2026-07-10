@@ -3,7 +3,7 @@ import { createServer, type Server } from "node:http";
 import type { AddressInfo } from "node:net";
 import { WebSocketServer, WebSocket } from "ws";
 import {
-  proxyToLocalhost, type TunnelFrame,
+  proxyToLocalhost, type HttpReplyFrame,
   openLocalWebSocket, onWsTunnelData, onWsTunnelClose, closeAllWsTunnels, clampCloseCode,
 } from "./tunnel.js";
 
@@ -35,13 +35,13 @@ afterEach(() => {
   server.close();
 });
 
-function collect(frames: TunnelFrame[]) {
-  return (f: TunnelFrame) => frames.push(f);
+function collect(frames: HttpReplyFrame[]) {
+  return (f: HttpReplyFrame) => frames.push(f);
 }
 
 describe("proxyToLocalhost", () => {
   it("proxies a GET and emits response + chunk(s) + end", async () => {
-    const frames: TunnelFrame[] = [];
+    const frames: HttpReplyFrame[] = [];
     await proxyToLocalhost(
       { tunnelId: "t1", port, method: "GET", path: "/hello", headers: {} },
       collect(frames)
@@ -58,7 +58,7 @@ describe("proxyToLocalhost", () => {
   });
 
   it("forwards a POST body (base64) and gets the echoed response", async () => {
-    const frames: TunnelFrame[] = [];
+    const frames: HttpReplyFrame[] = [];
     await proxyToLocalhost(
       {
         tunnelId: "t2",
@@ -80,7 +80,7 @@ describe("proxyToLocalhost", () => {
   });
 
   it("emits tunnel-end with error when the upstream is unreachable", async () => {
-    const frames: TunnelFrame[] = [];
+    const frames: HttpReplyFrame[] = [];
     // 关掉 server,端口不可达
     server.close();
     await new Promise((r) => setTimeout(r, 50));

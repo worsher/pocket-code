@@ -14,7 +14,7 @@ export interface TunnelHttpRequest {
   body?: string;
 }
 
-export type TunnelFrame =
+export type HttpReplyFrame =
   | { type: "tunnel-response"; tunnelId: string; status: number; headers: Record<string, string> }
   | { type: "tunnel-chunk"; tunnelId: string; data: string }
   | { type: "tunnel-end"; tunnelId: string; error?: string };
@@ -29,7 +29,7 @@ const REQ_HOP_BY_HOP = new Set([
 
 export async function proxyToLocalhost(
   req: TunnelHttpRequest,
-  emit: (frame: TunnelFrame) => void,
+  emit: (frame: HttpReplyFrame) => void,
   fetchImpl: typeof fetch = fetch
 ): Promise<void> {
   // localhost 而非 127.0.0.1:dev server 可能只绑 IPv6 ::1(macOS 常见),
