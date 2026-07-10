@@ -124,6 +124,30 @@ describe("proxyToLocalhost", () => {
     expect(end).toBeDefined();
     expect(end.error).toBeTruthy();
   });
+
+  it("3xx 透传:redirect:manual 下不跟随,保留 Location、成帧原状态", async () => {
+    // fake fetch 断言 init.redirect,并返回 307+Location(明文空 body)
+    let seenRedirect: RequestRedirect | undefined;
+    const fakeFetch = (async (_url: string, init: RequestInit) => {
+      seenRedirect = init.redirect;
+      return new Response(null, {
+        status: 307,
+        headers: { location: "/admin", "content-type": "text/plain" },
+      });
+    }) as unknown as typeof fetch;
+
+    const frames: HttpReplyFrame[] = [];
+    await proxyToLocalhost(
+      { tunnelId: "t_redir", port: 1, method: "GET", path: "/", headers: {} },
+      collect(frames),
+      fakeFetch
+    );
+    expect(seenRedirect).toBe("manual"); // 关键:daemon 要求不跟随
+    const resp = frames.find((f) => f.type === "tunnel-response") as any;
+    expect(resp.status).toBe(307);
+    expect(resp.headers["location"]).toBe("/admin"); // Location 原样回传
+    expect((frames.at(-1) as any).error).toBeUndefined(); // 空 body 也正常 end
+  });
 });
 
 /** 起一个本地回显 ws server,返回 { port, wss, close } */

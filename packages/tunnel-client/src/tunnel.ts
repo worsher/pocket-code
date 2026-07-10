@@ -40,7 +40,7 @@ export async function proxyToLocalhost(
     for (const [k, v] of Object.entries(req.headers)) {
       if (!REQ_HOP_BY_HOP.has(k.toLowerCase())) reqHeaders[k] = v;
     }
-    const init: RequestInit = { method: req.method, headers: reqHeaders };
+    const init: RequestInit = { method: req.method, headers: reqHeaders, redirect: "manual" };
     if (req.body !== undefined && req.method !== "GET" && req.method !== "HEAD") {
       init.body = Buffer.from(req.body, "base64");
     }
