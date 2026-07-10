@@ -47,3 +47,10 @@ export function verifyDaemonAuth(
   }
   return { ok: true };
 }
+
+/** RELAY_DISCOVERY=off 时关闭发现与配对转发(纯隧道部署姿态);默认 on。 */
+export function isDiscoveryEnabled(
+  env: Record<string, string | undefined> = process.env
+): boolean {
+  return (env.RELAY_DISCOVERY || "on").trim().toLowerCase() !== "off";
+}

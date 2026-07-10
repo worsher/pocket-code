@@ -1,6 +1,6 @@
 import { describe, it, expect } from "vitest";
 import crypto from "crypto";
-import { requireRelaySecret, verifyDaemonAuth, HMAC_TIME_WINDOW_MS } from "./config.js";
+import { requireRelaySecret, verifyDaemonAuth, HMAC_TIME_WINDOW_MS, isDiscoveryEnabled } from "./config.js";
 
 describe("requireRelaySecret", () => {
   it("returns the secret when set", () => {
@@ -38,5 +38,17 @@ describe("verifyDaemonAuth", () => {
   it("does not throw on a token of wrong length (原 timingSafeEqual 长度 bug)", () => {
     expect(() => verifyDaemonAuth(secret, "m_1", now, "abcd", now)).not.toThrow();
     expect(verifyDaemonAuth(secret, "m_1", now, "abcd", now).ok).toBe(false);
+  });
+});
+
+describe("isDiscoveryEnabled", () => {
+  it("defaults to on when unset/empty/other values", () => {
+    expect(isDiscoveryEnabled({})).toBe(true);
+    expect(isDiscoveryEnabled({ RELAY_DISCOVERY: "" })).toBe(true);
+    expect(isDiscoveryEnabled({ RELAY_DISCOVERY: "on" })).toBe(true);
+  });
+  it("turns off only on 'off' (case/space insensitive)", () => {
+    expect(isDiscoveryEnabled({ RELAY_DISCOVERY: "off" })).toBe(false);
+    expect(isDiscoveryEnabled({ RELAY_DISCOVERY: " OFF " })).toBe(false);
   });
 });

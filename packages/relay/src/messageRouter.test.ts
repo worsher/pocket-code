@@ -330,3 +330,35 @@ describe("WS tunnel frames (P7 HMR body ownership)", () => {
     expect(browser.sent[0]).toBe("legit");
   });
 });
+
+describe("RELAY_DISCOVERY=off(纯隧道部署姿态)", () => {
+  it("rejects list-machines with an error and does not reveal machines", () => {
+    const deps: RouterDeps = { ...makeDeps(), discovery: false };
+    const { ws: daemonWs } = registerDaemonVia(deps, "m_disc1");
+    cleanups.push(daemonWs);
+
+    const ws = new MockWs();
+    const state = createConnState();
+    handleRelayInbound(asWs(ws), JSON.stringify({ type: "list-machines" }), state, deps);
+    expect(ws.sent.at(-1)).toEqual({ type: "error", error: "Discovery is disabled on this relay" });
+    expect(ws.sent.some((m) => m.type === "machines-list")).toBe(false);
+  });
+
+  it("rejects pair-request with a failed pair-response (App UI 可显示失败)", () => {
+    const deps: RouterDeps = { ...makeDeps(), discovery: false };
+    const ws = new MockWs();
+    const state = createConnState();
+    handleRelayInbound(asWs(ws), JSON.stringify({
+      type: "pair-request", pairingCode: "ABCD2345", deviceId: "d1", deviceName: "Phone",
+    }), state, deps);
+    expect(ws.sent.at(-1)).toEqual({ type: "pair-response", success: false, error: "Pairing is disabled on this relay" });
+  });
+
+  it("discovery undefined keeps existing behavior (默认开启)", () => {
+    const deps = makeDeps();
+    const ws = new MockWs();
+    const state = createConnState();
+    handleRelayInbound(asWs(ws), JSON.stringify({ type: "list-machines" }), state, deps);
+    expect(ws.sent.at(-1).type).toBe("machines-list");
+  });
+});

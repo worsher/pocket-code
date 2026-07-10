@@ -36,6 +36,8 @@ export interface RouterDeps {
   wsTunnelHub: WsTunnelHub;
   /** 可注入时钟(测试用) */
   now?: () => number;
+  /** 发现与配对转发开关(RELAY_DISCOVERY);false 才关闭,undefined 视为开启 */
+  discovery?: boolean;
 }
 
 function sendJSON(ws: WebSocket, data: unknown) {
@@ -185,6 +187,11 @@ export function handleRelayInbound(
         sendJSON(ws, { type: "error", error: "Daemon connection cannot send app messages" });
         return;
       }
+      if (deps.discovery === false) {
+        relayLog("Rejected list-machines: discovery disabled");
+        sendJSON(ws, { type: "error", error: "Discovery is disabled on this relay" });
+        return;
+      }
       state.role = "app";
       relayLog(`App list-machines; online=${getOnlineMachines().length}`);
       sendJSON(ws, { type: "machines-list", machines: getOnlineMachines() });
@@ -196,6 +203,11 @@ export function handleRelayInbound(
       if (state.role === "daemon") {
         console.warn(`[Relay] Dropped pair-request from registered daemon ${state.machineId}`);
         sendJSON(ws, { type: "error", error: "Daemon connection cannot send app messages" });
+        return;
+      }
+      if (deps.discovery === false) {
+        relayLog("Rejected pair-request: discovery disabled");
+        sendJSON(ws, { type: "pair-response", success: false, error: "Pairing is disabled on this relay" });
         return;
       }
       state.role = "app";

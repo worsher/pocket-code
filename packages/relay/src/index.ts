@@ -27,7 +27,7 @@ import { RequestTracker } from "./requestTracker.js";
 import { TunnelHub } from "./tunnelHub.js";
 import { WsTunnelHub } from "./wsTunnelHub.js";
 import { createUpgradeHandler, makeTunnelWss } from "./upgradeRouter.js";
-import { requireRelaySecret } from "./config.js";
+import { requireRelaySecret, isDiscoveryEnabled } from "./config.js";
 import { createConnState, handleRelayInbound } from "./messageRouter.js";
 
 const PORT = parseInt(process.env.PORT || "3200", 10);
@@ -39,6 +39,9 @@ try {
   console.error(`[Relay] 启动失败:${err.message}`);
   process.exit(1);
 }
+
+const DISCOVERY = isDiscoveryEnabled();
+console.log(`[Relay] Discovery: ${DISCOVERY ? "on" : "off"}`);
 
 // ── 反向 HTTP 隧道枢纽(关联 http 请求与 tunnelId) ──
 const tunnelHub = new TunnelHub();
@@ -162,6 +165,7 @@ wss.on("connection", (ws: WebSocket, req) => {
       requests,
       tunnelHub,
       wsTunnelHub,
+      discovery: DISCOVERY,
     });
   });
 
