@@ -7,3 +7,4 @@ export {
   type TunnelHttpRequest, type TunnelFrame, type TunnelWsOpenRequest,
 } from "./tunnel.js";
 export { parseRelayMessage } from "./inbound.js";
+export { loadOrCreateIdentity, type TunnelIdentity } from "./identity.js";
