@@ -1,0 +1,98 @@
+<!doctype html>
+<!-- builder:esbuild-wasm 哑执行器。一切 resolve/load 决策经 bridge 由 RN 侧
+     orchestrator 做(见 src/services/previewBuilder/)。本文件是模板:
+     {{ESBUILD_BROWSER_JS}} 由 scripts/sync-preview-builder-assets.mjs 内联替换,
+     生成物 builder.html 不进 git。 -->
+<html>
+<head><meta charset="utf-8"></head>
+<body>
+<script>{{ESBUILD_BROWSER_JS}}</script>
+<script>
+(function () {
+  "use strict";
+  var pending = {}; // id -> {resolve}
+  var nextId = 1;
+
+  function post(obj) {
+    window.ReactNativeWebView.postMessage(JSON.stringify(obj));
+  }
+
+  // RN → WebView 唯一入口(RN 用 injectJavaScript 调用)
+  window.__pcHost = function (jsonStr) {
+    var m;
+    try { m = JSON.parse(jsonStr); } catch (e) { return; }
+    if (m.type === "start") { runBuild(m.entryJs); return; }
+    if (typeof m.id !== "number") return;
+    if (m.type === "fetch") {
+      // 同一 id 的中间指令:去拉 CDN,结果回 RN(RN 落缓存后再回最终 loaded)
+      fetch(m.url).then(function (r) {
+        if (!r.ok) { post({ id: m.id, type: "fetched", url: m.url, ok: false, status: r.status }); return null; }
+        return r.text().then(function (t) { post({ id: m.id, type: "fetched", url: m.url, ok: true, status: r.status, content: t }); });
+      }).catch(function () { post({ id: m.id, type: "fetched", url: m.url, ok: false, status: 0 }); });
+      return;
+    }
+    // resolved / loaded:终结 pending
+    var p = pending[m.id];
+    if (p) { delete pending[m.id]; p.resolve(m); }
+  };
+
+  function rpc(type, payload) {
+    return new Promise(function (resolve) {
+      var id = nextId++;
+      pending[id] = { resolve: resolve };
+      payload.id = id; payload.type = type;
+      post(payload);
+    });
+  }
+
+  function b64ToU8(b64) {
+    var bin = atob(b64), u8 = new Uint8Array(bin.length);
+    for (var i = 0; i < bin.length; i++) u8[i] = bin.charCodeAt(i);
+    return u8;
+  }
+
+  function runBuild(entryJs) {
+    esbuild.build({
+      entryPoints: [entryJs],
+      bundle: true,
+      write: false,
+      format: "esm",
+      outdir: "assets",
+      logLevel: "silent",
+      plugins: [{
+        name: "pc-bridge",
+        setup: function (b) {
+          b.onResolve({ filter: /.*/ }, function (args) {
+            return rpc("resolve", { path: args.path, importer: args.importer || "" }).then(function (r) {
+              if (r.error) return { errors: [{ text: r.error }] };
+              return { path: r.path, namespace: "pc" };
+            });
+          });
+          b.onLoad({ filter: /.*/, namespace: "pc" }, function (args) {
+            return rpc("load", { path: args.path }).then(function (r) {
+              if (r.error) return { errors: [{ text: r.error }] };
+              return { contents: r.binary ? b64ToU8(r.contents) : r.contents, loader: r.loader };
+            });
+          });
+        }
+      }]
+    }).then(function (result) {
+      for (var i = 0; i < result.outputFiles.length; i++) {
+        var f = result.outputFiles[i];
+        post({ type: "dist", path: f.path.replace(/^\//, ""), content: f.text });
+      }
+      var warnings = [];
+      for (var j = 0; j < result.warnings.length; j++) warnings.push(result.warnings[j].text);
+      post({ type: "done", warnings: warnings });
+    }).catch(function (e) {
+      post({ type: "error", message: String((e && e.message) || e) });
+    });
+  }
+
+  esbuild.initialize({ wasmURL: "./esbuild.wasm" })
+    .then(function () { post({ type: "ready" }); })
+    .catch(function (e) { post({ type: "error", message: "构建器初始化失败" }); });
+})();
+</script>
+</body>
+</html>

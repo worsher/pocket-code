@@ -39,3 +39,7 @@ yarn-error.*
 # generated native folders
 /ios
 /android
+
+# preview-builder generated files
+assets/preview-builder/builder.html
+assets/preview-builder/esbuild.wasm
