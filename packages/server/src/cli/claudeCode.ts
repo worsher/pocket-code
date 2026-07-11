@@ -37,6 +37,9 @@ export const claudeCodeAdapter = {
         `\n\n## Project Instructions\n${ctx.customPrompt.trim()}`
       );
     }
+    if (ctx.resumeSessionId) {
+      args.unshift("--resume", ctx.resumeSessionId);
+    }
     // claude CLI 使用自身存储的 OAuth 凭证与自身配置的模型;清除宿主 shell
     // 里可能残留的 ANTHROPIC_* 覆盖项(API key/镜像 base URL/模型指定),
     // 否则旧值会劫持 CLI(真机案例:ANTHROPIC_MODEL 指向已下线模型 → 404)。
@@ -122,5 +125,19 @@ export const claudeCodeAdapter = {
       // "system" / "stream_event" / 其它 → 无业务事件
     }
     return events;
+  },
+
+  extractSessionId(line: string): string | undefined {
+    const t = line.trim();
+    if (!t) return undefined;
+    try {
+      const m = JSON.parse(t);
+      if (m?.type === "system" && m?.subtype === "init" && typeof m.session_id === "string") {
+        return m.session_id;
+      }
+    } catch {
+      /* 非 JSON 行 */
+    }
+    return undefined;
   },
 } satisfies CliAgentAdapter;

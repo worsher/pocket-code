@@ -107,6 +107,8 @@ export interface AgentSession {
   containerId?: string;
   /** Custom project instructions (appended to system prompt) */
   customPrompt?: string;
+  /** CLI 委托续接会话 id,按 adapter.id 分槽。 */
+  cliSessions?: Record<string, string>;
   /** Timestamp of last activity, used for TTL cleanup */
   lastActivity: number;
 }
