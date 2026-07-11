@@ -32,6 +32,8 @@ function injectHistory(session: AgentSession, userMessage: string): string {
   if (recent.length === 0) return userMessage;
   const lines = recent.map((m) => {
     const text = typeof m.content === "string" ? m.content : JSON.stringify(m.content);
+    // 按字符硬截断即可:注入的是给 CLI 读的历史摘要文本,非结构化数据,
+    // 中途截断不破坏语义(下游 CLI 按自然语言理解),故不追求 token/句子边界。
     return `${m.role}: ${text.slice(0, HISTORY_CHAR_CAP)}`;
   });
   return `## Recent conversation\n${lines.join("\n")}\n\n## Current request\n${userMessage}`;

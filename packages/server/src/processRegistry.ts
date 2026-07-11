@@ -41,7 +41,7 @@ export async function startManaged(
   const processId = newId();
   const containerId = opts?.containerId;
 
-  let child;
+  let child: ChildProcess;
   if (containerId && isDockerEnabled()) {
     const wArgs = opts?.containerCwd ? ["-w", opts.containerCwd] : [];
     child = spawnFn("docker", ["exec", "-d", ...wArgs, containerId, "sh", "-c", command], { stdio: "ignore" });
@@ -55,11 +55,14 @@ export async function startManaged(
     workspace,
     command,
     pid: child.pid ?? -1,
+    // 注:containerId 非空但 isDockerEnabled()=false 时,上面已退化走 host 分支,
+    // 但此字段仍记原值。这是自洽的:stopManaged 用同一 `containerId && isDockerEnabled()`
+    // 判据,届时同样走 host,不会误发 docker pkill。
     containerId,
     startedAt: Date.now(),
   };
   registry.set(processId, rec);
-  handles.set(processId, child as ChildProcess);
+  handles.set(processId, child);
 
   child.on?.("close", () => { registry.delete(processId); handles.delete(processId); });
   child.on?.("error", () => { registry.delete(processId); handles.delete(processId); });

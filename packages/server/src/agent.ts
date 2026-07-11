@@ -193,7 +193,9 @@ export async function runAgent(
       workspace: session.workspace,
       system: buildSystemPrompt({
         customPrompt: session.customPrompt,
-        supportsBackground: !!backend.startProcess,
+        // 与 execTools 能力门控(需 startProcess && stopProcess)判据对称,
+        // 防未来出现只实现其一的 backend 时 prompt 宣传与工具注册分叉。
+        supportsBackground: !!(backend.startProcess && backend.stopProcess),
       }),
       history,
       userMessage,
