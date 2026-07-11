@@ -12,6 +12,8 @@ export interface CliSpawnContext {
   workspace: string;
   /** 可选的项目级系统指令(注入 CLI)。 */
   customPrompt?: string;
+  /** claude 续接:上轮捕获的 session_id(有则 buildSpawn 加 --resume)。 */
+  resumeSessionId?: string;
 }
 
 /** 子进程 spawn 规格(由上层运行器据此 spawn)。 */
@@ -40,4 +42,6 @@ export interface CliAgentAdapter {
    * runner 优先使用本方法。
    */
   createParser?(): (line: string) => AgentEventType[];
+  /** 可选:从 stdout 一行提取底层 CLI 的 session_id(claude stream-json init 消息)。首次命中即被 runner 记住。 */
+  extractSessionId?(line: string): string | undefined;
 }

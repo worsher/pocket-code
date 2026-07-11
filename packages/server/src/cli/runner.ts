@@ -10,9 +10,13 @@ import { killProcessTree } from "../processKill.js";
 
 export type SpawnFn = typeof nodeSpawn;
 
+/** 无任何 stdout/stderr 活动的最长等待时间;超时视为 CLI 卡死,强制终止。 */
+const IDLE_TIMEOUT_MS = 120000;
+
 /**
  * 运行一个 CLI 代理。把适配器解析出的 AgentEvent 通过 onEvent 流式发出,
- * 结尾必发一个 done。返回累计的 assistant 文本(供上层写入会话历史)。
+ * 结尾必发一个 done。返回累计的 assistant 文本(供上层写入会话历史)与(若适配器
+ * 支持)首次从输出中采集到的底层 CLI session_id(供上层持久化以便下轮 --resume)。
  */
 export async function runCliAgent(
   adapter: CliAgentAdapter,
@@ -21,7 +25,7 @@ export async function runCliAgent(
   onEvent: (event: AgentEventType) => void,
   signal?: AbortSignal,
   spawnFn: SpawnFn = nodeSpawn
-): Promise<string> {
+): Promise<{ fullText: string; cliSessionId?: string }> {
   const spec = adapter.buildSpawn(userMessage, ctx);
 
   const parse =
@@ -65,12 +69,30 @@ export async function runCliAgent(
     onEvent(event);
   };
 
-  const drainLine = (line: string) => {
-    for (const ev of parse(line)) handle(ev);
-  };
+  return new Promise<{ fullText: string; cliSessionId?: string }>((resolve) => {
+    let cliSessionId: string | undefined;
+    let stderrTail = "";
+    let idleTimer: NodeJS.Timeout | undefined;
 
-  return new Promise<string>((resolve) => {
+    const resetIdle = () => {
+      if (idleTimer) clearTimeout(idleTimer);
+      idleTimer = setTimeout(() => {
+        handle({ type: "error", message: "CLI 无响应,已终止(120s 无输出)" });
+        if (proc.pid) killProcessTree(proc.pid); // → 触发 close → resolve
+      }, IDLE_TIMEOUT_MS);
+    };
+    resetIdle();
+
+    const drainLine = (line: string) => {
+      if (!cliSessionId && adapter.extractSessionId) {
+        const sid = adapter.extractSessionId(line);
+        if (sid) cliSessionId = sid;
+      }
+      for (const ev of parse(line)) handle(ev);
+    };
+
     proc.stdout?.on("data", (chunk: Buffer) => {
+      resetIdle();
       lineBuffer += chunk.toString("utf-8");
       const lines = lineBuffer.split("\n");
       lineBuffer = lines.pop() ?? "";
@@ -78,21 +100,26 @@ export async function runCliAgent(
     });
 
     proc.stderr?.on("data", (chunk: Buffer) => {
+      resetIdle();
       const msg = chunk.toString("utf-8").trim();
       if (msg) console.warn(`[CLI:${adapter.id}] stderr:`, msg.slice(0, 300));
+      stderrTail = (stderrTail + msg).slice(-2048);
     });
 
     proc.on("close", (code: number | null) => {
+      if (idleTimer) clearTimeout(idleTimer);
       if (lineBuffer.trim()) drainLine(lineBuffer);
       // CLI 常以非零码退出却实际成功:只有"零输出且非中止且未报错"才判为失败。
       if (code !== 0 && !signal?.aborted && !producedOutput && !errorEmitted) {
-        handle({ type: "error", message: `${adapter.id} 进程异常退出 (code=${code})` });
+        const tail = stderrTail.trim() ? `\n${stderrTail.trim()}` : "";
+        handle({ type: "error", message: `${adapter.id} 进程异常退出 (code=${code})${tail}` });
       }
       onEvent({ type: "done" });
-      resolve(fullText);
+      resolve({ fullText, cliSessionId });
     });
 
     proc.on("error", (err: Error) => {
+      if (idleTimer) clearTimeout(idleTimer);
       if (!errorEmitted) {
         onEvent({
           type: "error",
@@ -100,7 +127,7 @@ export async function runCliAgent(
         });
       }
       onEvent({ type: "done" });
-      resolve(fullText);
+      resolve({ fullText, cliSessionId });
     });
   });
 }

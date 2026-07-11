@@ -29,7 +29,9 @@ export async function runCliSession(
   spawnFn?: SpawnFn
 ): Promise<void> {
   console.log(`[CLI] ${adapter.id}: workspace=${session.workspace}, msg="${userMessage.slice(0, 80)}"`);
-  const fullText = await runCliAgent(
+  // 注:runCliAgent 现返回 { fullText, cliSessionId }(T6)。这里仅解构出 fullText 维持既有行为;
+  // cliSessionId 的持久化/--resume 接线属于 T7 范围,故意不在此处理。
+  const { fullText } = await runCliAgent(
     adapter,
     userMessage,
     { workspace: session.workspace, customPrompt: session.customPrompt },
