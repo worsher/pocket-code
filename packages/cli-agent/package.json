@@ -1,0 +1,29 @@
+{
+  "name": "@pocket-code/cli-agent",
+  "version": "0.1.0",
+  "description": "Drive coding-agent CLIs (claude-code / codex / gemini-cli) as child processes and normalize their NDJSON output into a unified CliEvent stream",
+  "private": true,
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/worsher/pocket-code.git",
+    "directory": "packages/cli-agent"
+  },
+  "keywords": [
+    "claude-code",
+    "codex",
+    "gemini-cli",
+    "cli-agent",
+    "ndjson"
+  ],
+  "type": "module",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "scripts": { "build": "tsc", "test": "vitest run src" },
+  "dependencies": {},
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "typescript": "^5.7.0",
+    "vitest": "^4.0.18"
+  }
+}
