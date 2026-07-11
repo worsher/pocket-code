@@ -66,9 +66,9 @@
 
 单人期不拆仓库,包边界按"随时可拆"标准维护。触发信号:开源/第三方复用/多人协作。
 - **relay** → 已达"随时可迁"终态(specs/2026-07-10-relay拆分):依赖图自足(protocol-core+ws)、发布件齐、隧道入口可鉴权;真正开源仅剩 git subtree 迁移+npm 发布。
-- **cli 适配层** → 独立 OSS 库(驱动 claude-code/codex/gemini 的归一化事件流):约 1 天,价值最高。
+- **cli 适配层** → 独立 OSS 库(驱动 claude-code/codex/gemini 的归一化事件流):约 1 天,价值最高。**执行层功能债已于 2026-07-11 修复**(后台进程/claude resume/codex-gemini 历史注入/runCommand 超时/prompt 能力门控;spec/plan 见 docs/superpowers/{specs,plans}/2026-07-11-cli执行层缺陷修复*),拆库(git subtree + npm 发布)为紧接的下一轮。
 - **agent-core** → P9 即按可拆标准建包(运行时零依赖)。
-- **client-core + Web 端** → P10 候选。
+- **client-core + Web 端** → ✅ 已达"随时可迁"(P10 建包 + P11 删冻结副本后为 App/Web 唯一真相源)。
 
 ## 安全后置（多用户/公开部署前必做）
 

@@ -5,6 +5,7 @@ import { handleFileUpload, handleFileDownload, handleWorkspaceSync } from "./fil
 import { isPoolEnabled, initPool } from "./containerPool.js";
 import { initDb } from "./db.js";
 import { createMessageHandler } from "./messageHandler.js";
+import { shutdownAll } from "./processRegistry.js";
 
 const PORT = parseInt(process.env.PORT || "3100", 10);
 
@@ -90,3 +91,14 @@ wss.on("connection", (ws: WebSocket) => {
     handler.onClose();
   });
 });
+
+// 进程退出时清理所有后台进程(daemon 级常驻,但进程本体退出必须收尾)
+let shuttingDown = false;
+function onExit() {
+  if (shuttingDown) return;
+  shuttingDown = true;
+  shutdownAll();
+}
+process.on("SIGTERM", () => { onExit(); process.exit(0); });
+process.on("SIGINT", () => { onExit(); process.exit(0); });
+process.on("exit", onExit);

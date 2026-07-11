@@ -40,14 +40,14 @@ describe("runCliAgent", () => {
     proc.pushLine({ type: "result", subtype: "success", usage: { input_tokens: 1, output_tokens: 2 } });
     proc.finish(0);
 
-    const text = await p;
+    const { fullText } = await p;
 
     const types = events.map((e) => e.type);
     expect(types).toContain("text-delta");
     expect(types).toContain("tool-call");
     expect(types).toContain("usage");
     expect(types[types.length - 1]).toBe("done"); // 末事件必为 done
-    expect(text).toBe("Hello"); // 累计 text-delta
+    expect(fullText).toBe("Hello"); // 累计 text-delta
   });
 
   it("handles a line split across two stdout chunks", async () => {
@@ -128,5 +128,134 @@ describe("runCliAgent parser selection", () => {
     await expect(
       runCliAgent(badAdapter as any, "hi", ctx, () => {}, undefined, () => makeFakeProc())
     ).rejects.toThrow(/parseLine|createParser/);
+  });
+});
+
+describe("runCliAgent 返回对象 + session_id 采集", () => {
+  it("返回 { fullText, cliSessionId }(首次命中即记住)", async () => {
+    const proc = makeFakeProc();
+    const adapter = {
+      id: "claude-code" as const,
+      supportsResume: true,
+      buildSpawn: () => ({ cmd: "claude", args: [], env: {} as any, cwd: "/ws" }),
+      parseLine: (l: string) => {
+        try {
+          const m = JSON.parse(l);
+          return m.text ? [{ type: "text-delta" as const, text: m.text }] : [];
+        } catch {
+          return [];
+        }
+      },
+      extractSessionId: (l: string) => {
+        try {
+          const m = JSON.parse(l);
+          return m.session_id;
+        } catch {
+          return undefined;
+        }
+      },
+    };
+    const events: AgentEventType[] = [];
+    const p = runCliAgent(adapter as any, "hi", ctx, (e) => events.push(e), undefined, () => proc);
+
+    proc.pushLine({ session_id: "sess_123" });
+    proc.pushLine({ text: "hello" });
+    proc.finish(0);
+
+    const result = await p;
+    expect(result.fullText).toBe("hello");
+    expect(result.cliSessionId).toBe("sess_123");
+  });
+
+  it("adapter 无 extractSessionId 时 cliSessionId 为 undefined", async () => {
+    const proc = makeFakeProc();
+    const events: AgentEventType[] = [];
+    const p = runCliAgent(claudeCodeAdapter, "hi", ctx, (e) => events.push(e), undefined, () => proc);
+    proc.pushLine({ type: "assistant", message: { content: [{ type: "text", text: "ok" }] } });
+    proc.finish(0);
+    const result = await p;
+    expect(result.cliSessionId).toBeUndefined();
+  });
+});
+
+describe("runCliAgent 空闲超时", () => {
+  it("120s 无输出 → kill + error 事件,且不重复 resolve(由 close 收尾)", async () => {
+    vi.useFakeTimers();
+    try {
+      const proc = makeFakeProc();
+      const killSpy = vi.spyOn(process, "kill").mockImplementation(() => true);
+      const events: AgentEventType[] = [];
+      const p = runCliAgent(claudeCodeAdapter, "hi", ctx, (e) => events.push(e), undefined, () => proc);
+
+      await vi.advanceTimersByTimeAsync(120001);
+
+      // 空闲超时应已触发 kill(经 killProcessTree),但尚未 resolve —— close 事件才收尾。
+      expect(killSpy).toHaveBeenCalled();
+      expect(events.some((e) => e.type === "error" && e.message.includes("120s 无输出"))).toBe(true);
+
+      // 模拟 kill 引发的 close 事件,负责真正 resolve。
+      proc.finish(null as any);
+      const result = await p;
+      expect(result.fullText).toBe("");
+      expect(events[events.length - 1].type).toBe("done");
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("有输出活动时重置计时器,不会误触发空闲超时", async () => {
+    vi.useFakeTimers();
+    try {
+      const proc = makeFakeProc();
+      const events: AgentEventType[] = [];
+      const p = runCliAgent(claudeCodeAdapter, "hi", ctx, (e) => events.push(e), undefined, () => proc);
+
+      // 每次在超时前产生输出,重置计时器。
+      await vi.advanceTimersByTimeAsync(100000);
+      proc.pushLine({ type: "assistant", message: { content: [{ type: "text", text: "still going" }] } });
+      await vi.advanceTimersByTimeAsync(100000);
+      proc.pushLine({ type: "assistant", message: { content: [{ type: "text", text: "more" }] } });
+      await vi.advanceTimersByTimeAsync(100000);
+
+      expect(events.some((e) => e.type === "error")).toBe(false);
+
+      proc.finish(0);
+      const result = await p;
+      expect(result.fullText).toBe("still goingmore");
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+});
+
+describe("runCliAgent stderr 尾附错误", () => {
+  it("异常退出且无输出时,错误 message 附上 stderr 尾部", async () => {
+    const proc = makeFakeProc();
+    const events: AgentEventType[] = [];
+    const p = runCliAgent(claudeCodeAdapter, "hi", ctx, (e) => events.push(e), undefined, () => proc);
+
+    proc.stderr.emit("data", Buffer.from("Error: something broke\n"));
+    proc.stderr.emit("data", Buffer.from("at somewhere.js:10\n"));
+    proc.finish(1);
+    await p;
+
+    const errorEvents = events.filter((e) => e.type === "error") as Array<{ type: "error"; message: string }>;
+    expect(errorEvents).toHaveLength(1);
+    expect(errorEvents[0].message).toContain("进程异常退出");
+    expect(errorEvents[0].message).toContain("Error: something broke");
+    expect(errorEvents[0].message).toContain("at somewhere.js:10");
+  });
+
+  it("正常退出(有输出)时不附 stderr 尾", async () => {
+    const proc = makeFakeProc();
+    const events: AgentEventType[] = [];
+    const p = runCliAgent(claudeCodeAdapter, "hi", ctx, (e) => events.push(e), undefined, () => proc);
+
+    proc.stderr.emit("data", Buffer.from("just a warning\n"));
+    proc.pushLine({ type: "assistant", message: { content: [{ type: "text", text: "ok" }] } });
+    proc.finish(0);
+    await p;
+
+    expect(events.filter((e) => e.type === "error")).toHaveLength(0);
   });
 });

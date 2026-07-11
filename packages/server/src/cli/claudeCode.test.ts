@@ -173,3 +173,29 @@ describe("claudeCodeAdapter parser robustness (P8 修复)", () => {
     }
   });
 });
+
+describe("claudeCode extractSessionId", () => {
+  it("从 init 消息取 session_id", () => {
+    const sid = claudeCodeAdapter.extractSessionId!('{"type":"system","subtype":"init","session_id":"sess_abc"}');
+    expect(sid).toBe("sess_abc");
+  });
+  it("非 init 消息返回 undefined", () => {
+    expect(claudeCodeAdapter.extractSessionId!('{"type":"assistant"}')).toBeUndefined();
+  });
+  it("坏 JSON 安全返回 undefined", () => {
+    expect(claudeCodeAdapter.extractSessionId!("not json")).toBeUndefined();
+  });
+});
+
+describe("claudeCode buildSpawn --resume", () => {
+  it("有 resumeSessionId 时 args 含 --resume <id>", () => {
+    const spec = claudeCodeAdapter.buildSpawn("hi", { workspace: "/ws", resumeSessionId: "sess_x" });
+    const i = spec.args.indexOf("--resume");
+    expect(i).toBeGreaterThan(-1);
+    expect(spec.args[i + 1]).toBe("sess_x");
+  });
+  it("无 resumeSessionId 时不含 --resume", () => {
+    const spec = claudeCodeAdapter.buildSpawn("hi", { workspace: "/ws" });
+    expect(spec.args).not.toContain("--resume");
+  });
+});

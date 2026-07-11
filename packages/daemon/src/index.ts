@@ -28,6 +28,7 @@ import {
 import { loadDevices, getDevices } from "./deviceStore.js";
 import { createMessageHandler, type MessageHandler } from "@pocket-code/server/messageHandler";
 import { initDb } from "@pocket-code/server/db";
+import { shutdownAll } from "@pocket-code/server/processRegistry";
 import { requireRelaySecret } from "./config.js";
 import type { DaemonInboundType, ServerOutboundType } from "@pocket-code/wire";
 
@@ -291,6 +292,7 @@ function handleRelayMessage(msg: DaemonInboundType) {
 
 function shutdown() {
   console.log("\n[Daemon] Shutting down...");
+  shutdownAll();
   connection.stop();
   process.exit(0);
 }

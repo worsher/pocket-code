@@ -99,6 +99,48 @@ describe("resolveGitCwd", () => {
   });
 });
 
+describe("runCommand timeoutSeconds", () => {
+  it("默认 120s", async () => {
+    const exec = vi.fn(async () => ({ stdout: "ok", stderr: "", exitCode: 0 }));
+    const be = makeFakeBackend({ exec });
+    const registry = buildToolRegistry(be, "/ws");
+    await registry.run("runCommand", { command: "echo hi" });
+    const [, opts]: any = exec.mock.calls[0];
+    expect(opts.timeoutMs).toBe(120000);
+  });
+  it("模型传参生效", async () => {
+    const exec = vi.fn(async () => ({ stdout: "ok", stderr: "", exitCode: 0 }));
+    const be = makeFakeBackend({ exec });
+    const registry = buildToolRegistry(be, "/ws");
+    await registry.run("runCommand", { command: "npm i", timeoutSeconds: 300 });
+    const [, opts]: any = exec.mock.calls[0];
+    expect(opts.timeoutMs).toBe(300000);
+  });
+  it("clamp 上限 600", async () => {
+    const exec = vi.fn(async () => ({ stdout: "ok", stderr: "", exitCode: 0 }));
+    const be = makeFakeBackend({ exec });
+    const registry = buildToolRegistry(be, "/ws");
+    await registry.run("runCommand", { command: "x", timeoutSeconds: 9999 });
+    const [, opts]: any = exec.mock.calls[0];
+    expect(opts.timeoutMs).toBe(600000);
+  });
+  it("clamp 下限 1;非法值回默认", async () => {
+    const exec = vi.fn(async () => ({ stdout: "ok", stderr: "", exitCode: 0 }));
+    const be = makeFakeBackend({ exec });
+    const registry = buildToolRegistry(be, "/ws");
+    await registry.run("runCommand", { command: "x", timeoutSeconds: 0 });
+    const [, opts1]: any = exec.mock.calls[0];
+    expect(opts1.timeoutMs).toBe(1000);
+
+    const exec2 = vi.fn(async () => ({ stdout: "ok", stderr: "", exitCode: 0 }));
+    const be2 = makeFakeBackend({ exec: exec2 });
+    const registry2 = buildToolRegistry(be2, "/ws");
+    await registry2.run("runCommand", { command: "x", timeoutSeconds: "abc" as any });
+    const [, opts2]: any = exec2.mock.calls[0];
+    expect(opts2.timeoutMs).toBe(120000);
+  });
+});
+
 describe("process tools (capability-gated)", () => {
   it("registered only when backend provides startProcess/stopProcess", async () => {
     const noProc = buildToolRegistry(makeFakeBackend(), "/ws");

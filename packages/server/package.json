@@ -21,6 +21,12 @@
       "require": "./dist/db.js",
       "types": "./dist/db.d.ts",
       "default": "./src/db.ts"
+    },
+    "./processRegistry": {
+      "import": "./dist/processRegistry.js",
+      "require": "./dist/processRegistry.js",
+      "types": "./dist/processRegistry.d.ts",
+      "default": "./src/processRegistry.ts"
     }
   },
   "scripts": {

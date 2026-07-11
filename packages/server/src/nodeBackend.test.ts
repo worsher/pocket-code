@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach } from "vitest";
+import { describe, it, expect, beforeEach, vi } from "vitest";
 import { mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -77,5 +77,38 @@ describe("NodeBackend", () => {
     const r = await be.exec("echo hi", { cwd: join(ws, "does-not-exist") });
     expect(r.exitCode).toBe(127);
     expect(r.stderr.length).toBeGreaterThan(0);
+  });
+});
+
+vi.mock("./processRegistry.js", () => ({
+  startManaged: vi.fn(async (ws: string, cmd: string) => ({ processId: "p_test" })),
+  stopManaged: vi.fn(async () => {}),
+}));
+
+describe("nodeBackend 后台进程", () => {
+  // I-1 回归:startProcess 须把 host/容器两种 cwd 都算出来透传给 startManaged，
+  // 否则后台子进程实际工作目录从未设置(继承 daemon 自己的 cwd)。
+  // 第一参保持稳定的 workspace 根(分组 key)，不再是 resolveHostCwd 的解析结果，
+  // 这样同 workspace 下不同 cwd 的进程仍归一组("同 workspace+同 command 先杀旧"语义不变)。
+  it("startProcess 转发 startManaged(workspace 作分组 key,cwd/containerCwd 分流传递)", async () => {
+    const reg = await import("./processRegistry.js");
+    const { createNodeBackend } = await import("./nodeBackend.js");
+    const be = createNodeBackend("/ws", undefined);
+    const r = await be.startProcess!("npm run dev", { cwd: "sub" });
+    expect(r.processId).toBe("p_test");
+    // resolveHostCwd("/ws","sub") → "/ws/sub"；resolveContainerCwd("/ws","sub") → "/workspace/sub"
+    expect(reg.startManaged).toHaveBeenCalledWith("/ws", "npm run dev", {
+      containerId: undefined,
+      cwd: "/ws/sub",
+      containerCwd: "/workspace/sub",
+    });
+  });
+
+  it("stopProcess 转发 stopManaged", async () => {
+    const reg = await import("./processRegistry.js");
+    const { createNodeBackend } = await import("./nodeBackend.js");
+    const be = createNodeBackend("/ws", undefined);
+    await be.stopProcess!("p_x");
+    expect(reg.stopManaged).toHaveBeenCalledWith("p_x");
   });
 });
