@@ -165,4 +165,24 @@ describe("ServerConnection", () => {
     expect(FakeWebSocket.instances).toHaveLength(3);
     conn.disconnect();
   });
+
+  describe("onTokenPersist 透传", () => {
+    it("relay 模式下把 config.onTokenPersist 透传给 RelayClient(updateToken 触发宿主回调)", () => {
+      const persist = vi.fn();
+      const conn = new ServerConnection(
+        makeConfig({
+          isRelayMode: () => true,
+          getRelayOptions: () => ({ machineId: "m_1", deviceId: "d_1", token: "tok_0" }),
+          onTokenPersist: persist,
+        }),
+        makeHandlers()
+      );
+      conn.connect();
+      // connect() 在 relay 模式下创建 RelayClient(私有 ws 字段)。
+      // 经其公共 API updateToken 断言回调被透传(行为断言,不翻私有 opts)。
+      const relay = (conn as unknown as { ws: { updateToken(t: string, m: string): void } }).ws;
+      relay.updateToken("tok_1", "m_1");
+      expect(persist).toHaveBeenCalledWith("tok_1", "m_1");
+    });
+  });
 });

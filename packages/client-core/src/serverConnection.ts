@@ -14,6 +14,8 @@ export interface ConnectionConfig {
   getDeviceId(): string;
   buildInitPayload(): Record<string, unknown>;
   isRelayPaired(): boolean;
+  /** 配对成功后由宿主持久化 token(RN: updateSettings 包装;Web: localStorage) */
+  onTokenPersist?: (token: string, machineId: string) => void;
 }
 
 export interface ConnectionHandlers {
@@ -76,6 +78,7 @@ export class ServerConnection {
         deviceId: relay.deviceId,
         deviceName: "Pocket Code App",
         token: relay.token,
+        onTokenPersist: this.config.onTokenPersist,
       });
       ws.connect();
     } else {
