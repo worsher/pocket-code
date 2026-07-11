@@ -262,6 +262,9 @@ importers:
       '@pocket-code/agent-core':
         specifier: workspace:*
         version: link:../agent-core
+      '@pocket-code/cli-agent':
+        specifier: workspace:*
+        version: link:../cli-agent
       '@pocket-code/wire':
         specifier: workspace:*
         version: link:../wire
