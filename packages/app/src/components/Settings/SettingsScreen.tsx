@@ -13,7 +13,7 @@ import type { AppSettings } from "../../store/settings";
 import { GIT_PLATFORMS, type GitCredential } from "../../store/settings";
 import { clearAllHistory } from "../../store/chatHistory";
 import { startGitHubOAuth } from "../../services/oauth";
-import { RelayClient } from "../../services/relayClient";
+import { RelayClient } from "@pocket-code/client-core";
 
 interface Props {
     settings: AppSettings;

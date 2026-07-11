@@ -6,9 +6,9 @@
  * Independent of useAgent — creates its own temporary WS connection.
  */
 
-import { RelayClient } from "./relayClient";
+import { RelayClient } from "@pocket-code/client-core";
 import { writeLocalFile } from "./localFileSystem";
-import type { AppSettings } from "../store/settings";
+import { updateSettings, type AppSettings } from "../store/settings";
 
 export interface SyncResult {
   success: boolean;
@@ -57,6 +57,8 @@ export async function syncRemoteToLocal(
       deviceId: settings.deviceId || `sync_${Date.now()}`,
       deviceName: "Pocket Code Sync",
       token: settings.relayToken,
+      onTokenPersist: (token, machineId) =>
+        updateSettings({ relayToken: token, relayMachineId: machineId }),
     });
     (ws as RelayClient).connect();
   } else {

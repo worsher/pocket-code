@@ -5,22 +5,32 @@ import { useState, useRef, useCallback, useEffect } from "react";
 import { AppState } from "react-native";
 import { getModelConfig, getApiKeyField, MODELS } from "../services/modelConfig";
 import { updateSettings, type AppSettings } from "../store/settings";
-import { saveChatHistory, loadChatHistory, type StoredMessage } from "../store/chatHistory";
+import { saveChatHistory, loadChatHistory } from "../store/chatHistory";
 import { executeLocalTool, writeLocalFile, getProjectWorkspaceRoot, getDefaultWorkspace } from "../services/localFileSystem";
-import type { StreamingPhase } from "../components/StreamingIndicator";
 import { enqueueMessage, getQueue, dequeueMessage } from "../services/offlineQueue";
 import { sendLocalNotification } from "../services/notifications";
-import { ServerConnection, type ConnectionConfig, type ConnectionHandlers } from "../services/serverConnection";
-import { applyAgentEvent, phaseFor, truncateCoreHistory, storedToCoreMessages } from "./chatReducer";
-import type { Message, ImageAttachment } from "./chatReducer";
+import {
+  ServerConnection,
+  applyAgentEvent,
+  phaseFor,
+  truncateCoreHistory,
+  storedToCoreMessages,
+} from "@pocket-code/client-core";
+import type {
+  ConnectionConfig,
+  ConnectionHandlers,
+  StreamingPhase,
+  StoredMessage,
+  Message,
+  ImageAttachment,
+} from "@pocket-code/client-core";
 import { createRnModelClient } from "../services/rnModelClient";
 import { createDeviceBackend } from "../services/deviceBackend";
 import { runAgentLoop, buildSystemPrompt, type CoreMessage } from "@pocket-code/agent-core";
 import type { AgentEventType } from "@pocket-code/wire";
 
 // ── Public Types(re-export) ───────────────────────────────
-export type { StreamingPhase } from "../components/StreamingIndicator";
-export type { Message, ToolCall, ImageAttachment } from "./chatReducer";
+export type { StreamingPhase, Message, ToolCall, ImageAttachment } from "@pocket-code/client-core";
 
 export interface ModelInfo { key: string; label: string; description: string; }
 export const AVAILABLE_MODELS: ModelInfo[] = MODELS.map((m) => ({ key: m.key, label: m.label, description: m.description }));
@@ -155,6 +165,8 @@ export function useAgent({ settings, model = "deepseek-v4-flash", customPrompt, 
       }),
       isRelayPaired: () =>
         !!(settingsRef.current.relayToken && settingsRef.current.relayMachineId),
+      onTokenPersist: (token, machineId) =>
+        updateSettings({ relayToken: token, relayMachineId: machineId }),
     };
 
     const handlers: ConnectionHandlers = {
