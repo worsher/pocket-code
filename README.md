@@ -61,6 +61,18 @@ App  ──>  Relay (VPS公网, :3200)  ──>  Daemon (内网开发机)
 
 > Relay 只做消息转发，不执行任何业务逻辑。Daemon 内嵌了 Server 的核心处理逻辑，Relay 模式下不需要单独启动 Server。
 
+### 平台支持矩阵
+
+| workspaceMode | 命令在哪执行 | Android | iOS |
+|---|---|---|---|
+| `local`(本地) | 手机本机(App 内置 shell) | ✅ 默认 | ❌ 平台限制* |
+| `server`(直连) | 你自己的机器(局域网/内网穿透/公网) | ✅ | ✅ |
+| `relay`(中继) | 开发机 daemon,经公网 relay | ✅ | ✅ 默认 |
+
+\* iOS 沙箱禁止 fork/exec 子进程,本地 shell 为 **Android 专属**功能(平台限制,非工程缺口)。
+iOS 请使用 `server`(直连,可配合自备内网穿透)或 `relay`(中继,需自备 VPS,见
+[部署文档](docs/deployment-relay-daemon.md))。iOS 构建可用 EAS Cloud Build(无需 Mac)。
+
 ## 💻 技术栈
 
 - **移动端**：React Native + Expo、react-native-markdown-display
