@@ -414,7 +414,7 @@ function MainScreen() {
 
         {/* ── Preview Tab ── */}
         <View style={[styles.flex1, activeTab !== "preview" && styles.hidden]}>
-          <PreviewTab initialUrl={previewUrl} settings={settings} />
+          <PreviewTab initialUrl={previewUrl} settings={settings} projectId={currentProject?.id} />
         </View>
       </View>
 

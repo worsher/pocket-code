@@ -10,15 +10,21 @@ import {
 import { WebView } from "react-native-webview";
 import type { AppSettings } from "../../store/settings";
 import { maybeRewriteToTunnel } from "./tunnelUrl";
+import { createBuildSession } from "../../services/previewBuilder/orchestrator";
+import { createExpoIo } from "../../services/previewBuilder/ioExpo";
+import { ensureBuilderAssets } from "../../services/previewBuilder/assets";
+import { getProjectWorkspaceRoot, getDefaultWorkspace } from "../../services/localFileSystem";
 
 interface Props {
   /** URL to load initially, set externally when a dev server is detected */
   initialUrl?: string;
   /** App 设置:relay 模式下用于构造中继隧道预览 URL */
   settings?: AppSettings;
+  /** 当前项目 id:本地构建的工作区定位(getProjectWorkspaceRoot) */
+  projectId?: string;
 }
 
-export default function PreviewTab({ initialUrl, settings }: Props) {
+export default function PreviewTab({ initialUrl, settings, projectId }: Props) {
   const [url, setUrl] = useState(initialUrl || "http://localhost:3000");
   const [inputUrl, setInputUrl] = useState(url);
   const [loading, setLoading] = useState(false);
@@ -79,6 +85,72 @@ export default function PreviewTab({ initialUrl, settings }: Props) {
     webViewRef.current?.goForward();
   }, []);
 
+  // ── 本地构建(esbuild-wasm 离线预览) ──────────────────
+  const [buildState, setBuildState] = useState<"idle" | "preparing" | "building">("idle");
+  const [buildMsg, setBuildMsg] = useState<string | null>(null);
+  const [builderHtmlUri, setBuilderHtmlUri] = useState<string | null>(null);
+  const [builderDirUri, setBuilderDirUri] = useState<string | null>(null);
+  const builderRef = useRef<WebView>(null);
+  const sessionRef = useRef<ReturnType<typeof createBuildSession> | null>(null);
+
+  const workspaceRoot = getProjectWorkspaceRoot(projectId);
+
+  const teardownBuilder = useCallback(() => {
+    sessionRef.current?.cancelled();
+    sessionRef.current = null;
+    setBuildState("idle");
+  }, []);
+
+  const handleLocalBuild = useCallback(async () => {
+    if (buildState !== "idle") { teardownBuilder(); return; } // 再点=取消
+    setBuildMsg(null);
+    setBuildState("preparing");
+    let assets: { htmlUri: string; dirUri: string };
+    try {
+      assets = await ensureBuilderAssets();
+    } catch {
+      setBuildMsg("构建器初始化失败");
+      setBuildState("idle");
+      return;
+    }
+    setBuilderHtmlUri(assets.htmlUri);
+    setBuilderDirUri(assets.dirUri);
+
+    const io = createExpoIo(workspaceRoot);
+    sessionRef.current = createBuildSession(io, {
+      sendToWebView: (msg) => {
+        const payload = JSON.stringify(JSON.stringify(msg));
+        builderRef.current?.injectJavaScript(`window.__pcHost(${payload}); true;`);
+      },
+      onStatus: (t) => setBuildMsg(t),
+      onSuccess: () => {
+        teardownBuilder();
+        setBuildMsg(null);
+        const distUrl = `${workspaceRoot ?? getDefaultWorkspace()}/dist/index.html`;
+        setUrl(distUrl);
+        setInputUrl(distUrl);
+        setError(null);
+      },
+      onError: (m) => {
+        teardownBuilder();
+        setBuildMsg(m);
+      },
+    });
+    setBuildState("building"); // builder WebView 由 building 状态触发挂载,onMessage 驱动 session
+  }, [buildState, teardownBuilder, workspaceRoot]);
+
+  // 初始化超时守卫:15s 未进入成功/失败即判初始化失败
+  React.useEffect(() => {
+    if (buildState !== "building") return;
+    const t = setTimeout(() => {
+      if (sessionRef.current) {
+        teardownBuilder();
+        setBuildMsg("构建器初始化失败");
+      }
+    }, 15000);
+    return () => clearTimeout(t);
+  }, [buildState, teardownBuilder]);
+
   return (
     <View style={styles.container}>
       {/* URL Bar */}
@@ -99,7 +171,22 @@ export default function PreviewTab({ initialUrl, settings }: Props) {
         <TouchableOpacity style={styles.goBtn} onPress={handleGo}>
           <Text style={styles.goBtnText}>Go</Text>
         </TouchableOpacity>
+        <TouchableOpacity
+          style={[styles.goBtn, buildState !== "idle" && styles.buildBtnActive]}
+          onPress={handleLocalBuild}
+        >
+          <Text style={styles.goBtnText}>{buildState === "idle" ? "构建" : "取消"}</Text>
+        </TouchableOpacity>
       </View>
+
+      {(buildState !== "idle" || buildMsg) && (
+        <View style={styles.buildBar}>
+          {buildState !== "idle" && <ActivityIndicator size="small" color="#FF9F0A" />}
+          <Text style={styles.buildBarText} numberOfLines={2}>
+            {buildMsg ?? (buildState === "preparing" ? "准备构建器…" : "构建中…")}
+          </Text>
+        </View>
+      )}
 
       {/* WebView */}
       <View style={styles.webViewContainer}>
@@ -138,6 +225,24 @@ export default function PreviewTab({ initialUrl, settings }: Props) {
             javaScriptEnabled
             domStorageEnabled
             allowsInlineMediaPlayback
+            originWhitelist={["http://*", "https://*", "file://*"]}
+            allowFileAccess
+            allowFileAccessFromFileURLs
+            allowingReadAccessToURL={workspaceRoot ?? getDefaultWorkspace()}
+          />
+        )}
+        {buildState === "building" && builderHtmlUri && builderDirUri && (
+          <WebView
+            ref={builderRef}
+            source={{ uri: builderHtmlUri }}
+            style={styles.builderHidden}
+            javaScriptEnabled
+            originWhitelist={["*"]}
+            allowFileAccess
+            allowFileAccessFromFileURLs
+            allowingReadAccessToURL={builderDirUri}
+            onMessage={(e) => { sessionRef.current?.handleBuilderMessage(e.nativeEvent.data); }}
+            onError={() => { teardownBuilder(); setBuildMsg("构建器初始化失败"); }}
           />
         )}
         {loading && (
@@ -209,6 +314,31 @@ const styles = StyleSheet.create({
     color: "#FFFFFF",
     fontSize: 13,
     fontWeight: "600",
+  },
+  buildBtnActive: {
+    backgroundColor: "#FF9F0A",
+  },
+  buildBar: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 8,
+    paddingHorizontal: 10,
+    paddingVertical: 6,
+    backgroundColor: "#1C1C1E",
+    borderBottomWidth: 0.5,
+    borderBottomColor: "#38383A",
+  },
+  buildBarText: {
+    color: "#FF9F0A",
+    fontSize: 12,
+    flex: 1,
+    fontFamily: "monospace",
+  },
+  builderHidden: {
+    position: "absolute",
+    width: 1,
+    height: 1,
+    opacity: 0,
   },
   webViewContainer: {
     flex: 1,

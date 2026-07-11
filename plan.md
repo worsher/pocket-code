@@ -57,7 +57,7 @@
 ## 待办（按优先级）
 
 1. ~~**P11:RN App 切换消费 client-core**,删除三个冻结副本(services/serverConnection.ts、services/relayClient.ts、hooks/chatReducer.ts 及其测试)~~(✅ 2026-07-11 完成,连带 iOS 平台隔离:iOS 默认 relay、local 置灰、终端 Tab 不渲染;spec/plan 见 docs/superpowers/{specs,plans}/2026-07-11-内核统一-iOS平台隔离*)。
-2. **esbuild-wasm 离线前端预览**（模式 B/C）。
+2. ~~**esbuild-wasm 离线前端预览**（模式 B/C）~~(✅ 2026-07-11 完成:PreviewTab「构建」→ WebView 内 esbuild-wasm 打包 → dist file:// 渲染;esm.sh 依赖缓存,缓存命中真离线;真机人工验收后置。spec/plan 见 docs/superpowers/{specs,plans}/2026-07-11-esbuild-wasm离线前端预览*)。
 3. **端侧 shell spike**（proot/Alpine over SELinux，真机验证）。
 4. **iOS**。
 5. 小增强：DeepSeek V4 think 参数透传、codex MCP/todo 事件精细渲染。
