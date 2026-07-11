@@ -11,7 +11,7 @@ const { fullText, cliSessionId } = await runCliAgent(
   cliAdapters["claude-code"],
   "修复 src/app.ts 里的类型错误",
   { workspace: "/abs/path/to/project", resumeSessionId: undefined },
-  (e) => console.log(e)   // CliEvent 流:text-delta / tool-call / tool-result / file-changed / usage / error / done
+  (e) => console.log(e)   // CliEvent 流:text-delta / reasoning-delta / tool-call / tool-result / file-changed / usage / error / done
 );
 // claude 支持续接:把 cliSessionId 存起来,下轮放进 ctx.resumeSessionId 即 --resume。
 ```
