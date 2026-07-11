@@ -92,6 +92,7 @@ export default function PreviewTab({ initialUrl, settings, projectId }: Props) {
   const [builderDirUri, setBuilderDirUri] = useState<string | null>(null);
   const builderRef = useRef<WebView>(null);
   const sessionRef = useRef<ReturnType<typeof createBuildSession> | null>(null);
+  const initDoneRef = useRef(false);
 
   const workspaceRoot = getProjectWorkspaceRoot(projectId);
 
@@ -104,6 +105,7 @@ export default function PreviewTab({ initialUrl, settings, projectId }: Props) {
   const handleLocalBuild = useCallback(async () => {
     if (buildState !== "idle") { teardownBuilder(); return; } // 再点=取消
     setBuildMsg(null);
+    initDoneRef.current = false;
     setBuildState("preparing");
     let assets: { htmlUri: string; dirUri: string };
     try {
@@ -122,11 +124,15 @@ export default function PreviewTab({ initialUrl, settings, projectId }: Props) {
         const payload = JSON.stringify(JSON.stringify(msg));
         builderRef.current?.injectJavaScript(`window.__pcHost(${payload}); true;`);
       },
-      onStatus: (t) => setBuildMsg(t),
+      onStatus: (t) => {
+        initDoneRef.current = true; // 首个状态回调 = builder 已 ready,初始化完成
+        setBuildMsg(t);
+      },
       onSuccess: () => {
         teardownBuilder();
         setBuildMsg(null);
-        const distUrl = `${workspaceRoot ?? getDefaultWorkspace()}/dist/index.html`;
+        const root = (workspaceRoot ?? getDefaultWorkspace()).replace(/\/$/, "");
+        const distUrl = `${root}/dist/index.html`;
         setUrl(distUrl);
         setInputUrl(distUrl);
         setError(null);
@@ -139,11 +145,11 @@ export default function PreviewTab({ initialUrl, settings, projectId }: Props) {
     setBuildState("building"); // builder WebView 由 building 状态触发挂载,onMessage 驱动 session
   }, [buildState, teardownBuilder, workspaceRoot]);
 
-  // 初始化超时守卫:15s 未进入成功/失败即判初始化失败
+  // 初始化超时守卫:15s 内未收到 builder ready(首个 onStatus)才判初始化失败;构建中(已 ready)不受此限
   React.useEffect(() => {
     if (buildState !== "building") return;
     const t = setTimeout(() => {
-      if (sessionRef.current) {
+      if (sessionRef.current && !initDoneRef.current) {
         teardownBuilder();
         setBuildMsg("构建器初始化失败");
       }
