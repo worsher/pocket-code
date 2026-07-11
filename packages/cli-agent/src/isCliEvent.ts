@@ -20,6 +20,8 @@ export function isCliEvent(v: unknown): v is CliEvent {
       return typeof v.callId === "string" && typeof v.name === "string" && isObj(v.args);
     case "tool-result":
       return typeof v.callId === "string" && (v.isError === undefined || typeof v.isError === "boolean");
+    case "file-changed":
+      return typeof v.path === "string" && (v.changeType === "created" || v.changeType === "modified" || v.changeType === "deleted");
     case "usage":
       return isNonNegInt(v.inputTokens) && isNonNegInt(v.outputTokens);
     case "done":

@@ -3,12 +3,13 @@
 // 变体逐字相同(消费方可用编译期恒等函数映射,漂移即 tsc 报错)。
 // 纯 TS 类型,零运行时依赖;运行时校验用 isCliEvent(./isCliEvent.js)。
 
-/** CLI 适配层产出的归一化事件(7 变体判别联合)。 */
+/** CLI 适配层产出的归一化事件(8 变体判别联合)。 */
 export type CliEvent =
   | { type: "text-delta"; text: string }
   | { type: "reasoning-delta"; text: string }
   | { type: "tool-call"; callId: string; name: string; args: Record<string, unknown> }
   | { type: "tool-result"; callId: string; result: unknown; isError?: boolean }
+  | { type: "file-changed"; path: string; changeType: "created" | "modified" | "deleted" }
   | { type: "usage"; inputTokens: number; outputTokens: number }
   | { type: "done" }
   | { type: "error"; message: string; code?: string };
