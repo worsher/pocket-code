@@ -11,7 +11,7 @@
 
 | # | 耦合 | 位置 |
 |---|---|---|
-| 1 | 所有 cli 文件依赖 `@pocket-code/wire` 的 `AgentEventType`(13 变体私有 zod union;cli 只产其中 7 个) | types/runner/三适配器 |
+| 1 | 所有 cli 文件依赖 `@pocket-code/wire` 的 `AgentEventType`(13 变体私有 zod union;cli 产其中 **8** 个 —— 执行期修正:设计时漏读 codex 的 `file-changed`) | types/runner/三适配器 |
 | 2 | runner 依赖 `../processKill.js`(server/src 下的 killProcessTree) | runner.ts |
 | 3 | `runCliSession` 直接读写 `AgentSession`(messages/cliSessions/workspace/customPrompt) | index.ts |
 
@@ -21,7 +21,7 @@
 
 | # | 决策点 | 结论 |
 |---|---|---|
-| D1 | 事件类型归属 | **库自定义 `CliEvent`**(7 变体纯 TS 判别联合,无 zod);字段名与 wire 对应变体逐字相同 → server 侧映射为编译期验证的恒等函数 |
+| D1 | 事件类型归属 | **库自定义 `CliEvent`**(**8** 变体纯 TS 判别联合,无 zod;设计时写 7,执行期发现 codex 还产 `file-changed`,已补);字段名与 wire 对应变体对齐(file-changed 取 codex 实际产出的窄形态 `{path, changeType}`,窄于 wire 的可选 oldContent/newContent 但结构可赋值)→ server 侧映射为编译期验证的恒等函数 |
 | D2 | 包边界 | **库只拿 runner+adapters+编排**(纯函数 `runCliAgent`);session 读写(runCliSession/injectHistory)留 server 薄包装 —— 库完全不认识 AgentSession |
 | D3 | processKill 归属 | **进库**(runner 自足);server 的 processRegistry 改从库 import,删 `server/src/processKill.ts`(单一真相源) |
 | D4 | 拆库程度 | **monorepo 内独立包达"随时可迁"**,不真发 npm、不建独立 repo(对齐单人期既定策略) |
@@ -36,6 +36,7 @@ export type CliEvent =
   | { type: "reasoning-delta"; text: string }
   | { type: "tool-call"; callId: string; name: string; args: Record<string, unknown> }
   | { type: "tool-result"; callId: string; result: unknown; isError?: boolean }
+  | { type: "file-changed"; path: string; changeType: "created" | "modified" | "deleted" } // 执行期补充:codex 产出;窄于 wire(无 oldContent?/newContent?)但结构可赋值
   | { type: "usage"; inputTokens: number; outputTokens: number }
   | { type: "done" }
   | { type: "error"; message: string; code?: string };
