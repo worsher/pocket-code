@@ -6,47 +6,9 @@
 import { spawn as nodeSpawn } from "node:child_process";
 import type { AgentEventType } from "@pocket-code/wire";
 import type { CliAgentAdapter, CliSpawnContext } from "./types.js";
+import { killProcessTree } from "../processKill.js";
 
 export type SpawnFn = typeof nodeSpawn;
-
-function isProcessAlive(pid: number): boolean {
-  try {
-    process.kill(pid, 0);
-    return true;
-  } catch {
-    return false;
-  }
-}
-
-/** 跨平台进程树终止:先 SIGTERM,grace 后 SIGKILL(用进程组信号)。 */
-export function killProcessTree(pid: number, graceMs = 3000): void {
-  if (!Number.isFinite(pid) || pid <= 0) return;
-  if (process.platform === "win32") {
-    try {
-      nodeSpawn("taskkill", ["/T", "/PID", String(pid)], { stdio: "ignore", detached: true });
-    } catch { /* ignore */ }
-    setTimeout(() => {
-      if (!isProcessAlive(pid)) return;
-      try {
-        nodeSpawn("taskkill", ["/F", "/T", "/PID", String(pid)], { stdio: "ignore", detached: true });
-      } catch { /* ignore */ }
-    }, graceMs).unref();
-    return;
-  }
-  try {
-    process.kill(-pid, "SIGTERM");
-  } catch {
-    try { process.kill(pid, "SIGTERM"); } catch { return; }
-  }
-  setTimeout(() => {
-    if (isProcessAlive(-pid)) {
-      try { process.kill(-pid, "SIGKILL"); return; } catch { /* fall through */ }
-    }
-    if (isProcessAlive(pid)) {
-      try { process.kill(pid, "SIGKILL"); } catch { /* already gone */ }
-    }
-  }, graceMs).unref();
-}
 
 /**
  * 运行一个 CLI 代理。把适配器解析出的 AgentEvent 通过 onEvent 流式发出,
