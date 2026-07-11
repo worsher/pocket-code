@@ -2,7 +2,7 @@
 // 生成物(builder.html / esbuild.wasm)gitignore —— 避免 11MB 进仓;
 // EAS/CI 装依赖时本脚本自动重建。模板 builder-template.html 进 git。
 import { readFileSync, writeFileSync, copyFileSync, existsSync, mkdirSync } from "node:fs";
-import { dirname, join, resolve } from "node:path";
+import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const here = dirname(fileURLToPath(import.meta.url));
@@ -30,6 +30,6 @@ if (!template.includes("{{ESBUILD_BROWSER_JS}}")) {
   console.error("[preview-builder] 模板缺 {{ESBUILD_BROWSER_JS}} 占位符");
   process.exit(1);
 }
-// 用函数形式 replace,防 browser.js 内容中的 $ 序列被当替换模式
-writeFileSync(join(outDir, "builder.html"), template.replace("{{ESBUILD_BROWSER_JS}}", () => browserJs));
+// 用全局正则+函数形式 replace,防 browser.js 内容中的 $ 序列被当替换模式,并替换所有占位符
+writeFileSync(join(outDir, "builder.html"), template.replace(/\{\{ESBUILD_BROWSER_JS\}\}/g, () => browserJs));
 console.log("[preview-builder] assets synced (builder.html + esbuild.wasm)");

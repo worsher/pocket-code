@@ -1,7 +1,7 @@
 <!doctype html>
 <!-- builder:esbuild-wasm 哑执行器。一切 resolve/load 决策经 bridge 由 RN 侧
      orchestrator 做(见 src/services/previewBuilder/)。本文件是模板:
-     {{ESBUILD_BROWSER_JS}} 由 scripts/sync-preview-builder-assets.mjs 内联替换,
+     ESBUILD_BROWSER_JS 占位符(下方 script 标签)由 scripts/sync-preview-builder-assets.mjs 内联替换,
      生成物 builder.html 不进 git。 -->
 <html>
 <head><meta charset="utf-8"></head>
