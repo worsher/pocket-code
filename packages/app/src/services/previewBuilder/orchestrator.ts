@@ -79,6 +79,9 @@ export function createBuildSession(io: BuilderIo, cb: BuildCallbacks) {
       }
       case "resolve": {
         const { id, path, importer } = m;
+        // entry-point resolve:esbuild 对入口也触发 onResolve,importer 为空串。
+        // 入口 path 即 start 时下发的工作区相对规范路径,原样回显。
+        if (importer === "") { send({ id, type: "resolved", path }); return; }
         if (isHttpUrl(path)) { send({ id, type: "resolved", path }); return; }
         if (isHttpUrl(importer)) {
           const joined = joinHttpUrl(importer, path);

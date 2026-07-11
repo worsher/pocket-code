@@ -58,6 +58,14 @@ describe("createBuildSession", () => {
     expect(h.sent).toContainEqual({ id: 3, type: "resolved", path: "https://esm.sh/react@18.3.1/es2022/react.mjs" });
   });
 
+  it("resolve:entry-point(importer 空串)原样回显工作区相对路径", async () => {
+    const io = makeIo({ "index.html": VITE_HTML, "package.json": "{}" });
+    const h = harness(io);
+    await h.s.handleBuilderMessage(msg({ type: "ready" }));
+    await h.s.handleBuilderMessage(msg({ id: 1, type: "resolve", path: "src/main.tsx", importer: "" }));
+    expect(h.sent).toContainEqual({ id: 1, type: "resolved", path: "src/main.tsx" });
+  });
+
   it("load 本地 tsx → loaded(loader=tsx);图片 → dataurl+binary", async () => {
     const io = makeIo({ "index.html": VITE_HTML, "src/App.tsx": "export {}", "src/logo.png": "PNG" });
     const h = harness(io);
