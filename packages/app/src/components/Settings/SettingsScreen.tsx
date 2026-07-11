@@ -8,6 +8,7 @@ import {
     StyleSheet,
     Alert,
     Image,
+    Platform,
 } from "react-native";
 import type { AppSettings } from "../../store/settings";
 import { GIT_PLATFORMS, type GitCredential } from "../../store/settings";
@@ -29,6 +30,8 @@ export default function SettingsScreen({ settings, onSave, onClose }: Props) {
     const updateDraft = (partial: Partial<AppSettings>) => {
         setDraft((prev) => ({ ...prev, ...partial }));
     };
+
+    const localModeDisabled = Platform.OS === "ios";
 
     const updateApiKey = (
         key: keyof AppSettings["apiKeys"],
@@ -367,7 +370,12 @@ export default function SettingsScreen({ settings, onSave, onClose }: Props) {
                         <Text style={styles.sectionTitle}>工作区 (本地模式配置)</Text>
                         <View style={styles.card}>
                             <TouchableOpacity
-                                style={[styles.modeOption, draft.workspaceMode === "local" && styles.modeOptionActive]}
+                                style={[
+                                    styles.modeOption,
+                                    draft.workspaceMode === "local" && styles.modeOptionActive,
+                                    localModeDisabled && styles.modeOptionDisabled,
+                                ]}
+                                disabled={localModeDisabled}
                                 onPress={() => updateDraft({ workspaceMode: "local" })}
                             >
                                 <View style={styles.modeHeader}>
@@ -378,7 +386,7 @@ export default function SettingsScreen({ settings, onSave, onClose }: Props) {
                                     {draft.workspaceMode === "local" && <Text style={styles.checkmark}>✓</Text>}
                                 </View>
                                 <Text style={styles.modeDesc}>
-                                    文件存储在 App 沙盒中
+                                    {localModeDisabled ? "本地终端仅 Android 支持" : "文件存储在 App 沙盒中"}
                                 </Text>
                             </TouchableOpacity>
 
@@ -614,6 +622,9 @@ const styles = StyleSheet.create({
         backgroundColor: "#2C2C2E",
         marginHorizontal: -8,
         paddingHorizontal: 12,
+    },
+    modeOptionDisabled: {
+        opacity: 0.4,
     },
     modeHeader: {
         flexDirection: "row",
