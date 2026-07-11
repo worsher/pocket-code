@@ -1,4 +1,6 @@
 import AsyncStorage from "@react-native-async-storage/async-storage";
+import { Platform } from "react-native";
+import { defaultWorkspaceMode } from "../utils/platformDefaults";
 
 // ── Types ──────────────────────────────────────────────
 
@@ -85,7 +87,7 @@ const STORAGE_KEY = "pocket-code:settings";
 
 export const DEFAULT_SETTINGS: AppSettings = {
     mode: "cloud",
-    workspaceMode: "local",
+    workspaceMode: defaultWorkspaceMode(Platform.OS),
     cloudServerUrl: "ws://192.168.1.200:3100",
     toolServerUrl: "ws://localhost:3100",
     relayServerUrl: "wss://relay.your-vps.com", // Example URL, configurable in UI
