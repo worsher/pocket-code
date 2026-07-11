@@ -2,12 +2,14 @@ import { describe, expect, it } from "vitest";
 import { isCliEvent } from "./isCliEvent.js";
 
 describe("isCliEvent", () => {
-  it("接受全部 7 个变体", () => {
+  it("接受全部 8 个变体", () => {
     expect(isCliEvent({ type: "text-delta", text: "hi" })).toBe(true);
     expect(isCliEvent({ type: "reasoning-delta", text: "t" })).toBe(true);
     expect(isCliEvent({ type: "tool-call", callId: "c1", name: "readFile", args: { path: "a" } })).toBe(true);
     expect(isCliEvent({ type: "tool-result", callId: "c1", result: { ok: 1 } })).toBe(true);
     expect(isCliEvent({ type: "tool-result", callId: "c1", result: "s", isError: true })).toBe(true);
+    expect(isCliEvent({ type: "file-changed", path: "src/a.ts", changeType: "modified" })).toBe(true);
+    expect(isCliEvent({ type: "file-changed", path: "b.txt", changeType: "created" })).toBe(true);
     expect(isCliEvent({ type: "usage", inputTokens: 10, outputTokens: 20 })).toBe(true);
     expect(isCliEvent({ type: "done" })).toBe(true);
     expect(isCliEvent({ type: "error", message: "boom" })).toBe(true);
@@ -29,5 +31,8 @@ describe("isCliEvent", () => {
     expect(isCliEvent({ type: "usage", inputTokens: 1.5, outputTokens: 0 })).toBe(false); // 非整数
     expect(isCliEvent({ type: "error" })).toBe(false); // 缺 message
     expect(isCliEvent({ type: "tool-result", callId: "c1", result: 1, isError: "yes" })).toBe(false); // isError 非 bool
+    expect(isCliEvent({ type: "file-changed", path: "a" })).toBe(false); // 缺 changeType
+    expect(isCliEvent({ type: "file-changed", path: "a", changeType: "renamed" })).toBe(false); // 非法枚举
+    expect(isCliEvent({ type: "file-changed", changeType: "created" })).toBe(false); // 缺 path
   });
 });
