@@ -101,9 +101,12 @@ export async function runCliAgent(
 
     proc.stderr?.on("data", (chunk: Buffer) => {
       resetIdle();
-      const msg = chunk.toString("utf-8").trim();
+      const raw = chunk.toString("utf-8");
+      const msg = raw.trim();
       if (msg) console.warn(`[CLI:${adapter.id}] stderr:`, msg.slice(0, 300));
-      stderrTail = (stderrTail + msg).slice(-2048);
+      // 累积原始 chunk(保留 chunk 间换行),仅在最终附错误时整体 trim;
+      // 若逐 chunk 先 trim 再拼,多行 stderr 会挤成一行 run-on。
+      stderrTail = (stderrTail + raw).slice(-2048);
     });
 
     proc.on("close", (code: number | null) => {

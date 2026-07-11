@@ -244,6 +244,8 @@ describe("runCliAgent stderr 尾附错误", () => {
     expect(errorEvents[0].message).toContain("进程异常退出");
     expect(errorEvents[0].message).toContain("Error: something broke");
     expect(errorEvents[0].message).toContain("at somewhere.js:10");
+    // 多 chunk 的 stderr 尾必须保留 chunk 间换行(不挤成 run-on line)
+    expect(errorEvents[0].message).toContain("Error: something broke\nat somewhere.js:10");
   });
 
   it("正常退出(有输出)时不附 stderr 尾", async () => {
