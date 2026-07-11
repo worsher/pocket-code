@@ -31,7 +31,7 @@ function newId(): string {
 export async function startManaged(
   workspace: string,
   command: string,
-  opts?: { containerId?: string }
+  opts?: { containerId?: string; cwd?: string; containerCwd?: string }
 ): Promise<{ processId: string }> {
   // 同 workspace+同 command 先杀旧(防堆积)
   for (const p of listManaged(workspace)) {
@@ -43,9 +43,10 @@ export async function startManaged(
 
   let child;
   if (containerId && isDockerEnabled()) {
-    child = spawnFn("docker", ["exec", "-d", containerId, "sh", "-c", command], { stdio: "ignore" });
+    const wArgs = opts?.containerCwd ? ["-w", opts.containerCwd] : [];
+    child = spawnFn("docker", ["exec", "-d", ...wArgs, containerId, "sh", "-c", command], { stdio: "ignore" });
   } else {
-    child = spawnFn(command, [], { shell: true, detached: true, stdio: "ignore" });
+    child = spawnFn(command, [], { cwd: opts?.cwd, shell: true, detached: true, stdio: "ignore" });
   }
   child.unref?.();
 

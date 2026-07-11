@@ -163,8 +163,13 @@ export function createNodeBackend(workspace: string, containerId?: string): Runt
     },
 
     async startProcess(cmd: string, opts?: { cwd?: string }) {
-      const ws = resolveHostCwd(workspace, opts?.cwd);
-      return startManaged(ws, cmd, { containerId });
+      // I-1: startManaged 第一参是 registry 分组 key，须保持稳定的 workspace 根，
+      // 不能传每次可能带子目录的解析结果，否则同 workspace 不同 cwd 的进程分不到一组。
+      // host/容器两种 cwd 语义不同(见 resolveHostCwd/resolveContainerCwd 注释)，须分流各自算好透传，
+      // 否则后台子进程实际工作目录从未设置，继承 daemon 自己的 cwd(pm2 启动目录=仓库根)。
+      const hostCwd = resolveHostCwd(workspace, opts?.cwd);
+      const containerCwd = resolveContainerCwd(workspace, opts?.cwd);
+      return startManaged(workspace, cmd, { containerId, cwd: hostCwd, containerCwd });
     },
     async stopProcess(processId: string) {
       await stopManaged(processId);

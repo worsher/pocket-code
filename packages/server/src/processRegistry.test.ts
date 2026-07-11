@@ -9,15 +9,22 @@ class FakeChild extends EventEmitter {
   kill = vi.fn();
 }
 
-let spawned: { cmd: string; args: readonly string[]; child: FakeChild }[] = [];
-function fakeSpawn(cmd: string, args?: readonly string[]): any {
+let spawned: { cmd: string; args: readonly string[]; opts: any; child: FakeChild }[] = [];
+function fakeSpawn(cmd: string, args?: readonly string[], opts?: any): any {
   const child = new FakeChild();
-  spawned.push({ cmd, args: args ?? [], child });
+  spawned.push({ cmd, args: args ?? [], opts, child });
   return child;
 }
 
+const ORIGINAL_DOCKER_ENABLED = process.env.DOCKER_ENABLED;
+
 beforeEach(() => { spawned = []; __setSpawnForTest(fakeSpawn as any); shutdownAll(); });
-afterEach(() => { __setSpawnForTest(null); vi.restoreAllMocks(); });
+afterEach(() => {
+  __setSpawnForTest(null);
+  vi.restoreAllMocks();
+  if (ORIGINAL_DOCKER_ENABLED === undefined) delete process.env.DOCKER_ENABLED;
+  else process.env.DOCKER_ENABLED = ORIGINAL_DOCKER_ENABLED;
+});
 
 describe("processRegistry (host mode)", () => {
   it("startManaged 返回 p_ 前缀 id 并登记", async () => {
@@ -65,5 +72,35 @@ describe("processRegistry (host mode)", () => {
     await startManaged("/ws/b", "b");
     shutdownAll();
     expect(listManaged()).toHaveLength(0);
+  });
+
+  // I-1 回归:host 分支须把 opts.cwd 透传给 spawn 的第三参，否则子进程继承 daemon 自己的 cwd
+  // (pm2 启动目录=仓库根)，导致 "npm run dev" 在错误目录下报 missing script。
+  it("host 分支透传 cwd 给 spawn options", async () => {
+    await startManaged("/ws", "npm run dev", { cwd: "/ws/sub" });
+    expect(spawned[0].opts).toMatchObject({ cwd: "/ws/sub", shell: true });
+  });
+
+  it("不传 cwd 时 spawn options.cwd 为 undefined(兼容现状)", async () => {
+    await startManaged("/ws/a", "npm run dev");
+    expect(spawned[0].opts?.cwd).toBeUndefined();
+  });
+});
+
+describe("processRegistry (docker mode)", () => {
+  beforeEach(() => { process.env.DOCKER_ENABLED = "true"; });
+
+  it("docker 分支透传 containerCwd 为 -w 参数", async () => {
+    await startManaged("/ws", "npm run dev", { containerId: "c1", containerCwd: "/workspace/sub" });
+    expect(spawned[0].cmd).toBe("docker");
+    const args = spawned[0].args;
+    const wIndex = args.indexOf("-w");
+    expect(wIndex).toBeGreaterThanOrEqual(0);
+    expect(args[wIndex + 1]).toBe("/workspace/sub");
+  });
+
+  it("docker 分支不传 containerCwd 时不含 -w(兼容现状)", async () => {
+    await startManaged("/ws", "npm run dev", { containerId: "c1" });
+    expect(spawned[0].args).not.toContain("-w");
   });
 });
