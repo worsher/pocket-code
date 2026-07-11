@@ -52,6 +52,7 @@ export function buildExecTools(workspace: string): ToolDef[] {
       type: "object",
       properties: {
         command: { type: "string", description: "The shell command to execute" },
+        timeoutSeconds: { type: "number", description: "Command timeout in seconds (default 120, max 600)." },
       },
       required: ["command"],
     },
@@ -61,9 +62,11 @@ export function buildExecTools(workspace: string): ToolDef[] {
     schema: runCommandSchema,
     async execute(backend: RuntimeBackend, args: Record<string, unknown>) {
       const command = args.command as string;
+      const rawT = Number((args as any).timeoutSeconds);
+      const timeoutMs = (Number.isFinite(rawT) ? Math.min(Math.max(Math.floor(rawT), 1), 600) : 120) * 1000;
       const r = await backend.exec(command, {
         cwd: workspace,
-        timeoutMs: 30000,
+        timeoutMs,
         env: GIT_ENV,
         isolateHome: true,
       });
