@@ -2,8 +2,7 @@
 // 把 claude CLI 的 --output-format stream-json NDJSON 归一化为 AgentEvent。
 // 解析形态参考既有 parseClaudeLine 实现(proven 对接真实 claude-code)。
 
-import type { AgentEventType } from "@pocket-code/wire";
-import type { CliAgentAdapter, CliSpawnContext, CliSpawnSpec } from "./types.js";
+import type { CliAgentAdapter, CliSpawnContext, CliSpawnSpec, CliEvent } from "./types.js";
 
 /** 安全转为非负整数,无效值归零。 */
 function toCount(v: unknown): number {
@@ -60,7 +59,7 @@ export const claudeCodeAdapter = {
     };
   },
 
-  parseLine(line: string): AgentEventType[] {
+  parseLine(line: string): CliEvent[] {
     const trimmed = line.trim();
     if (!trimmed) return [];
     let msg: any;
@@ -71,7 +70,7 @@ export const claudeCodeAdapter = {
     }
     if (!msg || typeof msg !== "object") return [];
 
-    const events: AgentEventType[] = [];
+    const events: CliEvent[] = [];
     switch (msg?.type) {
       case "assistant": {
         const content = msg.message?.content;

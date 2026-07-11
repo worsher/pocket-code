@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { AgentEvent } from "@pocket-code/wire";
+import { isCliEvent } from "./isCliEvent.js";
 import { claudeCodeAdapter } from "./claudeCode.js";
 
 const line = (obj: unknown) => JSON.stringify(obj);
@@ -109,7 +109,7 @@ describe("claudeCodeAdapter.parseLine", () => {
     if (evs[0].type === "error") expect(evs[0].message).toContain("too many turns");
   });
 
-  it("every emitted event validates against the wire AgentEvent schema", () => {
+  it("every emitted event validates against isCliEvent", () => {
     const samples = [
       line({ type: "assistant", message: { content: [{ type: "text", text: "x" }] } }),
       line({ type: "assistant", message: { content: [{ type: "thinking", thinking: "t" }] } }),
@@ -126,7 +126,7 @@ describe("claudeCodeAdapter.parseLine", () => {
     ];
     for (const s of samples) {
       for (const ev of claudeCodeAdapter.parseLine(s)) {
-        expect(AgentEvent.safeParse(ev).success).toBe(true);
+        expect(isCliEvent(ev)).toBe(true);
       }
     }
   });

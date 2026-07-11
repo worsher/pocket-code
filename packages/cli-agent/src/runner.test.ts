@@ -1,6 +1,6 @@
 import { describe, it, expect, vi } from "vitest";
 import { EventEmitter } from "node:events";
-import type { AgentEventType } from "@pocket-code/wire";
+import type { CliEvent } from "./types.js";
 import { runCliAgent } from "./runner.js";
 import { claudeCodeAdapter } from "./claudeCode.js";
 
@@ -23,7 +23,7 @@ describe("runCliAgent", () => {
   it("spawns via adapter.buildSpawn, ends stdin, streams AgentEvents, emits done, returns text", async () => {
     const proc = makeFakeProc();
     const spawnFn = vi.fn().mockReturnValue(proc);
-    const events: AgentEventType[] = [];
+    const events: CliEvent[] = [];
 
     const p = runCliAgent(claudeCodeAdapter, "hi", ctx, (e) => events.push(e), undefined, spawnFn);
 
@@ -52,7 +52,7 @@ describe("runCliAgent", () => {
 
   it("handles a line split across two stdout chunks", async () => {
     const proc = makeFakeProc();
-    const events: AgentEventType[] = [];
+    const events: CliEvent[] = [];
     const p = runCliAgent(claudeCodeAdapter, "hi", ctx, (e) => events.push(e), undefined, () => proc);
     const full = JSON.stringify({ type: "assistant", message: { content: [{ type: "text", text: "split" }] } });
     proc.stdout.emit("data", Buffer.from(full.slice(0, 10)));
@@ -64,7 +64,7 @@ describe("runCliAgent", () => {
 
   it("emits a single error when process closes non-zero with no output", async () => {
     const proc = makeFakeProc();
-    const events: AgentEventType[] = [];
+    const events: CliEvent[] = [];
     const p = runCliAgent(claudeCodeAdapter, "hi", ctx, (e) => events.push(e), undefined, () => proc);
     proc.finish(1);
     await p;
@@ -74,7 +74,7 @@ describe("runCliAgent", () => {
 
   it("does NOT emit error on non-zero exit when output was produced", async () => {
     const proc = makeFakeProc();
-    const events: AgentEventType[] = [];
+    const events: CliEvent[] = [];
     const p = runCliAgent(claudeCodeAdapter, "hi", ctx, (e) => events.push(e), undefined, () => proc);
     proc.pushLine({ type: "assistant", message: { content: [{ type: "text", text: "ok" }] } });
     proc.finish(1);
@@ -86,7 +86,7 @@ describe("runCliAgent", () => {
     const proc = makeFakeProc();
     proc.pid = undefined; // 无 pid → 回退到 proc.kill,使终止可被 mock 观测
     const ac = new AbortController();
-    const events: AgentEventType[] = [];
+    const events: CliEvent[] = [];
     const p = runCliAgent(claudeCodeAdapter, "hi", ctx, (e) => events.push(e), ac.signal, () => proc);
     ac.abort();
     proc.finish(0);
@@ -155,7 +155,7 @@ describe("runCliAgent 返回对象 + session_id 采集", () => {
         }
       },
     };
-    const events: AgentEventType[] = [];
+    const events: CliEvent[] = [];
     const p = runCliAgent(adapter as any, "hi", ctx, (e) => events.push(e), undefined, () => proc);
 
     proc.pushLine({ session_id: "sess_123" });
@@ -169,7 +169,7 @@ describe("runCliAgent 返回对象 + session_id 采集", () => {
 
   it("adapter 无 extractSessionId 时 cliSessionId 为 undefined", async () => {
     const proc = makeFakeProc();
-    const events: AgentEventType[] = [];
+    const events: CliEvent[] = [];
     const p = runCliAgent(claudeCodeAdapter, "hi", ctx, (e) => events.push(e), undefined, () => proc);
     proc.pushLine({ type: "assistant", message: { content: [{ type: "text", text: "ok" }] } });
     proc.finish(0);
@@ -184,7 +184,7 @@ describe("runCliAgent 空闲超时", () => {
     try {
       const proc = makeFakeProc();
       const killSpy = vi.spyOn(process, "kill").mockImplementation(() => true);
-      const events: AgentEventType[] = [];
+      const events: CliEvent[] = [];
       const p = runCliAgent(claudeCodeAdapter, "hi", ctx, (e) => events.push(e), undefined, () => proc);
 
       await vi.advanceTimersByTimeAsync(120001);
@@ -207,7 +207,7 @@ describe("runCliAgent 空闲超时", () => {
     vi.useFakeTimers();
     try {
       const proc = makeFakeProc();
-      const events: AgentEventType[] = [];
+      const events: CliEvent[] = [];
       const p = runCliAgent(claudeCodeAdapter, "hi", ctx, (e) => events.push(e), undefined, () => proc);
 
       // 每次在超时前产生输出,重置计时器。
@@ -231,7 +231,7 @@ describe("runCliAgent 空闲超时", () => {
 describe("runCliAgent stderr 尾附错误", () => {
   it("异常退出且无输出时,错误 message 附上 stderr 尾部", async () => {
     const proc = makeFakeProc();
-    const events: AgentEventType[] = [];
+    const events: CliEvent[] = [];
     const p = runCliAgent(claudeCodeAdapter, "hi", ctx, (e) => events.push(e), undefined, () => proc);
 
     proc.stderr.emit("data", Buffer.from("Error: something broke\n"));
@@ -250,7 +250,7 @@ describe("runCliAgent stderr 尾附错误", () => {
 
   it("正常退出(有输出)时不附 stderr 尾", async () => {
     const proc = makeFakeProc();
-    const events: AgentEventType[] = [];
+    const events: CliEvent[] = [];
     const p = runCliAgent(claudeCodeAdapter, "hi", ctx, (e) => events.push(e), undefined, () => proc);
 
     proc.stderr.emit("data", Buffer.from("just a warning\n"));

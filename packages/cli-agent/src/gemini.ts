@@ -2,8 +2,7 @@
 // spawn 参数与 stream-json 解析等价迁移自旧版内联 CLI runner(P8 后已删除)。
 // 与旧路径唯一有意差异:customPrompt 非空时拼为消息前缀(旧路径丢弃)。
 
-import type { AgentEventType } from "@pocket-code/wire";
-import type { CliAgentAdapter, CliSpawnContext, CliSpawnSpec } from "./types.js";
+import type { CliAgentAdapter, CliSpawnContext, CliSpawnSpec, CliEvent } from "./types.js";
 
 /** gemini stream-json 行结构(NDJSON) */
 interface GeminiStreamLine {
@@ -54,9 +53,9 @@ export const geminiAdapter = {
     };
   },
 
-  createParser(): (line: string) => AgentEventType[] {
+  createParser(): (line: string) => CliEvent[] {
     let synthCount = 0;
-    return (line: string): AgentEventType[] => {
+    return (line: string): CliEvent[] => {
       const trimmed = line.trim();
       if (!trimmed) return [];
       let evt: GeminiStreamLine;

@@ -3,8 +3,8 @@ import { execSync } from "node:child_process";
 import { mkdtempSync, readFileSync, existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import type { AgentEventType } from "@pocket-code/wire";
-import { AgentEvent } from "@pocket-code/wire";
+import type { CliEvent } from "./types.js";
+import { isCliEvent } from "./isCliEvent.js";
 import { runCliAgent } from "./runner.js";
 import { claudeCodeAdapter } from "./claudeCode.js";
 
@@ -19,13 +19,13 @@ function claudeAvailable(): boolean {
 
 const ENABLED = !!process.env.RUN_CLI_E2E && claudeAvailable();
 
-// 默认跳过:CI 无 claude、日常 test 无 RUN_CLI_E2E。仅手动 `RUN_CLI_E2E=1 pnpm --filter @pocket-code/server test` 且本机装了 claude 时运行。
+// 默认跳过:CI 无 claude、日常 test 无 RUN_CLI_E2E。仅手动 `RUN_CLI_E2E=1 pnpm --filter @pocket-code/cli-agent test` 且本机装了 claude 时运行。
 describe.skipIf(!ENABLED)("claude-code E2E (real CLI)", () => {
-  it("drives real claude to write a file and emits well-formed AgentEvents", async () => {
+  it("drives real claude to write a file and emits well-formed CliEvents", async () => {
     const ws = mkdtempSync(join(tmpdir(), "pc-e2e-"));
-    const events: AgentEventType[] = [];
+    const events: CliEvent[] = [];
 
-    const text = await runCliAgent(
+    const { fullText } = await runCliAgent(
       claudeCodeAdapter,
       "Create a file named hello.txt containing exactly the text: hi. Then stop.",
       { workspace: ws },
@@ -34,7 +34,7 @@ describe.skipIf(!ENABLED)("claude-code E2E (real CLI)", () => {
 
     // 每个事件都合法
     for (const e of events) {
-      expect(AgentEvent.safeParse(e).success).toBe(true);
+      expect(isCliEvent(e)).toBe(true);
     }
     // 末事件为 done
     expect(events[events.length - 1].type).toBe("done");
@@ -45,6 +45,6 @@ describe.skipIf(!ENABLED)("claude-code E2E (real CLI)", () => {
     expect(existsSync(join(ws, "hello.txt"))).toBe(true);
     expect(readFileSync(join(ws, "hello.txt"), "utf-8").trim()).toBe("hi");
     // 返回的累计文本是字符串
-    expect(typeof text).toBe("string");
+    expect(typeof fullText).toBe("string");
   }, 120000);
 });

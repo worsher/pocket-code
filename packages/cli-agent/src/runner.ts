@@ -4,9 +4,8 @@
 // spawnFn 可注入,便于单测(默认用 child_process.spawn)。
 
 import { spawn as nodeSpawn } from "node:child_process";
-import type { AgentEventType } from "@pocket-code/wire";
-import type { CliAgentAdapter, CliSpawnContext } from "./types.js";
-import { killProcessTree } from "../processKill.js";
+import type { CliAgentAdapter, CliSpawnContext, CliEvent } from "./types.js";
+import { killProcessTree } from "./processKill.js";
 
 export type SpawnFn = typeof nodeSpawn;
 
@@ -22,7 +21,7 @@ export async function runCliAgent(
   adapter: CliAgentAdapter,
   userMessage: string,
   ctx: CliSpawnContext,
-  onEvent: (event: AgentEventType) => void,
+  onEvent: (event: CliEvent) => void,
   signal?: AbortSignal,
   spawnFn: SpawnFn = nodeSpawn
 ): Promise<{ fullText: string; cliSessionId?: string }> {
@@ -58,7 +57,7 @@ export async function runCliAgent(
   let producedOutput = false;
   let errorEmitted = false;
 
-  const handle = (event: AgentEventType) => {
+  const handle = (event: CliEvent) => {
     if (event.type === "text-delta") fullText += event.text;
     if (event.type === "error") {
       errorEmitted = true;

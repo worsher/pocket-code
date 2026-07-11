@@ -7,7 +7,8 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 //  —— 这是伪造的 mock adapter 对象缺少 buildSpawn 属性所致,不是被测代码的 bug)。
 // 用一个 it 间可重赋值的 mockRunCliAgent 实现被测试逐个替换,规避重复 mock 注册。
 const mockRunCliAgent = vi.fn();
-vi.mock("./runner.js", () => ({
+vi.mock("@pocket-code/cli-agent", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("@pocket-code/cli-agent")>()),
   runCliAgent: (...args: unknown[]) => mockRunCliAgent(...args),
 }));
 

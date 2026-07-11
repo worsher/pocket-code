@@ -1,10 +1,18 @@
-// ── CliAgentAdapter ───────────────────────────────────────
-// 统一封装外部 CLI 编程代理(claude-code / codex / gemini-cli)的接口。
-// 适配器只负责:① 构造子进程 spawn 参数;② 把 CLI 的 NDJSON 输出逐行
-// 归一化为 @pocket-code/wire 的 AgentEvent。进程生命周期/transport 由
-// 上层(P3b 的 DelegatedCliAgent 运行器)负责,与适配器解耦。
+// ── CLI Agent 契约 ─────────────────────────────────────────
+// 本库的归一化事件类型 CliEvent:字段名与 pocket-code wire 协议的对应
+// 变体逐字相同(消费方可用编译期恒等函数映射,漂移即 tsc 报错)。
+// 纯 TS 类型,零运行时依赖;运行时校验用 isCliEvent(./isCliEvent.js)。
 
-import type { AgentEventType } from "@pocket-code/wire";
+/** CLI 适配层产出的归一化事件(8 变体判别联合)。 */
+export type CliEvent =
+  | { type: "text-delta"; text: string }
+  | { type: "reasoning-delta"; text: string }
+  | { type: "tool-call"; callId: string; name: string; args: Record<string, unknown> }
+  | { type: "tool-result"; callId: string; result: unknown; isError?: boolean }
+  | { type: "file-changed"; path: string; changeType: "created" | "modified" | "deleted" }
+  | { type: "usage"; inputTokens: number; outputTokens: number }
+  | { type: "done" }
+  | { type: "error"; message: string; code?: string };
 
 /** 一次用户轮次的 spawn 上下文。 */
 export interface CliSpawnContext {
@@ -32,16 +40,16 @@ export interface CliAgentAdapter {
   /** 据用户消息与上下文构造 spawn 规格。 */
   buildSpawn(userMessage: string, ctx: CliSpawnContext): CliSpawnSpec;
   /**
-   * 解析 CLI stdout 的一行 NDJSON,返回归一化 AgentEvent 数组。
+   * 解析 CLI stdout 的一行 NDJSON,返回归一化 CliEvent 数组。
    * 对空行/非 JSON 行/无对应业务语义的类型,返回 []。
    * 无状态适配器实现本方法;有状态的实现 createParser。二者至少其一。
    */
-  parseLine?(line: string): AgentEventType[];
+  parseLine?(line: string): CliEvent[];
   /**
    * 可选:创建一次运行专用的解析器(每次 spawn 新建,状态互不串扰)。
    * runner 优先使用本方法。
    */
-  createParser?(): (line: string) => AgentEventType[];
+  createParser?(): (line: string) => CliEvent[];
   /** 可选:从 stdout 一行提取底层 CLI 的 session_id(claude stream-json init 消息)。首次命中即被 runner 记住。 */
   extractSessionId?(line: string): string | undefined;
 }

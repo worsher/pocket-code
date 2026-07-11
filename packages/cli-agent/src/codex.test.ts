@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { AgentEvent } from "@pocket-code/wire";
+import { isCliEvent } from "./isCliEvent.js";
 import { codexAdapter } from "./codex.js";
 
 const P = (obj: unknown) => codexAdapter.parseLine(JSON.stringify(obj));
@@ -89,7 +89,7 @@ describe("codexAdapter.parseLine", () => {
     expect(P({ type: "item.updated", item: { id: "x", type: "agent_message", text: "partial" } })).toEqual([]); // 增量忽略
   });
 
-  it("all produced events pass wire AgentEvent.safeParse", () => {
+  it("all produced events pass isCliEvent", () => {
     const all = [
       ...P({ type: "item.completed", item: { id: "a", type: "agent_message", text: "x" } }),
       ...P({ type: "item.started", item: { id: "c", type: "command_execution", command: "ls" } }),
@@ -97,7 +97,7 @@ describe("codexAdapter.parseLine", () => {
       ...P({ type: "turn.completed", usage: { input_tokens: 1, output_tokens: 2 } }),
       ...P({ type: "turn.failed", error: { message: "e" } }),
     ];
-    for (const ev of all) expect(AgentEvent.safeParse(ev).success).toBe(true);
+    for (const ev of all) expect(isCliEvent(ev)).toBe(true);
   });
 });
 

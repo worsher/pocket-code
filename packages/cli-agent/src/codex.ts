@@ -1,11 +1,10 @@
 // ── codex 适配器 ────────────────────────────────────────────
-// codex exec --json 的 JSONL 事件流 → 归一化 AgentEvent。
+// codex exec --json 的 JSONL 事件流 → 归一化 CliEvent。
 // fixture 依据:2026-07-06 真机 codex-cli 0.142.5(见 P8 计划背景事实)。
 // env 不清理:codex 认自己的 ~/.codex/config.toml(镜像/模型为用户主动配置),
 // 与 claude 适配器"清 ANTHROPIC_*"策略相反且有意。
 
-import type { AgentEventType } from "@pocket-code/wire";
-import type { CliAgentAdapter, CliSpawnContext, CliSpawnSpec } from "./types.js";
+import type { CliAgentAdapter, CliSpawnContext, CliSpawnSpec, CliEvent } from "./types.js";
 
 interface CodexItem {
   id?: string;
@@ -57,7 +56,7 @@ export const codexAdapter = {
     };
   },
 
-  parseLine(line: string): AgentEventType[] {
+  parseLine(line: string): CliEvent[] {
     const trimmed = line.trim();
     if (!trimmed) return [];
     let evt: CodexLine;
@@ -106,7 +105,7 @@ export const codexAdapter = {
             }];
           }
           case "file_change": {
-            const events: AgentEventType[] = [];
+            const events: CliEvent[] = [];
             for (const c of item.changes ?? []) {
               const changeType = KIND_TO_CHANGE[c.kind ?? ""];
               if (c.path && changeType) {

@@ -2,7 +2,7 @@
 // session TTL/断连不杀;同 workspace+同 command 再起先杀旧;daemon 退出 shutdownAll。
 import { spawn as realSpawn, type ChildProcess } from "node:child_process";
 import { randomBytes } from "node:crypto";
-import { killProcessTree } from "./processKill.js";
+import { killProcessTree } from "@pocket-code/cli-agent";
 import { isDockerEnabled } from "./docker.js";
 
 export interface ManagedProcess {

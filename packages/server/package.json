@@ -38,6 +38,7 @@
   },
   "dependencies": {
     "@pocket-code/agent-core": "workspace:*",
+    "@pocket-code/cli-agent": "workspace:*",
     "@pocket-code/wire": "workspace:*",
     "@ai-sdk/anthropic": "^1.2.0",
     "@ai-sdk/google": "^1.2.0",

@@ -1,10 +1,11 @@
 import { describe, it, expect } from "vitest";
-import { AgentEvent, type AgentEventType } from "@pocket-code/wire";
+import { isCliEvent } from "./isCliEvent.js";
+import type { CliEvent } from "./types.js";
 import { geminiAdapter } from "./gemini.js";
 
-function collect(lines: string[]): AgentEventType[] {
+function collect(lines: string[]): CliEvent[] {
   const parse = geminiAdapter.createParser();
-  const events: AgentEventType[] = [];
+  const events: CliEvent[] = [];
   for (const l of lines) events.push(...parse(l));
   return events;
 }
@@ -48,13 +49,13 @@ describe("geminiAdapter.createParser", () => {
     expect((again[0] as any).callId).toBe("gm_1");
   });
 
-  it("all produced events pass wire AgentEvent.safeParse", () => {
+  it("all produced events pass isCliEvent", () => {
     const events = collect([
       JSON.stringify({ type: "message", role: "assistant", content: "a" }),
       JSON.stringify({ type: "tool_use", tool_name: "n", tool_id: "t", parameters: {} }),
       JSON.stringify({ type: "tool_result", tool_id: "t", status: "success", output: {} }),
     ]);
-    for (const ev of events) expect(AgentEvent.safeParse(ev).success).toBe(true);
+    for (const ev of events) expect(isCliEvent(ev)).toBe(true);
   });
 });
 
