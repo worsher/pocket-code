@@ -41,6 +41,7 @@ import { ProjectProvider, useProject } from "./src/contexts/ProjectContext";
 import { WorkspaceProvider, useWorkspace } from "./src/contexts/WorkspaceContext";
 import ProjectPromptEditor from "./src/components/ProjectPromptEditor";
 import { requestNotificationPermissions } from "./src/services/notifications";
+import { tabsForPlatform } from "./src/utils/tabsForPlatform";
 
 function MainScreen() {
   const insets = useSafeAreaInsets();
@@ -379,14 +380,16 @@ function MainScreen() {
           />
         </KeyboardAvoidingView>
 
-        {/* ── Terminal Tab — always mounted to keep PTY session alive ── */}
-        <KeyboardAvoidingView
-          style={[styles.flex1, activeTab !== "terminal" && styles.hidden]}
-          behavior="padding"
-          keyboardVerticalOffset={insets.top}
-        >
-          <TerminalScreen />
-        </KeyboardAvoidingView>
+        {/* ── Terminal Tab — always mounted to keep PTY session alive(Android 专属;iOS 沙箱禁 fork/exec 不挂载) ── */}
+        {Platform.OS === "android" && (
+          <KeyboardAvoidingView
+            style={[styles.flex1, activeTab !== "terminal" && styles.hidden]}
+            behavior="padding"
+            keyboardVerticalOffset={insets.top}
+          >
+            <TerminalScreen />
+          </KeyboardAvoidingView>
+        )}
 
         {/* ── Files Tab ── */}
         <View style={[styles.flex1, activeTab !== "files" && styles.hidden]}>
@@ -518,7 +521,7 @@ function MainScreen() {
       {/* Bottom Tab Bar — hidden when keyboard is visible */}
       {!keyboardVisible && (
         <View style={styles.tabBar}>
-          {(["chat", "terminal", "files", "preview"] as const).map((tab) => {
+          {tabsForPlatform(Platform.OS).map((tab) => {
             const icons = { chat: "💬", terminal: "💻", files: "📁", preview: "🌐" };
             const labels = { chat: "Chat", terminal: "Terminal", files: "Files", preview: "Preview" };
             const active = activeTab === tab;
