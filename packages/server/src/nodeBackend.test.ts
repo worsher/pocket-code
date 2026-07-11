@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach } from "vitest";
+import { describe, it, expect, beforeEach, vi } from "vitest";
 import { mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -77,5 +77,30 @@ describe("NodeBackend", () => {
     const r = await be.exec("echo hi", { cwd: join(ws, "does-not-exist") });
     expect(r.exitCode).toBe(127);
     expect(r.stderr.length).toBeGreaterThan(0);
+  });
+});
+
+vi.mock("./processRegistry.js", () => ({
+  startManaged: vi.fn(async (ws: string, cmd: string) => ({ processId: "p_test" })),
+  stopManaged: vi.fn(async () => {}),
+}));
+
+describe("nodeBackend 后台进程", () => {
+  it("startProcess 转发 startManaged(cwd 经 resolveHostCwd)", async () => {
+    const reg = await import("./processRegistry.js");
+    const { createNodeBackend } = await import("./nodeBackend.js");
+    const be = createNodeBackend("/ws", undefined);
+    const r = await be.startProcess!("npm run dev", { cwd: "sub" });
+    expect(r.processId).toBe("p_test");
+    // resolveHostCwd("/ws","sub") → "/ws/sub" 作为 workspace 传入
+    expect(reg.startManaged).toHaveBeenCalledWith("/ws/sub", "npm run dev", { containerId: undefined });
+  });
+
+  it("stopProcess 转发 stopManaged", async () => {
+    const reg = await import("./processRegistry.js");
+    const { createNodeBackend } = await import("./nodeBackend.js");
+    const be = createNodeBackend("/ws", undefined);
+    await be.stopProcess!("p_x");
+    expect(reg.stopManaged).toHaveBeenCalledWith("p_x");
   });
 });

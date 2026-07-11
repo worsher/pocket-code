@@ -6,6 +6,7 @@ import { promisify } from "node:util";
 import { dirname, join, isAbsolute, relative } from "node:path";
 import type { RuntimeBackend, ExecResult } from "@pocket-code/agent-core";
 import { isDockerEnabled, execInContainer } from "./docker.js";
+import { startManaged, stopManaged } from "./processRegistry.js";
 
 const execAsync = promisify(exec);
 
@@ -159,6 +160,14 @@ export function createNodeBackend(workspace: string, containerId?: string): Runt
 
     async exec(cmd: string, opts?: NodeExecOpts): Promise<ExecResult> {
       return shellExec(cmd, workspace, containerId, opts ?? {});
+    },
+
+    async startProcess(cmd: string, opts?: { cwd?: string }) {
+      const ws = resolveHostCwd(workspace, opts?.cwd);
+      return startManaged(ws, cmd, { containerId });
+    },
+    async stopProcess(processId: string) {
+      await stopManaged(processId);
     },
   };
 }
