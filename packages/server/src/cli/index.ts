@@ -1,23 +1,25 @@
-// ── CLI 适配器注册表 ───────────────────────────────────────
-import type { CliAgentAdapter } from "./types.js";
-import { claudeCodeAdapter } from "./claudeCode.js";
-import { codexAdapter } from "./codex.js";
-import { geminiAdapter } from "./gemini.js";
+// ── CLI 委托的 server 薄包装 ───────────────────────────────
+// 适配器/runner 本体在 @pocket-code/cli-agent(零依赖独立库);
+// 本文件只做 pocket-code 特有的三件事:
+// ① CliEvent → wire AgentEventType 恒等映射(字段逐字相同,编译期漂移哨兵);
+// ② AgentSession 的读写(injectHistory / cliSessions 回写 / messages.push);
+// ③ 向 agent.ts 保持既有导出面(cliAdapters / runCliSession)。
 import type { AgentEventType } from "@pocket-code/wire";
 import type { AgentSession } from "../agent.js";
-import { runCliAgent, type SpawnFn } from "./runner.js";
+import {
+  cliAdapters,
+  runCliAgent,
+  type CliAgentAdapter,
+  type CliEvent,
+  type SpawnFn,
+} from "@pocket-code/cli-agent";
 
-export type { CliAgentAdapter, CliSpawnContext, CliSpawnSpec } from "./types.js";
-export { claudeCodeAdapter } from "./claudeCode.js";
-export { codexAdapter } from "./codex.js";
-export { geminiAdapter } from "./gemini.js";
+export { cliAdapters, claudeCodeAdapter, codexAdapter, geminiAdapter } from "@pocket-code/cli-agent";
+export type { CliAgentAdapter, CliSpawnContext, CliSpawnSpec } from "@pocket-code/cli-agent";
 
-/** 按 id 索引的可用适配器。已接入 claude-code/codex/gemini-cli。 */
-export const cliAdapters: Record<string, CliAgentAdapter> = {
-  [claudeCodeAdapter.id]: claudeCodeAdapter,
-  [codexAdapter.id]: codexAdapter,
-  [geminiAdapter.id]: geminiAdapter,
-};
+/** 恒等映射:CliEvent 各变体与 wire AgentEventType 对应变体字段逐字相同;
+ *  wire 若改字段此处 tsc 立即报错(漂移哨兵),零运行时成本。 */
+const toAgentEvent = (e: CliEvent): AgentEventType => e;
 
 const HISTORY_TURNS = 6;
 const HISTORY_CHAR_CAP = 500;
@@ -57,7 +59,7 @@ export async function runCliSession(
     adapter,
     effectiveMessage,
     { workspace: session.workspace, customPrompt: session.customPrompt, resumeSessionId },
-    onEvent,
+    (e) => onEvent(toAgentEvent(e)),
     signal,
     spawnFn
   );
