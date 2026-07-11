@@ -28,3 +28,21 @@ describe("buildSystemPrompt", () => {
     expect(prompt.endsWith(customPrompt)).toBe(true);
   });
 });
+
+describe("buildSystemPrompt 后台能力门控", () => {
+  it("supportsBackground=true 时含 runInBackground", () => {
+    const p = buildSystemPrompt({ supportsBackground: true });
+    expect(p).toContain("runInBackground");
+  });
+
+  it("supportsBackground=false 时不含 runInBackground/stopProcess", () => {
+    const p = buildSystemPrompt({ supportsBackground: false });
+    expect(p).not.toContain("runInBackground");
+    expect(p).not.toContain("stopProcess");
+  });
+
+  it("默认(不传)含 runInBackground(保持 App 现状)", () => {
+    const p = buildSystemPrompt({});
+    expect(p).toContain("runInBackground");
+  });
+});

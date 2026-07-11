@@ -184,11 +184,15 @@ export async function runAgent(
   const history = fromLegacyAiSdkMessages(session.messages);
 
   try {
+    const backend = createNodeBackend(session.workspace, session.containerId);
     const { messages } = await runAgentLoop({
       modelClient: createNodeModelClient(effectiveModelKey),
-      backend: createNodeBackend(session.workspace, session.containerId),
+      backend,
       workspace: session.workspace,
-      system: buildSystemPrompt({ customPrompt: session.customPrompt }),
+      system: buildSystemPrompt({
+        customPrompt: session.customPrompt,
+        supportsBackground: !!backend.startProcess,
+      }),
       history,
       userMessage,
       images,
