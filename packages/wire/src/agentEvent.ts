@@ -113,6 +113,23 @@ export const HistoryCompactedEvent = z.object({
   ...seqField,
 });
 
+/** P16:goal 状态变更通告。completion/cleared 为终局(此后 goal 已清除)。 */
+export const GoalUpdatedEvent = z.object({
+  type: z.literal("goal-updated"),
+  status: z.enum(["active", "paused", "blocked", "complete"]),
+  change: z.enum(["lifecycle", "completion", "cleared"]),
+  stopReason: z.string().optional(),
+  /** 卡片展示用(cleared 时缺省)。 */
+  goal: z.string().optional(),
+  stats: z.object({
+    turns: z.number().int().nonnegative(),
+    inputTokens: z.number().int().nonnegative(),
+    outputTokens: z.number().int().nonnegative(),
+  }),
+  maxTurns: z.number().int().positive().optional(),
+  ...seqField,
+});
+
 export const UsageEvent = z.object({
   type: z.literal("usage"),
   inputTokens: z.number().int().nonnegative(),
@@ -156,6 +173,7 @@ export const AgentEvent = z.discriminatedUnion("type", [
   StepRetryingEvent,
   MediaDegradedEvent,
   HistoryCompactedEvent,
+  GoalUpdatedEvent,
   UsageEvent,
   DoneEvent,
   ErrorEvent,

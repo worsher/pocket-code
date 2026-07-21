@@ -127,6 +127,31 @@ export const AbortMessage = z.object({
   type: z.literal("abort"),
 });
 
+// ── P16:Goal 模式(spec §7)─────────────────────────────
+export const GoalCreateMessage = z.object({
+  type: z.literal("goal-create"),
+  content: z.string().min(1).max(20000),
+  acceptance: optStr(10000),
+  replace: z
+    .boolean()
+    .optional()
+    .nullable()
+    .transform((v) => v ?? undefined),
+  maxTurns: z
+    .number()
+    .int()
+    .min(1)
+    .max(100)
+    .optional()
+    .nullable()
+    .transform((v) => v ?? undefined),
+});
+
+export const GoalControlMessage = z.object({
+  type: z.literal("goal-control"),
+  action: z.enum(["pause", "resume", "cancel"]),
+});
+
 export const SyncPullMessage = z.object({
   type: z.literal("sync-pull"),
   sinceCommit: optStr(64),
@@ -153,6 +178,8 @@ export const WsMessage = z.discriminatedUnion("type", [
   DeleteProjectWorkspaceMessage,
   GetQuotaMessage,
   AbortMessage,
+  GoalCreateMessage,
+  GoalControlMessage,
   SyncPullMessage,
   SyncFileMessage,
 ]);
