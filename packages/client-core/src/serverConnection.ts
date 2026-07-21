@@ -4,7 +4,7 @@
 // 入站流式事件即归一化 AgentEvent(server 已切换,P6b Task 3)。
 
 import { RelayClient } from "./relayClient";
-import type { AgentEventType } from "@pocket-code/wire";
+import { AGENT_EVENT_TYPE_NAMES, type AgentEventType } from "@pocket-code/wire";
 
 export interface ConnectionConfig {
   getServerUrl(): string;
@@ -28,12 +28,9 @@ export interface ConnectionHandlers {
   onFileChanged(path: string, changeType: "created" | "modified" | "deleted"): void;
 }
 
-/** 归一化流式事件类型集合(据此路由到 onAgentEvent) */
-const AGENT_EVENT_TYPES = new Set([
-  "text-delta", "reasoning-delta", "tool-call", "tool-result", "file-changed",
-  "command-output", "process-started", "process-exited", "preview-available",
-  "model-selected", "usage", "done", "error",
-]);
+/** 归一化流式事件类型集合(据此路由到 onAgentEvent)。
+ *  单一真相源:wire 联合派生,新增事件自动覆盖,勿回退为手写清单。 */
+const AGENT_EVENT_TYPES = new Set<string>(AGENT_EVENT_TYPE_NAMES);
 
 const RECONNECT_BASE_MS = 2000;
 const RECONNECT_MAX_MS = 30000;
