@@ -33,6 +33,11 @@ export type ModelDelta =
   | { type: "tool-call"; id: string; name: string; args: Record<string, unknown> }
   | { type: "usage"; inputTokens: number; outputTokens: number };
 
+/** streamStep 失败的四分类(spec 2026-07-21 §4.1):
+ *  retryable(429/5xx/网络抖动→指数退避)、too-large(413→媒体降级)、
+ *  media-rejected(图片格式/内容被拒→全剥离)、fatal(其余,不重试)。 */
+export type ModelErrorKind = "retryable" | "too-large" | "media-rejected" | "fatal";
+
 export interface ModelClient {
   /** 单步:流一轮 assistant 输出,浮出 tool calls 不执行。 */
   streamStep(req: {
@@ -41,6 +46,10 @@ export interface ModelClient {
     tools: ToolSchema[];
     signal?: AbortSignal;
   }): AsyncIterable<ModelDelta>;
+  /** 错误分类;缺省时一切错误按 "fatal" 处理(现状行为)。 */
+  classifyError?(error: unknown): ModelErrorKind;
+  /** 服务端 Retry-After(ms);存在且为正时优先于本地退避。 */
+  retryAfterMs?(error: unknown): number | undefined;
 }
 
 export interface ExecResult { stdout: string; stderr: string; exitCode: number }
