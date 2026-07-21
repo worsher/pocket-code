@@ -16,6 +16,9 @@ export interface ConnectionConfig {
   isRelayPaired(): boolean;
   /** 配对成功后由宿主持久化 token(RN: updateSettings 包装;Web: localStorage) */
   onTokenPersist?: (token: string, machineId: string) => void;
+  /** P14 D-P14-4 预留:宿主持久化事件游标;缺省内存态(冷启动走全量 loadSession)。 */
+  getEventCursor?: () => { epoch: string; lastSeq: number } | undefined;
+  persistEventCursor?: (epoch: string, lastSeq: number) => void;
 }
 
 export interface ConnectionHandlers {
@@ -26,6 +29,8 @@ export interface ConnectionHandlers {
   onDisconnected(): void;
   onAuthError(message: string): void;
   onFileChanged(path: string, changeType: "created" | "modified" | "deleted"): void;
+  /** P14:server 指示全量重建(epoch 变化/缓冲覆盖不足/连续缺口)。宿主应走 loadSession。 */
+  onResyncRequired?(reason: string): void;
 }
 
 /** 归一化流式事件类型集合(据此路由到 onAgentEvent)。
@@ -42,6 +47,10 @@ export class ServerConnection {
   private reconnectAttempt = 0;
   /** _reqId/callId → resolver(RPC 关联:tool-exec 与 file/sync 请求) */
   private resolvers = new Map<string, (result: unknown) => void>();
+  /** P14:事件流游标(epoch 缺省 = 从未收过带序事件,init 不请求补发) */
+  private cursor: { epoch?: string; lastSeq: number } = { lastSeq: 0 };
+  /** 连续缺口计数:第一次断开重连补发,第二次转 resync(spec §5.2) */
+  private gapStrikes = 0;
 
   constructor(
     private config: ConnectionConfig,
@@ -62,6 +71,9 @@ export class ServerConnection {
     this.shouldConnect = true;
     this.clearReconnect();
     if (this.isOpen) return;
+
+    const persisted = this.config.getEventCursor?.();
+    if (persisted && !this.cursor.epoch) this.cursor = { epoch: persisted.epoch, lastSeq: persisted.lastSeq };
 
     const url = this.config.getServerUrl();
     console.log("[Conn] Connecting to:", url, "relay:", this.config.isRelayMode());
@@ -91,7 +103,7 @@ export class ServerConnection {
       if (this.config.isRelayMode()) {
         // relay 模式:daemon 侧 preAuth,已配对则直接 init(不带 token)
         if (this.config.isRelayPaired()) {
-          this.sendRaw({ type: "init", ...this.config.buildInitPayload() });
+          this.sendRaw({ type: "init", ...this.config.buildInitPayload(), ...this.cursorInitFields() });
         } else {
           console.log("[Conn] Connected to relay but not paired yet.");
         }
@@ -126,6 +138,7 @@ export class ServerConnection {
   disconnect(): void {
     this.shouldConnect = false;
     this.clearReconnect();
+    if (this.cursor.epoch) this.config.persistEventCursor?.(this.cursor.epoch, this.cursor.lastSeq);
     try {
       this.ws?.close();
     } catch {
@@ -135,7 +148,40 @@ export class ServerConnection {
   }
 
   private sendInit(token: string): void {
-    this.sendRaw({ type: "init", token, ...this.config.buildInitPayload() });
+    this.sendRaw({ type: "init", token, ...this.config.buildInitPayload(), ...this.cursorInitFields() });
+  }
+
+  /** init 携带的补发协商字段(仅当有 epoch,即此前收过带序事件)。 */
+  private cursorInitFields(): Record<string, unknown> {
+    return this.cursor.epoch ? { lastSeq: this.cursor.lastSeq, eventEpoch: this.cursor.epoch } : {};
+  }
+
+  /**
+   * P14 带 seq 事件守门:true = 放行到 onAgentEvent。
+   * 无 seq(geek/旧端)原样放行,游标不动;重复丢弃(C14-3);缺口第一次断开重连
+   * (重连 init 带 lastSeq 走补发),连续第二次转 resync 并采纳现值。
+   */
+  private admitSeq(data: { seq?: unknown; type?: string }): boolean {
+    const seq = data.seq;
+    if (typeof seq !== "number") return true;
+    if (seq <= this.cursor.lastSeq) return false;
+    if (seq > this.cursor.lastSeq + 1 && this.cursor.lastSeq > 0) {
+      this.gapStrikes++;
+      if (this.gapStrikes >= 2) {
+        this.gapStrikes = 0;
+        this.cursor.lastSeq = seq;
+        this.handlers.onResyncRequired?.("gap");
+        return true;
+      }
+      try { this.ws?.close(); } catch { /* onclose 调度重连 */ }
+      return false;
+    }
+    this.cursor.lastSeq = seq;
+    this.gapStrikes = 0;
+    if ((data.type === "done" || data.type === "error") && this.cursor.epoch) {
+      this.config.persistEventCursor?.(this.cursor.epoch, seq);
+    }
+    return true;
   }
 
   private dispatch(data: any): void {
@@ -146,7 +192,18 @@ export class ServerConnection {
         return;
       }
       case data.type === "session": {
+        // P14 冷启动:采纳 server 游标(此前事件不可得,交给宿主的常规历史加载);
+        // 已有 epoch 且不符时不自行猜——等 server 的 resync-required 决定。
+        if (typeof data.eventEpoch === "string" && !this.cursor.epoch) {
+          this.cursor = { epoch: data.eventEpoch, lastSeq: data.currentSeq ?? 0 };
+        }
         this.handlers.onSession(data.sessionId);
+        return;
+      }
+      case data.type === "resync-required": {
+        this.cursor = { epoch: data.eventEpoch, lastSeq: data.currentSeq ?? 0 };
+        this.gapStrikes = 0;
+        this.handlers.onResyncRequired?.(String(data.reason ?? "unknown"));
         return;
       }
       // RPC 响应:_reqId 关联(file-list/file-content/sync-manifest/sync-file-content)
@@ -167,10 +224,18 @@ export class ServerConnection {
           this.resolvers.delete(data.callId);
           return;
         }
+        if (!this.admitSeq(data)) return;
         this.handlers.onAgentEvent(data as AgentEventType);
         return;
       }
       case data.type === "error": {
+        // D-P14-6 分流:AgentEvent 形态({message})原样进事件流,不再被
+        // 控制错误路径改写成 "unknown";控制错误({error})走原逻辑。
+        if (typeof data.message === "string") {
+          if (!this.admitSeq(data)) return;
+          this.handlers.onAgentEvent(data as AgentEventType);
+          return;
+        }
         // 设备 token 被 daemon 拒绝:死 token 重试无意义,停止重连并提示重新配对
         if (typeof data.error === "string" && data.error.includes("Unauthorized")) {
           this.shouldConnect = false;
@@ -179,11 +244,12 @@ export class ServerConnection {
           try { this.ws?.close(); } catch { /* ignore */ }
           return;
         }
-        // 其余错误作为归一化 error 事件交给上层(字段名适配:出站 error 用 {error})
+        // 其余控制错误作为归一化 error 事件交给上层(字段名适配:出站 error 用 {error})
         this.handlers.onAgentEvent({ type: "error", message: String(data.error ?? "unknown") });
         return;
       }
       case AGENT_EVENT_TYPES.has(data.type): {
+        if (!this.admitSeq(data)) return;
         if (data.type === "file-changed") {
           this.handlers.onFileChanged(data.path, data.changeType);
         }

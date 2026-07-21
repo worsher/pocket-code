@@ -101,6 +101,9 @@ export function useAgent({ settings, model = "deepseek-v4-flash", customPrompt, 
   const gitCredentialsRef = useRef(settings.gitCredentials); gitCredentialsRef.current = settings.gitCredentials;
   const sessionIdRef = useRef(sessionId); sessionIdRef.current = sessionId;
   const messagesRef = useRef(messages); messagesRef.current = messages;
+  const isStreamingRef = useRef(isStreaming); isStreamingRef.current = isStreaming;
+  // loadSession 定义在 handlers 单例块之后 → handlers 内经 ref 间接引用(P14 resync)
+  const loadSessionRef = useRef<((sid: string) => Promise<void>) | null>(null);
   const modeRef = useRef(settings.mode); modeRef.current = settings.mode;
   const authTokenRef = useRef(settings.authToken); authTokenRef.current = settings.authToken;
   const deviceIdRef = useRef(settings.deviceId); deviceIdRef.current = settings.deviceId;
@@ -240,10 +243,23 @@ export function useAgent({ settings, model = "deepseek-v4-flash", customPrompt, 
       onConnected: () => {
         setIsConnected(true);
         setAuthError(null);
+        setStreamNotice(null);
         replayOfflineQueue();
       },
-      onDisconnected: () => setIsConnected(false),
+      onDisconnected: () => {
+        setIsConnected(false);
+        // P14:断开不中断 turn——agent 仍在开发机跑,重连后经 seq 补发接续
+        if (isStreamingRef.current) {
+          setStreamNotice("连接已断开,agent 仍在开发机继续运行,恢复后自动补齐");
+        }
+      },
       onAuthError: (msg: string) => setAuthError(msg),
+      // P14:server 无法补发(epoch 变化/缓冲不足/连续缺口)→ 全量重建
+      onResyncRequired: (reason: string) => {
+        console.log("[Agent] resync required:", reason);
+        const sid = sessionIdRef.current;
+        if (sid) loadSessionRef.current?.(sid);
+      },
       onFileChanged: (path: string, changeType: "created" | "modified" | "deleted") => {
         onFileChangedRef.current?.(path, changeType);
         // local 模式:自动同步到本地(读取失败非致命,文件仍在远端)
@@ -479,6 +495,7 @@ export function useAgent({ settings, model = "deepseek-v4-flash", customPrompt, 
     },
     [conn, connect, needsAutoConnect]
   );
+  loadSessionRef.current = loadSession;
 
   /** Start a new empty session */
   const newSession = useCallback(() => {

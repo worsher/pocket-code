@@ -19,6 +19,15 @@ describe("wire — WsMessage validation", () => {
     expect(result.success).toBe(true);
   });
 
+  it("init accepts lastSeq/eventEpoch and coerces null to undefined (P14)", () => {
+    const r = WsMessage.safeParse({ type: "init", lastSeq: 417, eventEpoch: "ep_x" });
+    expect(r.success && (r.data as any).lastSeq).toBe(417);
+    expect(r.success && (r.data as any).eventEpoch).toBe("ep_x");
+    const r2 = WsMessage.safeParse({ type: "init", lastSeq: null, eventEpoch: null });
+    expect(r2.success && (r2.data as any).lastSeq).toBeUndefined();
+    expect(WsMessage.safeParse({ type: "init", lastSeq: -1 }).success).toBe(false);
+  });
+
   it("should accept valid message with images", () => {
     const result = WsMessage.safeParse({
       type: "message",

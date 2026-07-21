@@ -76,6 +76,7 @@ export {
   SessionDeletedMsg,
   ProjectWorkspaceDeletedMsg,
   ServerErrorMsg,
+  ResyncRequiredMsg,
   ServerOutbound,
   type ServerOutboundType,
 } from "./serverOutbound.js";

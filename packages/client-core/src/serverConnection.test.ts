@@ -99,6 +99,123 @@ describe("ServerConnection", () => {
     conn.disconnect();
   });
 
+  // ── P14:事件游标(去重/缺口/resync)────────────────────
+  describe("P14 event cursor", () => {
+    /** 建立连接并采纳冷启动游标(session ack epoch/currentSeq)。 */
+    function openWithEpoch(handlers = makeHandlers(), config = makeConfig(), currentSeq = 0) {
+      const conn = new ServerConnection(config, handlers);
+      conn.connect();
+      const ws = FakeWebSocket.instances.at(-1)!;
+      ws.open();
+      ws.receive({ type: "session", sessionId: "s1", projectId: "", workspace: "/w", eventEpoch: "ep_1", currentSeq });
+      return { conn, ws };
+    }
+
+    it("① dedup: duplicate seq applied at most once (C14-3)", () => {
+      const received: any[] = [];
+      const { conn, ws } = openWithEpoch(makeHandlers({ onAgentEvent: (ev) => received.push(ev) }));
+      ws.receive({ type: "text-delta", text: "a", seq: 1 });
+      ws.receive({ type: "text-delta", text: "b", seq: 2 });
+      ws.receive({ type: "text-delta", text: "b-dup", seq: 2 });
+      ws.receive({ type: "text-delta", text: "c", seq: 3 });
+      expect(received.map((e) => e.seq)).toEqual([1, 2, 3]);
+      conn.disconnect();
+    });
+
+    it("② seq-less events pass through without moving the cursor (兼容 geek/旧端)", () => {
+      const received: any[] = [];
+      const { conn, ws } = openWithEpoch(makeHandlers({ onAgentEvent: (ev) => received.push(ev) }));
+      ws.receive({ type: "text-delta", text: "a", seq: 1 });
+      ws.receive({ type: "usage", inputTokens: 1, outputTokens: 1 }); // 无 seq
+      ws.receive({ type: "text-delta", text: "b", seq: 2 });
+      expect(received.length).toBe(3);
+      conn.disconnect();
+    });
+
+    it("③ first gap → drop event, close socket, reconnect init carries lastSeq/eventEpoch", () => {
+      vi.useFakeTimers();
+      const received: any[] = [];
+      const config = makeConfig({ getAuthToken: () => "tok", buildInitPayload: () => ({ sessionId: "s1" }) });
+      const { conn, ws } = openWithEpoch(makeHandlers({ onAgentEvent: (ev) => received.push(ev) }), config);
+      ws.receive({ type: "text-delta", text: "a", seq: 1 });
+      ws.receive({ type: "text-delta", text: "jump", seq: 5 }); // 缺口
+      expect(received.map((e: any) => e.seq)).toEqual([1]); // 跳号事件未投递
+      expect(ws.readyState).toBe(FakeWebSocket.CLOSED); // 主动断开
+      vi.advanceTimersByTime(2_000); // 第 1 次退避重连
+      const ws2 = FakeWebSocket.instances.at(-1)!;
+      expect(ws2).not.toBe(ws);
+      ws2.open();
+      const init = ws2.sent.map((s) => JSON.parse(s)).find((m) => m.type === "init");
+      expect(init.lastSeq).toBe(1);
+      expect(init.eventEpoch).toBe("ep_1");
+      conn.disconnect();
+    });
+
+    it("④ second consecutive gap → onResyncRequired('gap') and cursor jumps to current", () => {
+      vi.useFakeTimers();
+      const resyncs: string[] = [];
+      const received: any[] = [];
+      const config = makeConfig({ getAuthToken: () => "tok" });
+      const handlers = makeHandlers({
+        onAgentEvent: (ev: any) => received.push(ev),
+        onResyncRequired: (reason: string) => resyncs.push(reason),
+      } as any);
+      const { conn, ws } = openWithEpoch(handlers, config);
+      ws.receive({ type: "text-delta", text: "a", seq: 1 });
+      ws.receive({ type: "text-delta", text: "gap1", seq: 5 }); // 第一次缺口 → 断开
+      vi.advanceTimersByTime(2_000);
+      const ws2 = FakeWebSocket.instances.at(-1)!;
+      ws2.open();
+      ws2.receive({ type: "session", sessionId: "s1", projectId: "", workspace: "/w", eventEpoch: "ep_1", currentSeq: 1 });
+      ws2.receive({ type: "text-delta", text: "gap2", seq: 9 }); // 第二次缺口 → resync
+      expect(resyncs).toEqual(["gap"]);
+      expect((received.at(-1) as any).seq).toBe(9); // 采纳现值后放行
+      ws2.receive({ type: "text-delta", text: "next", seq: 10 }); // 从此正常续
+      expect((received.at(-1) as any).seq).toBe(10);
+      conn.disconnect();
+    });
+
+    it("⑤ resync-required message → onResyncRequired(reason) + cursor adopts server values", () => {
+      const resyncs: string[] = [];
+      const received: any[] = [];
+      const handlers = makeHandlers({
+        onAgentEvent: (ev: any) => received.push(ev),
+        onResyncRequired: (reason: string) => resyncs.push(reason),
+      } as any);
+      const { conn, ws } = openWithEpoch(handlers);
+      ws.receive({ type: "resync-required", reason: "epoch-changed", eventEpoch: "ep_2", currentSeq: 40 });
+      expect(resyncs).toEqual(["epoch-changed"]);
+      ws.receive({ type: "text-delta", text: "old", seq: 40 }); // ≤ 游标 → 丢弃
+      ws.receive({ type: "text-delta", text: "new", seq: 41 });
+      expect(received.map((e: any) => e.seq)).toEqual([41]);
+      conn.disconnect();
+    });
+
+    it("⑥ cold start adopts ack epoch/currentSeq; next seq flows", () => {
+      const received: any[] = [];
+      const { conn, ws } = openWithEpoch(makeHandlers({ onAgentEvent: (ev) => received.push(ev) }), makeConfig(), 7);
+      ws.receive({ type: "text-delta", text: "a", seq: 8 });
+      ws.receive({ type: "text-delta", text: "stale", seq: 7 }); // ≤ currentSeq → 丢弃
+      expect(received.map((e: any) => e.seq)).toEqual([8]);
+      conn.disconnect();
+    });
+
+    it("⑦ error 分流(D-P14-6): message 形态原样进 onAgentEvent;error 形态走控制路径", () => {
+      const received: any[] = [];
+      const authErrors: string[] = [];
+      const handlers = makeHandlers({
+        onAgentEvent: (ev: any) => received.push(ev),
+        onAuthError: (m) => authErrors.push(m),
+      });
+      const { conn, ws } = openWithEpoch(handlers);
+      ws.receive({ type: "error", message: "model down", seq: 1 });
+      expect(received.at(-1)).toMatchObject({ type: "error", message: "model down" }); // 不再是 "unknown"
+      ws.receive({ type: "error", error: "Unauthorized: bad token" });
+      expect(authErrors.length).toBe(1); // 停连逻辑回归
+      conn.disconnect();
+    });
+  });
+
   it("step-retrying / media-degraded / done(stopReason) 均路由到 onAgentEvent(派生集合覆盖新事件)", () => {
     const received: unknown[] = [];
     const conn = new ServerConnection(

@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { ServerOutbound } from "./serverOutbound.js";
+import { ServerOutbound, SessionMsg } from "./serverOutbound.js";
 
 describe("ServerOutbound", () => {
   const valid: unknown[] = [
@@ -28,5 +28,20 @@ describe("ServerOutbound", () => {
     expect(ServerOutbound.safeParse({ type: "nope" }).success).toBe(false);
     expect(ServerOutbound.safeParse({ type: "auth", token: "jwt" }).success).toBe(false); // 缺 userId
     expect(ServerOutbound.safeParse({ type: "session-deleted", sessionId: "s1" }).success).toBe(false); // 缺 success
+  });
+
+  it("session carries eventEpoch/currentSeq; resync-required round-trips (P14)", () => {
+    expect(
+      SessionMsg.safeParse({
+        type: "session", sessionId: "s", projectId: "", workspace: "/w",
+        eventEpoch: "ep_1", currentSeq: 9,
+      }).success
+    ).toBe(true);
+    const resync = { type: "resync-required", reason: "epoch-changed", eventEpoch: "ep_2", currentSeq: 0 };
+    const r = ServerOutbound.safeParse(resync);
+    expect(r.success && r.data).toEqual(resync);
+    expect(
+      ServerOutbound.safeParse({ type: "resync-required", reason: "other", eventEpoch: "e", currentSeq: 0 }).success
+    ).toBe(false);
   });
 });

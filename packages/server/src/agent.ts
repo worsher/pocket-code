@@ -109,6 +109,8 @@ export interface AgentSession {
   customPrompt?: string;
   /** CLI 委托续接会话 id,按 adapter.id 分槽。 */
   cliSessions?: Record<string, string>;
+  /** 进行中 turn 的中止控制(session 级:断线重连后任何连接均可 abort,P14 D-P14-3)。 */
+  currentAbort?: AbortController;
   /** Timestamp of last activity, used for TTL cleanup */
   lastActivity: number;
 }

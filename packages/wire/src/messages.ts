@@ -29,6 +29,15 @@ export const InitMessage = z.object({
   projectId: optStr(128),
   model: optStr(64),
   customPrompt: optStr(10000),
+  // P14:重连补发协商——客户端已应用的最后事件 seq 与其所属 epoch(spec §5.2)
+  lastSeq: z
+    .number()
+    .int()
+    .min(0)
+    .optional()
+    .nullable()
+    .transform((v) => v ?? undefined),
+  eventEpoch: optStr(64),
   gitCredentials: z
     .array(
       z.object({

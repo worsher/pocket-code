@@ -5,14 +5,20 @@
 
 import { z } from "zod";
 
+// P14:per-session 单调事件序号(server 侧 eventBuffer 分配;spec 2026-07-21 C14-1)。
+// 可选:geek in-process 路径与旧端不带;客户端对带 seq 事件按 (epoch, seq) 去重。
+const seqField = { seq: z.number().int().positive().optional() };
+
 export const TextDeltaEvent = z.object({
   type: z.literal("text-delta"),
   text: z.string(),
+  ...seqField,
 });
 
 export const ReasoningDeltaEvent = z.object({
   type: z.literal("reasoning-delta"),
   text: z.string(),
+  ...seqField,
 });
 
 export const ToolCallEvent = z.object({
@@ -20,6 +26,7 @@ export const ToolCallEvent = z.object({
   callId: z.string(),
   name: z.string(),
   args: z.record(z.unknown()),
+  ...seqField,
 });
 
 export const ToolResultEvent = z.object({
@@ -27,6 +34,7 @@ export const ToolResultEvent = z.object({
   callId: z.string(),
   result: z.unknown(),
   isError: z.boolean().optional(),
+  ...seqField,
 });
 
 export const FileChangedEvent = z.object({
@@ -35,6 +43,7 @@ export const FileChangedEvent = z.object({
   changeType: z.enum(["created", "modified", "deleted"]),
   oldContent: z.string().optional(),
   newContent: z.string().optional(),
+  ...seqField,
 });
 
 export const CommandOutputEvent = z.object({
@@ -42,6 +51,7 @@ export const CommandOutputEvent = z.object({
   callId: z.string(),
   chunk: z.string(),
   stream: z.enum(["stdout", "stderr"]),
+  ...seqField,
 });
 
 export const ProcessStartedEvent = z.object({
@@ -49,24 +59,28 @@ export const ProcessStartedEvent = z.object({
   processId: z.string(),
   command: z.string(),
   cwd: z.string().optional(),
+  ...seqField,
 });
 
 export const ProcessExitedEvent = z.object({
   type: z.literal("process-exited"),
   processId: z.string(),
   exitCode: z.number().int(),
+  ...seqField,
 });
 
 export const PreviewAvailableEvent = z.object({
   type: z.literal("preview-available"),
   url: z.string(),
   source: z.enum(["dev-server", "static"]),
+  ...seqField,
 });
 
 export const ModelSelectedEvent = z.object({
   type: z.literal("model-selected"),
   modelKey: z.string(),
   reason: z.string().optional(),
+  ...seqField,
 });
 
 /** step 级瞬时错误重试通告(每次重发前恰发一条,spec 2026-07-21 C13-6)。 */
@@ -78,6 +92,7 @@ export const StepRetryingEvent = z.object({
   delayMs: z.number().int().nonnegative(),
   statusCode: z.number().int().optional(),
   message: z.string().optional(),
+  ...seqField,
 });
 
 /** 媒体降级通告:发送投影降级(degraded 保留最近一张 / stripped 全剥离,spec §4.3)。 */
@@ -85,12 +100,14 @@ export const MediaDegradedEvent = z.object({
   type: z.literal("media-degraded"),
   level: z.enum(["degraded", "stripped"]),
   keptImages: z.number().int().nonnegative(),
+  ...seqField,
 });
 
 export const UsageEvent = z.object({
   type: z.literal("usage"),
   inputTokens: z.number().int().nonnegative(),
   outputTokens: z.number().int().nonnegative(),
+  ...seqField,
 });
 
 export const DoneEvent = z.object({
@@ -104,12 +121,14 @@ export const DoneEvent = z.object({
       outputTokens: z.number().int().nonnegative(),
     })
     .optional(),
+  ...seqField,
 });
 
 export const ErrorEvent = z.object({
   type: z.literal("error"),
   message: z.string(),
   code: z.string().optional(),
+  ...seqField,
 });
 
 /** 判别联合：App 渲染层只消费此契约 */
