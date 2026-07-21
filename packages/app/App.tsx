@@ -123,6 +123,8 @@ function MainScreen() {
     authError,
     lastStopReason,
     streamNotice,
+    compactionNotice,
+    editCutoff,
     needsAutoConnect,
     connect,
     disconnect,
@@ -225,7 +227,7 @@ function MainScreen() {
         message={item}
         streamingPhase={isLast && isStreaming ? streamingPhase : undefined}
         currentToolName={isLast && isStreaming ? currentToolName : undefined}
-        onEditResend={!isStreaming ? editAndResend : undefined}
+        onEditResend={!isStreaming && index >= editCutoff ? editAndResend : undefined}
       />
     );
   };
@@ -365,6 +367,13 @@ function MainScreen() {
               contentContainerStyle={styles.messageListContent}
               keyboardShouldPersistTaps="handled"
             />
+          )}
+
+          {/* 上下文压缩提示(P15) */}
+          {compactionNotice && (
+            <View style={styles.streamNoticeBar}>
+              <Text style={styles.streamNoticeText}>{compactionNotice}</Text>
+            </View>
           )}
 
           {/* 重试/降级瞬时提醒(P13) */}

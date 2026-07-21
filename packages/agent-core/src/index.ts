@@ -10,3 +10,6 @@ export type { RunAgentOptions } from "./loop.js";
 export { retryBackoffDelays, abortableSleep } from "./retry.js";
 export { projectMedia, countImages, MEDIA_PLACEHOLDER } from "./mediaProjection.js";
 export type { MediaProjection } from "./mediaProjection.js";
+export { estimateTokens } from "./tokens.js";
+export { compactHistory, COMPACT_PREFIX } from "./compaction.js";
+export type { CompactOptions, CompactOutcome } from "./compaction.js";

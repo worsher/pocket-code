@@ -10,6 +10,7 @@ import { cliAdapters, runCliSession } from "./cli/index.js";
 import type { AgentEventType } from "@pocket-code/wire";
 import {
   runAgentLoop,
+  compactHistory,
   fromLegacyAiSdkMessages,
   buildSystemPrompt,
   type CoreMessage,
@@ -94,6 +95,9 @@ export function getModel(modelKey: string) {
 }
 
 const AGENT_MAX_STEPS = parseInt(process.env.AGENT_MAX_STEPS || "25", 10);
+// P15:turn 边界上下文压缩(spec §6);阈值/保留轮数可经环境变量调
+const COMPACT_THRESHOLD = parseInt(process.env.AGENT_COMPACT_THRESHOLD || "60000", 10);
+const COMPACT_KEEP_TURNS = parseInt(process.env.AGENT_COMPACT_KEEP_TURNS || "2", 10);
 
 export interface AgentSession {
   sessionId: string;
@@ -186,11 +190,33 @@ export async function runAgent(
   console.log(`[Agent] model=${effectiveModelKey}, message="${userMessage.slice(0, 80)}"`);
 
   const history = fromLegacyAiSdkMessages(session.messages);
+  // catch 兜底也要用压缩后形态(若压缩已落库,回退到未压缩史会复活已摘要的旧消息)
+  let effectiveHistory = history;
 
   try {
     const backend = createNodeBackend(session.workspace, session.containerId);
+    // D-P15-2:modelClient 提升,压缩与 loop 共用
+    const modelClient = createNodeModelClient(effectiveModelKey);
+
+    // C15-1:压缩只发生在 runAgentLoop 之前(turn 边界安全点);失败静默跳过
+    const { history: compacted, result: compaction } = await compactHistory({
+      history,
+      modelClient,
+      thresholdTokens: COMPACT_THRESHOLD,
+      keepRecentTurns: COMPACT_KEEP_TURNS,
+      signal,
+    });
+    if (compaction) {
+      effectiveHistory = compacted;
+      // D-P15-4:压缩形态先落库,turn 中途出错也不退回未压缩形态
+      session.messages = compacted;
+      saveSession(session.sessionId, session.userId, session.messages, session.modelKey, session.projectId);
+      onEvent({ type: "history-compacted", ...compaction });
+      console.log(`[Agent] Compacted history: ${compaction.tokensBefore} → ${compaction.tokensAfter} tokens (${compaction.compactedMessages} messages)`);
+    }
+
     const result = await runAgentLoop({
-      modelClient: createNodeModelClient(effectiveModelKey),
+      modelClient,
       backend,
       workspace: session.workspace,
       system: buildSystemPrompt({
@@ -199,7 +225,7 @@ export async function runAgent(
         // 防未来出现只实现其一的 backend 时 prompt 宣传与工具注册分叉。
         supportsBackground: !!(backend.startProcess && backend.stopProcess),
       }),
-      history,
+      history: effectiveHistory,
       userMessage,
       images,
       onEvent,
@@ -223,7 +249,7 @@ export async function runAgent(
       images && images.length > 0
         ? [{ type: "text" as const, text: userMessage }, ...images.map((img) => ({ type: "image" as const, ...img }))]
         : userMessage;
-    session.messages = [...history, { role: "user", content: userContent }];
+    session.messages = [...effectiveHistory, { role: "user", content: userContent }];
     saveSession(session.sessionId, session.userId, session.messages, session.modelKey, session.projectId);
     onEvent({ type: "done", stopReason: "error" });
   }

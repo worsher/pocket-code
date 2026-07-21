@@ -103,6 +103,16 @@ export const MediaDegradedEvent = z.object({
   ...seqField,
 });
 
+/** P15:turn 边界上下文压缩通告(token 数为估算值,spec §6)。 */
+export const HistoryCompactedEvent = z.object({
+  type: z.literal("history-compacted"),
+  tokensBefore: z.number().int().nonnegative(),
+  tokensAfter: z.number().int().nonnegative(),
+  compactedMessages: z.number().int().nonnegative(),
+  keptRecentTurns: z.number().int().nonnegative(),
+  ...seqField,
+});
+
 export const UsageEvent = z.object({
   type: z.literal("usage"),
   inputTokens: z.number().int().nonnegative(),
@@ -145,6 +155,7 @@ export const AgentEvent = z.discriminatedUnion("type", [
   ModelSelectedEvent,
   StepRetryingEvent,
   MediaDegradedEvent,
+  HistoryCompactedEvent,
   UsageEvent,
   DoneEvent,
   ErrorEvent,

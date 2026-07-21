@@ -122,6 +122,18 @@ describe("wire — AgentEvent validation", () => {
     expect(AgentEvent.safeParse({ type: "text-delta", text: "hi" }).success).toBe(true); // 缺省合法
   });
 
+  it("history-compacted round-trips (P15)", () => {
+    const full = {
+      type: "history-compacted",
+      tokensBefore: 70000, tokensAfter: 9000,
+      compactedMessages: 42, keptRecentTurns: 2, seq: 5,
+    };
+    const r = AgentEvent.safeParse(full);
+    expect(r.success && r.data).toEqual(full);
+    expect(AgentEvent.safeParse({ type: "history-compacted", tokensBefore: 1 }).success).toBe(false); // 缺字段
+    expect(AGENT_EVENT_TYPE_NAMES).toContain("history-compacted"); // 派生集合自动路由(P13 T6 收益)
+  });
+
   it("AGENT_EVENT_TYPE_NAMES covers every union variant exactly once", () => {
     expect(new Set(AGENT_EVENT_TYPE_NAMES).size).toBe(AgentEvent.options.length);
     expect(AGENT_EVENT_TYPE_NAMES).toContain("step-retrying");
