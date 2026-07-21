@@ -5,11 +5,13 @@ import type { AgentEventType } from "@pocket-code/wire";
 // runAgentLoop is replaced; all other agent-core exports (fromLegacyAiSdkMessages,
 // buildSystemPrompt, etc.) stay real so history conversion behaves normally.
 const runAgentLoopMock = vi.fn();
+const compactHistoryMock = vi.fn();
 vi.mock("@pocket-code/agent-core", async (importOriginal) => {
   const actual = await importOriginal<typeof import("@pocket-code/agent-core")>();
   return {
     ...actual,
     runAgentLoop: (...args: unknown[]) => runAgentLoopMock(...args),
+    compactHistory: (...args: unknown[]) => compactHistoryMock(...args),
   };
 });
 
@@ -65,6 +67,9 @@ beforeEach(() => {
   saveSessionMock.mockReset();
   createNodeModelClientMock.mockClear();
   runCliSessionMock.mockClear();
+  // 缺省透传(未压缩):既有用例零改动
+  compactHistoryMock.mockReset();
+  compactHistoryMock.mockImplementation(async ({ history }: { history: unknown[] }) => ({ history }));
 });
 
 describe("runAgent", () => {
@@ -168,6 +173,44 @@ describe("runAgent", () => {
     expect(session.messages).toEqual(partial); // 部分进度落盘,不再重建丢弃
     expect(saveSessionMock).toHaveBeenCalled();
     expect(events.at(-1)).toMatchObject({ type: "done", stopReason: "error" });
+  });
+
+  it("P15: compaction result → history-compacted event before loop events, compacted history persisted and passed to loop", async () => {
+    const compacted = [
+      { role: "user", content: "[对话历史摘要]…" },
+      { role: "user", content: "近期请求" },
+      { role: "assistant", content: "近期答复" },
+    ];
+    const compactionResult = { tokensBefore: 70000, tokensAfter: 900, compactedMessages: 20, keptRecentTurns: 2 };
+    compactHistoryMock.mockResolvedValue({ history: compacted, result: compactionResult });
+    runAgentLoopMock.mockResolvedValue({
+      messages: [...compacted, { role: "user", content: "hi" }, { role: "assistant", content: "ok" }],
+      fullText: "ok", stopReason: "end_turn", usage: { inputTokens: 1, outputTokens: 1 }, steps: 1,
+    });
+    const { events, onEvent } = collectEvents();
+    const session = makeSession({ messages: [{ role: "user", content: "old" }, { role: "assistant", content: "old-reply" }] });
+    await runAgent(session, "hi", onEvent);
+
+    const compactIdx = events.findIndex((e) => e.type === "history-compacted");
+    expect(compactIdx).toBeGreaterThanOrEqual(0);
+    expect(events[compactIdx]).toEqual({ type: "history-compacted", ...compactionResult });
+    expect(events.at(-1)!.type).toBe("done"); // done 照常收尾
+    // 压缩形态先落库(第一次 saveSession 载荷即 compacted),loop 后再落一次
+    expect(saveSessionMock.mock.calls.length).toBeGreaterThanOrEqual(2);
+    expect(saveSessionMock.mock.calls[0][2]).toBe(compacted);
+    // loop 收到压缩后的 history
+    expect((runAgentLoopMock.mock.calls[0][0] as any).history).toBe(compacted);
+  });
+
+  it("P15: no compaction (default passthrough) → no event, single saveSession (regression)", async () => {
+    runAgentLoopMock.mockResolvedValue({
+      messages: [{ role: "user", content: "hi" }, { role: "assistant", content: "ok" }],
+      fullText: "ok", stopReason: "end_turn", usage: { inputTokens: 0, outputTokens: 0 }, steps: 1,
+    });
+    const { events, onEvent } = collectEvents();
+    await runAgent(makeSession(), "hi", onEvent);
+    expect(events.some((e) => e.type === "history-compacted")).toBe(false);
+    expect(saveSessionMock).toHaveBeenCalledTimes(1);
   });
 
   it("CLI path is unaffected: modelKey='claude-code' delegates to runCliSession, runAgentLoop is not called", async () => {
