@@ -29,6 +29,8 @@ export interface RunAgentOptions {
   maxRetryAttempts?: number;
   /** 退避基数 ms(默认 500)。仅测试覆盖用(D-P13-3),生产不传。 */
   retryBaseMs?: number;
+  /** 调用方注入的运行时工具(如 goal turn 的 updateGoalStatus,P16)。 */
+  extraTools?: import("./tools/registry.js").ToolDef[];
 }
 
 const FILE_CHANGE_TOOLS = new Set(["writeFile", "editFile"]);
@@ -39,7 +41,7 @@ export async function runAgentLoop(
   const { modelClient, backend, workspace, system, history, userMessage, images, onEvent, signal } = opts;
   const maxSteps = opts.maxSteps ?? 25;
 
-  const registry = buildToolRegistry(backend, workspace);
+  const registry = buildToolRegistry(backend, workspace, opts.extraTools);
 
   // 1. user 消息入 messages(有 images → ContentPart[]:text + images)
   const userContent =

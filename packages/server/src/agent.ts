@@ -4,7 +4,8 @@ import { createOpenAI } from "@ai-sdk/openai";
 import { google } from "@ai-sdk/google";
 import { getWorkspaceRoot } from "./tools.js";
 import { mkdir } from "fs/promises";
-import { saveSession, getSession } from "./db.js";
+import { saveSession, getSession, saveSessionGoal } from "./db.js";
+import { makeUpdateGoalStatusTool, type GoalState } from "./goal/types.js";
 import { analyzePrompt } from "./modelRouter.js";
 import { cliAdapters, runCliSession } from "./cli/index.js";
 import type { AgentEventType } from "@pocket-code/wire";
@@ -13,7 +14,10 @@ import {
   compactHistory,
   fromLegacyAiSdkMessages,
   buildSystemPrompt,
+  buildGoalInjection,
   type CoreMessage,
+  type LoopStopReason,
+  type ToolDef,
 } from "@pocket-code/agent-core";
 import { createNodeModelClient } from "./nodeModelClient.js";
 import { createNodeBackend } from "./nodeBackend.js";
@@ -115,6 +119,8 @@ export interface AgentSession {
   cliSessions?: Record<string, string>;
   /** 进行中 turn 的中止控制(session 级:断线重连后任何连接均可 abort,P14 D-P14-3)。 */
   currentAbort?: AbortController;
+  /** 当前目标(P16;同一 session 至多一个,complete/cancel 即清除)。 */
+  goal?: GoalState;
   /** Timestamp of last activity, used for TTL cleanup */
   lastActivity: number;
 }
@@ -130,7 +136,7 @@ export async function createSession(
   // Try to restore from database
   const saved = getSession(sessionId);
   if (saved && saved.userId === userId) {
-    return {
+    const session: AgentSession = {
       sessionId,
       userId,
       projectId: saved.projectId || projectId,
@@ -139,6 +145,23 @@ export async function createSession(
       modelKey: saved.modelKey,
       lastActivity: Date.now(),
     };
+    // P16 C16-6:恢复 goal;active → paused 降级(旧进程的 turn 必已死,
+    // 自动续跑会在无人监督下偷偷烧钱)。降级态立即回写。
+    if (saved.goalJson) {
+      try {
+        const goal = JSON.parse(saved.goalJson) as GoalState;
+        if (goal.status === "active") {
+          goal.status = "paused";
+          goal.stopReason = "进程重启,已暂停";
+          goal.updatedAt = Date.now();
+          saveSessionGoal(sessionId, JSON.stringify(goal));
+        }
+        session.goal = goal;
+      } catch {
+        // 损坏的 goal JSON:忽略(等价无目标)
+      }
+    }
+    return session;
   }
 
   return {
@@ -157,20 +180,26 @@ export interface ImageData {
   mimeType: string;
 }
 
+/** P16 D-P16-1:turn 结果(goal driver 的决策输入);CLI 路径不产生。 */
+export interface TurnOutcome {
+  stopReason: LoopStopReason;
+  usage: { inputTokens: number; outputTokens: number };
+}
+
 export async function runAgent(
   session: AgentSession,
   userMessage: string,
   onEvent: (event: AgentEventType) => void,
   signal?: AbortSignal,
   images?: ImageData[]
-): Promise<void> {
+): Promise<TurnOutcome | undefined> {
   // ── CLI routing: 注册表命中即委托本机 CLI 工具 ──
   const cliAdapter = cliAdapters[session.modelKey];
   if (cliAdapter) {
     session.messages.push({ role: "user", content: userMessage });
     await runCliSession(cliAdapter, session, userMessage, onEvent, signal);
     saveSession(session.sessionId, session.userId, session.messages, session.modelKey, session.projectId);
-    return;
+    return undefined;
   }
 
   // Smart model routing: auto-select model based on prompt complexity
@@ -215,16 +244,31 @@ export async function runAgent(
       console.log(`[Agent] Compacted history: ${compaction.tokensBefore} → ${compaction.tokensAfter} tokens (${compaction.compactedMessages} messages)`);
     }
 
+    // P16 C16-7/8:goal 注入与 updateGoalStatus 工具仅 goal turn 存在;
+    // 注入在 turn 边界一次性完成(system 在 step 间不变)。
+    let system = buildSystemPrompt({
+      customPrompt: session.customPrompt,
+      // 与 execTools 能力门控(需 startProcess && stopProcess)判据对称,
+      // 防未来出现只实现其一的 backend 时 prompt 宣传与工具注册分叉。
+      supportsBackground: !!(backend.startProcess && backend.stopProcess),
+    });
+    let extraTools: ToolDef[] | undefined;
+    if (session.goal?.status === "active") {
+      system += buildGoalInjection({
+        goal: session.goal.goal,
+        acceptance: session.goal.acceptance,
+        turns: session.goal.stats.turns,
+        maxTurns: session.goal.budgets.maxTurns,
+      });
+      extraTools = [makeUpdateGoalStatusTool(session)];
+    }
+
     const result = await runAgentLoop({
       modelClient,
       backend,
       workspace: session.workspace,
-      system: buildSystemPrompt({
-        customPrompt: session.customPrompt,
-        // 与 execTools 能力门控(需 startProcess && stopProcess)判据对称,
-        // 防未来出现只实现其一的 backend 时 prompt 宣传与工具注册分叉。
-        supportsBackground: !!(backend.startProcess && backend.stopProcess),
-      }),
+      system,
+      extraTools,
       history: effectiveHistory,
       userMessage,
       images,
@@ -241,6 +285,7 @@ export async function runAgent(
     saveSession(session.sessionId, session.userId, session.messages, session.modelKey, session.projectId);
 
     onEvent({ type: "done", stopReason: result.stopReason, usage: result.usage });
+    return { stopReason: result.stopReason, usage: result.usage };
   } catch (err: any) {
     // P12 后 loop 不再抛错(错误收敛为返回值),此 catch 仅编程 bug 兜底:
     // 保留 loop 前的历史 + 本轮 user 消息落盘,尽力保留语境。
@@ -252,5 +297,6 @@ export async function runAgent(
     session.messages = [...effectiveHistory, { role: "user", content: userContent }];
     saveSession(session.sessionId, session.userId, session.messages, session.modelKey, session.projectId);
     onEvent({ type: "done", stopReason: "error" });
+    return { stopReason: "error", usage: { inputTokens: 0, outputTokens: 0 } };
   }
 }

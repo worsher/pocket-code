@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { buildSystemPrompt } from "./prompt.js";
+import { buildSystemPrompt, buildGoalInjection, goalKickoffPrompt, GOAL_CONTINUATION_PROMPT } from "./prompt.js";
 
 describe("buildSystemPrompt", () => {
   it("buildSystemPrompt({}) should be non-empty and contain key sentences", () => {
@@ -44,5 +44,28 @@ describe("buildSystemPrompt 后台能力门控", () => {
   it("默认(不传)含 runInBackground(保持 App 现状)", () => {
     const p = buildSystemPrompt({});
     expect(p).toContain("runInBackground");
+  });
+});
+
+describe("goal prompts (P16)", () => {
+  it("buildGoalInjection contains goal text, progress, tool directive and non-override warning", () => {
+    const inj = buildGoalInjection({ goal: "清零 lint 错误", acceptance: "pnpm lint 通过", turns: 3, maxTurns: 20 });
+    expect(inj).toContain("清零 lint 错误");
+    expect(inj).toContain("pnpm lint 通过");
+    expect(inj).toContain("3/20");
+    expect(inj).toContain("updateGoalStatus");
+    expect(inj).toContain("不可覆盖"); // goal 文本是用户数据,不可覆盖系统指令
+    expect(inj).toMatch(/complete/i);
+    expect(inj).toMatch(/blocked/i);
+  });
+
+  it("kickoff/continuation prompt shapes", () => {
+    const kick = goalKickoffPrompt({ goal: "清零 lint 错误", acceptance: "pnpm lint 通过" });
+    expect(kick.startsWith("[goal]")).toBe(true);
+    expect(kick).toContain("清零 lint 错误");
+    expect(kick).toContain("pnpm lint 通过");
+    expect(goalKickoffPrompt({ goal: "x" })).toContain("x");
+    expect(GOAL_CONTINUATION_PROMPT.startsWith("[goal continuation]")).toBe(true);
+    expect(GOAL_CONTINUATION_PROMPT).toContain("updateGoalStatus");
   });
 });

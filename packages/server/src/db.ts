@@ -50,6 +50,12 @@ export async function initDb(): Promise<void> {
   } catch {
     // Column already exists — safe to ignore
   }
+  // P16: goal 状态持久化(JSON;NULL = 无目标)
+  try {
+    db.run(`ALTER TABLE sessions ADD COLUMN goal_json TEXT`);
+  } catch {
+    // Column already exists — safe to ignore
+  }
   db.run(`CREATE INDEX IF NOT EXISTS idx_sessions_project ON sessions(project_id);`);
 
   // User quotas table
@@ -97,6 +103,8 @@ export interface SessionRecord {
   title: string;
   messages: CoreMessage[];
   modelKey: string;
+  /** P16:goal 状态 JSON(null = 无目标)。 */
+  goalJson: string | null;
   createdAt: number;
   updatedAt: number;
 }
@@ -159,9 +167,20 @@ export function getSession(sessionId: string): SessionRecord | null {
     title: row.title as string,
     messages: JSON.parse(row.messages as string),
     modelKey: row.model_key as string,
+    goalJson: (row.goal_json as string) || null,
     createdAt: row.created_at as number,
     updatedAt: row.updated_at as number,
   };
+}
+
+/** P16:落盘 goal 状态(null = 清除)。session 行不存在时为 no-op。 */
+export function saveSessionGoal(sessionId: string, goalJson: string | null): void {
+  db.run("UPDATE sessions SET goal_json = ?, updated_at = ? WHERE session_id = ?", [
+    goalJson,
+    Date.now(),
+    sessionId,
+  ]);
+  persist();
 }
 
 /** List sessions for a user, optionally filtered by projectId */

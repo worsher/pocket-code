@@ -376,6 +376,30 @@ describe("runAgentLoop", () => {
     expect(Date.now() - t0).toBeLessThan(5_000); // 60s 退避被立即打断
   });
 
+  it("P16: extraTools schemas reach the model and execute through the registry", async () => {
+    const executed: any[] = [];
+    const extra = {
+      schema: { name: "updateGoalStatus", description: "标记目标状态", parameters: { type: "object", properties: {} } },
+      execute: async (_b: any, args: Record<string, unknown>) => {
+        executed.push(args);
+        return { success: true, status: args.status };
+      },
+    };
+    const client = scriptedClient([
+      [{ type: "tool-call", id: "g1", name: "updateGoalStatus", args: { status: "complete" } }],
+      [{ type: "text", text: "总结" }],
+    ]);
+    const onEvent = vi.fn();
+    const r = await runAgentLoop(base(client, { onEvent, extraTools: [extra] }));
+    // schema 进了模型的工具表
+    expect(client.calls[0].tools.some((t: any) => t.name === "updateGoalStatus")).toBe(true);
+    // execute 被调且结果配对
+    expect(executed).toEqual([{ status: "complete" }]);
+    const result = onEvent.mock.calls.map((c) => c[0]).find((e: any) => e.type === "tool-result");
+    expect(result).toMatchObject({ callId: "g1", result: { success: true, status: "complete" } });
+    expect(r.stopReason).toBe("end_turn");
+  });
+
   it("editFile success emits file-changed with changeType modified", async () => {
     const client = scriptedClient([
       [{ type: "tool-call", id: "c1", name: "editFile", args: { path: "a.ts", oldText: "hello", newText: "hi" } }],

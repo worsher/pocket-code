@@ -19,6 +19,23 @@ describe("wire — WsMessage validation", () => {
     expect(result.success).toBe(true);
   });
 
+  it("goal-create / goal-control round-trip (P16)", () => {
+    const create = WsMessage.safeParse({
+      type: "goal-create", content: "清零 lint 错误", acceptance: "pnpm lint 通过",
+      replace: null, maxTurns: 30,
+    });
+    expect(create.success).toBe(true);
+    expect(create.success && (create.data as any).replace).toBeUndefined();
+    expect(create.success && (create.data as any).maxTurns).toBe(30);
+    expect(WsMessage.safeParse({ type: "goal-create", content: "" }).success).toBe(false);
+    expect(WsMessage.safeParse({ type: "goal-create", content: "x", maxTurns: 0 }).success).toBe(false);
+
+    expect(WsMessage.safeParse({ type: "goal-control", action: "pause" }).success).toBe(true);
+    expect(WsMessage.safeParse({ type: "goal-control", action: "resume" }).success).toBe(true);
+    expect(WsMessage.safeParse({ type: "goal-control", action: "cancel" }).success).toBe(true);
+    expect(WsMessage.safeParse({ type: "goal-control", action: "stop" }).success).toBe(false);
+  });
+
   it("init accepts lastSeq/eventEpoch and coerces null to undefined (P14)", () => {
     const r = WsMessage.safeParse({ type: "init", lastSeq: 417, eventEpoch: "ep_x" });
     expect(r.success && (r.data as any).lastSeq).toBe(417);

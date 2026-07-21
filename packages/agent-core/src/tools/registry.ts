@@ -15,7 +15,7 @@ export interface ToolRegistry {
   has(name: string): boolean;
 }
 
-export function buildToolRegistry(backend: RuntimeBackend, workspace: string): ToolRegistry {
+export function buildToolRegistry(backend: RuntimeBackend, workspace: string, extraTools?: ToolDef[]): ToolRegistry {
   const tools = new Map<string, ToolDef>();
   for (const def of buildFileTools(workspace)) {
     tools.set(def.schema.name, def);
@@ -25,6 +25,10 @@ export function buildToolRegistry(backend: RuntimeBackend, workspace: string): T
   }
   // 能力门控:runInBackground/stopProcess 仅当 backend 提供 startProcess/stopProcess 时才注册。
   for (const def of buildProcessTools(backend)) {
+    tools.set(def.schema.name, def);
+  }
+  // P16:调用方注入的运行时工具(如 goal turn 的 updateGoalStatus),仅本次 loop 可见。
+  for (const def of extraTools ?? []) {
     tools.set(def.schema.name, def);
   }
 

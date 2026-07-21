@@ -134,6 +134,26 @@ describe("wire — AgentEvent validation", () => {
     expect(AGENT_EVENT_TYPE_NAMES).toContain("history-compacted"); // 派生集合自动路由(P13 T6 收益)
   });
 
+  it("goal-updated round-trips (P16)", () => {
+    const full = {
+      type: "goal-updated", status: "blocked", change: "lifecycle",
+      stopReason: "已达轮数预算", goal: "清零 lint 错误",
+      stats: { turns: 20, inputTokens: 100, outputTokens: 50 }, maxTurns: 20, seq: 9,
+    };
+    const r = AgentEvent.safeParse(full);
+    expect(r.success && r.data).toEqual(full);
+    // 最小形态(cleared 时 goal/maxTurns 缺省)
+    expect(AgentEvent.safeParse({
+      type: "goal-updated", status: "complete", change: "completion",
+      stats: { turns: 3, inputTokens: 0, outputTokens: 0 },
+    }).success).toBe(true);
+    expect(AgentEvent.safeParse({
+      type: "goal-updated", status: "active", change: "other",
+      stats: { turns: 0, inputTokens: 0, outputTokens: 0 },
+    }).success).toBe(false);
+    expect(AGENT_EVENT_TYPE_NAMES).toContain("goal-updated");
+  });
+
   it("AGENT_EVENT_TYPE_NAMES covers every union variant exactly once", () => {
     expect(new Set(AGENT_EVENT_TYPE_NAMES).size).toBe(AgentEvent.options.length);
     expect(AGENT_EVENT_TYPE_NAMES).toContain("step-retrying");

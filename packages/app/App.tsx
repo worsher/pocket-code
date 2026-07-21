@@ -125,6 +125,8 @@ function MainScreen() {
     streamNotice,
     compactionNotice,
     editCutoff,
+    goalState,
+    goalControl,
     needsAutoConnect,
     connect,
     disconnect,
@@ -367,6 +369,34 @@ function MainScreen() {
               contentContainerStyle={styles.messageListContent}
               keyboardShouldPersistTaps="handled"
             />
+          )}
+
+          {/* Goal 卡片(P16):状态/进度/控制 */}
+          {goalState && (
+            <View style={styles.goalCard}>
+              <View style={[styles.goalDot,
+                goalState.status === "active" ? styles.goalDotActive :
+                goalState.status === "blocked" ? styles.goalDotBlocked : styles.goalDotPaused]} />
+              <View style={styles.goalBody}>
+                <Text style={styles.goalText} numberOfLines={1}>{goalState.goal ?? "目标"}</Text>
+                <Text style={styles.goalMeta}>
+                  第 {goalState.stats.turns}/{goalState.maxTurns ?? "?"} 轮
+                  {goalState.stopReason ? ` · ${goalState.stopReason}` : ""}
+                </Text>
+              </View>
+              {goalState.status === "active" ? (
+                <TouchableOpacity onPress={() => goalControl("pause")}>
+                  <Text style={styles.goalAction}>暂停</Text>
+                </TouchableOpacity>
+              ) : (
+                <TouchableOpacity onPress={() => goalControl("resume")}>
+                  <Text style={styles.goalAction}>继续</Text>
+                </TouchableOpacity>
+              )}
+              <TouchableOpacity onPress={() => goalControl("cancel")}>
+                <Text style={styles.goalCancel}>取消</Text>
+              </TouchableOpacity>
+            </View>
           )}
 
           {/* 上下文压缩提示(P15) */}
@@ -684,6 +714,49 @@ const styles = StyleSheet.create({
   },
   dotRed: {
     backgroundColor: "#FF453A",
+  },
+  goalCard: {
+    flexDirection: "row",
+    alignItems: "center",
+    backgroundColor: "#1C1C1E",
+    borderWidth: 0.5,
+    borderColor: "#38383A",
+    borderRadius: 8,
+    marginHorizontal: 12,
+    marginBottom: 4,
+    paddingHorizontal: 12,
+    paddingVertical: 8,
+    gap: 8,
+  },
+  goalDot: {
+    width: 8,
+    height: 8,
+    borderRadius: 4,
+  },
+  goalDotActive: { backgroundColor: "#34C759" },
+  goalDotPaused: { backgroundColor: "#8E8E93" },
+  goalDotBlocked: { backgroundColor: "#FF453A" },
+  goalBody: { flex: 1 },
+  goalText: {
+    color: "#FFFFFF",
+    fontSize: 13,
+    fontWeight: "500",
+  },
+  goalMeta: {
+    color: "#8E8E93",
+    fontSize: 11,
+    marginTop: 1,
+  },
+  goalAction: {
+    color: "#0A84FF",
+    fontSize: 13,
+    fontWeight: "600",
+    paddingHorizontal: 6,
+  },
+  goalCancel: {
+    color: "#FF453A",
+    fontSize: 13,
+    paddingHorizontal: 6,
   },
   streamNoticeBar: {
     backgroundColor: "#1C1C1E",

@@ -16,9 +16,12 @@ vi.mock("@pocket-code/agent-core", async (importOriginal) => {
 });
 
 const saveSessionMock = vi.fn();
+const saveSessionGoalMock = vi.fn();
+const getSessionMock = vi.fn((..._args: unknown[]) => null as unknown);
 vi.mock("./db.js", () => ({
   saveSession: (...args: unknown[]) => saveSessionMock(...args),
-  getSession: vi.fn(() => null),
+  saveSessionGoal: (...args: unknown[]) => saveSessionGoalMock(...args),
+  getSession: (...args: unknown[]) => getSessionMock(...args),
 }));
 
 const createNodeModelClientMock = vi.fn((..._args: unknown[]) => ({ streamStep: vi.fn() }));
@@ -40,7 +43,8 @@ vi.mock("./cli/index.js", () => ({
 }));
 
 // Import after mocks are registered.
-const { runAgent } = await import("./agent.js");
+const { runAgent, createSession } = await import("./agent.js");
+const { createGoal } = await import("./goal/types.js");
 type AgentSession = Parameters<typeof runAgent>[0];
 
 function makeSession(overrides: Partial<AgentSession> = {}): AgentSession {
@@ -115,7 +119,11 @@ describe("runAgent", () => {
     });
     const { events, onEvent } = collectEvents();
 
-    await expect(runAgent(session, "new message", onEvent)).resolves.toBeUndefined();
+    // P16 D-P16-1 后:防御路径也返回 TurnOutcome(error),不再是 void
+    await expect(runAgent(session, "new message", onEvent)).resolves.toEqual({
+      stopReason: "error",
+      usage: { inputTokens: 0, outputTokens: 0 },
+    });
 
     expect(events[events.length - 1]).toEqual({ type: "done", stopReason: "error" });
     expect(saveSessionMock).toHaveBeenCalledTimes(1);
@@ -217,10 +225,65 @@ describe("runAgent", () => {
     const session = makeSession({ modelKey: "claude-code" });
     const { events, onEvent } = collectEvents();
 
-    await runAgent(session, "hi", onEvent);
+    const outcome = await runAgent(session, "hi", onEvent);
 
     expect(runCliSessionMock).toHaveBeenCalledTimes(1);
     expect(runAgentLoopMock).not.toHaveBeenCalled();
     expect(saveSessionMock).toHaveBeenCalledTimes(1);
+    expect(outcome).toBeUndefined(); // P16 D-P16-1:CLI 路径无 turn 结果
+  });
+
+  it("P16: runAgent returns { stopReason, usage } on builtin path (D-P16-1)", async () => {
+    runAgentLoopMock.mockResolvedValue({
+      messages: [], fullText: "",
+      stopReason: "max_steps", usage: { inputTokens: 9, outputTokens: 4 }, steps: 25,
+    });
+    const { onEvent } = collectEvents();
+    const outcome = await runAgent(makeSession(), "hi", onEvent);
+    expect(outcome).toEqual({ stopReason: "max_steps", usage: { inputTokens: 9, outputTokens: 4 } });
+  });
+
+  it("P16: active goal → system contains injection, extraTools carries updateGoalStatus (C16-7/8)", async () => {
+    runAgentLoopMock.mockResolvedValue({
+      messages: [], fullText: "",
+      stopReason: "end_turn", usage: { inputTokens: 0, outputTokens: 0 }, steps: 1,
+    });
+    const session = makeSession();
+    (session as any).goal = createGoal("清零 lint 错误", undefined, 20);
+    (session as any).goal.stats.turns = 2;
+    const { onEvent } = collectEvents();
+    await runAgent(session, "[goal continuation] …", onEvent);
+    const opts = runAgentLoopMock.mock.calls[0][0] as any;
+    expect(opts.system).toContain("Goal 模式");
+    expect(opts.system).toContain("清零 lint 错误");
+    expect(opts.system).toContain("2/20");
+    expect(opts.extraTools?.map((t: any) => t.schema.name)).toEqual(["updateGoalStatus"]);
+  });
+
+  it("P16: non-goal turn has no injection and no extraTools (C16-7)", async () => {
+    runAgentLoopMock.mockResolvedValue({
+      messages: [], fullText: "",
+      stopReason: "end_turn", usage: { inputTokens: 0, outputTokens: 0 }, steps: 1,
+    });
+    const { onEvent } = collectEvents();
+    await runAgent(makeSession(), "hi", onEvent);
+    const opts = runAgentLoopMock.mock.calls[0][0] as any;
+    expect(opts.system).not.toContain("Goal 模式");
+    expect(opts.extraTools).toBeUndefined();
+  });
+
+  it("P16: createSession restores goal with active→paused downgrade (C16-6)", async () => {
+    const activeGoal = createGoal("长跑目标");
+    getSessionMock.mockReturnValue({
+      sessionId: "s1", userId: "u1", projectId: "", title: "",
+      messages: [], modelKey: "deepseek-v4-flash",
+      goalJson: JSON.stringify(activeGoal),
+      createdAt: 1, updatedAt: 1,
+    });
+    const session = await createSession("s1", "u1");
+    expect((session as any).goal.status).toBe("paused");
+    expect((session as any).goal.stopReason).toContain("重启");
+    expect(saveSessionGoalMock).toHaveBeenCalled(); // 降级态回写
+    getSessionMock.mockReturnValue(null);
   });
 });
