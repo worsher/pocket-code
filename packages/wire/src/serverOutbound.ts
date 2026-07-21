@@ -17,6 +17,17 @@ export const SessionMsg = z.object({
   sessionId: z.string(),
   projectId: z.string(),
   workspace: z.string(),
+  // P14:事件流游标(缓冲世代 + 当前最高 seq),客户端据此协商补发
+  eventEpoch: z.string().optional(),
+  currentSeq: z.number().int().nonnegative().optional(),
+});
+
+/** P14:server 无法用缓冲覆盖客户端缺口时的全量重建指示(spec C14-4)。 */
+export const ResyncRequiredMsg = z.object({
+  type: z.literal("resync-required"),
+  reason: z.enum(["epoch-changed", "buffer-overflow", "unknown-session"]),
+  eventEpoch: z.string(),
+  currentSeq: z.number().int().nonnegative(),
 });
 
 export const QuotaMsg = z.object({
@@ -103,5 +114,6 @@ export const ServerOutbound = z.union([
   SessionDeletedMsg,
   ProjectWorkspaceDeletedMsg,
   ServerErrorMsg,
+  ResyncRequiredMsg,
 ]);
 export type ServerOutboundType = z.infer<typeof ServerOutbound>;

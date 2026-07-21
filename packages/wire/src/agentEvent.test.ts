@@ -112,6 +112,16 @@ describe("wire — AgentEvent validation", () => {
     expect(AgentEvent.safeParse({ type: "media-degraded", level: "half", keptImages: 0 }).success).toBe(false);
   });
 
+  it("every variant accepts optional seq and round-trips it (P14 C14-1)", () => {
+    const withSeq = { type: "text-delta", text: "hi", seq: 42 };
+    const r = AgentEvent.safeParse(withSeq);
+    expect(r.success && r.data).toEqual(withSeq);
+    expect(AgentEvent.safeParse({ type: "done", seq: 1 }).success).toBe(true);
+    expect(AgentEvent.safeParse({ type: "tool-result", callId: "c1", result: 1, seq: 7 }).success).toBe(true);
+    expect(AgentEvent.safeParse({ type: "text-delta", text: "hi", seq: 0 }).success).toBe(false); // 正整数
+    expect(AgentEvent.safeParse({ type: "text-delta", text: "hi" }).success).toBe(true); // 缺省合法
+  });
+
   it("AGENT_EVENT_TYPE_NAMES covers every union variant exactly once", () => {
     expect(new Set(AGENT_EVENT_TYPE_NAMES).size).toBe(AgentEvent.options.length);
     expect(AGENT_EVENT_TYPE_NAMES).toContain("step-retrying");
