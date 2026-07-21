@@ -34,6 +34,7 @@ export {
   ModelSelectedEvent,
   StepRetryingEvent,
   MediaDegradedEvent,
+  HistoryCompactedEvent,
   UsageEvent,
   DoneEvent,
   ErrorEvent,
