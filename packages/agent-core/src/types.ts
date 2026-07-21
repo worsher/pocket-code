@@ -12,6 +12,21 @@ export type CoreMessage =
 
 export interface ToolCallReq { id: string; name: string; args: Record<string, unknown> }
 
+/** runAgentLoop 的四值结束原因(spec 2026-07-21 C12-1)。 */
+export type LoopStopReason = "end_turn" | "max_steps" | "aborted" | "error";
+
+/** runAgentLoop 的结构化返回值:任何输入下不抛,错误收敛为 stopReason(spec D1)。 */
+export interface RunAgentResult {
+  messages: CoreMessage[];
+  fullText: string;
+  stopReason: LoopStopReason;
+  usage: { inputTokens: number; outputTokens: number };
+  /** 实际启动的 step 数(含出错/中断的那一步)。 */
+  steps: number;
+  /** 仅 stopReason === "error" 时存在,非空。 */
+  errorMessage?: string;
+}
+
 export type ModelDelta =
   | { type: "text"; text: string }
   | { type: "reasoning"; text: string }

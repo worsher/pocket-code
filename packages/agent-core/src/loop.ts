@@ -4,7 +4,9 @@ import { buildToolRegistry } from "./tools/registry.js";
 import type {
   AgentEventType,
   CoreMessage,
+  LoopStopReason,
   ModelClient,
+  RunAgentResult,
   RuntimeBackend,
   ToolCallReq,
 } from "./types.js";
@@ -26,7 +28,7 @@ const FILE_CHANGE_TOOLS = new Set(["writeFile", "editFile"]);
 
 export async function runAgentLoop(
   opts: RunAgentOptions,
-): Promise<{ messages: CoreMessage[]; fullText: string }> {
+): Promise<RunAgentResult> {
   const { modelClient, backend, workspace, system, history, userMessage, images, onEvent, signal } = opts;
   const maxSteps = opts.maxSteps ?? 25;
 
@@ -42,9 +44,18 @@ export async function runAgentLoop(
   let fullText = "";
   let totalInputTokens = 0;
   let totalOutputTokens = 0;
+  // 初值 max_steps:for 循环自然耗尽即步数用完(此时最后 step 必有 toolCalls,
+  // 否则早已在 end_turn 处 break),各提前退出点各自覆写(spec C12-2)。
+  let stopReason: LoopStopReason = "max_steps";
+  let steps = 0;
+  let errorMessage: string | undefined;
 
   for (let step = 0; step < maxSteps; step++) {
-    if (signal?.aborted) break;
+    if (signal?.aborted) {
+      stopReason = "aborted";
+      break;
+    }
+    steps++;
 
     let stepText = "";
     const toolCalls: ToolCallReq[] = [];
@@ -70,9 +81,19 @@ export async function runAgentLoop(
         }
       }
     } catch (err) {
-      const message = err instanceof Error ? err.message : String(err);
-      onEvent({ type: "error", message });
-      throw err;
+      // spec D1:错误不再向调用方抛出,收敛为返回值。已积累的部分文本以纯文本
+      // assistant 入史(不带 toolCalls——本 step 浮出的 toolCalls 未执行,带上
+      // 会破坏"每个 toolCall 必有配对 tool 消息"的不变量,C12-5)。
+      if (stepText.length > 0) messages.push({ role: "assistant", content: stepText });
+      if (signal?.aborted) {
+        // streamStep 因 abort 抛出(AbortError):归 aborted,不发 error 事件
+        stopReason = "aborted";
+      } else {
+        errorMessage = err instanceof Error ? err.message : String(err);
+        onEvent({ type: "error", message: errorMessage });
+        stopReason = "error";
+      }
+      break;
     }
 
     // 3. 步末:assistant 消息(stepText+toolCalls)入 messages
@@ -82,7 +103,10 @@ export async function runAgentLoop(
         : { role: "assistant", content: stepText };
     messages.push(assistantMsg);
 
-    if (toolCalls.length === 0) break; // 无 tool calls → 结束
+    if (toolCalls.length === 0) {
+      stopReason = "end_turn"; // 无 tool calls → 自然收束
+      break;
+    }
 
     const executedCallIds = new Set<string>();
 
@@ -128,6 +152,7 @@ export async function runAgentLoop(
           content: JSON.stringify({ success: false, error: "aborted" }),
         });
       }
+      stopReason = "aborted";
       break;
     }
   }
@@ -137,5 +162,12 @@ export async function runAgentLoop(
     onEvent({ type: "usage", inputTokens: totalInputTokens, outputTokens: totalOutputTokens });
   }
 
-  return { messages, fullText };
+  return {
+    messages,
+    fullText,
+    stopReason,
+    steps,
+    usage: { inputTokens: totalInputTokens, outputTokens: totalOutputTokens },
+    ...(errorMessage !== undefined ? { errorMessage } : {}),
+  };
 }

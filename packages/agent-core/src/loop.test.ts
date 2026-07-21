@@ -115,11 +115,75 @@ describe("runAgentLoop", () => {
     expect(userMsg.content[1]).toMatchObject({ type: "image", base64: "AAA" });
   });
 
-  it("model error: emits error event then rethrows", async () => {
-    const client: ModelClient = { async *streamStep() { throw new Error("model down"); } };
+  it("model error: emits error event, returns stopReason error with partial text in history (D1)", async () => {
+    const client: ModelClient = {
+      async *streamStep() {
+        yield { type: "text", text: "part" } as ModelDelta;
+        throw new Error("model down");
+      },
+    };
     const onEvent = vi.fn();
-    await expect(runAgentLoop(base(client, { onEvent }))).rejects.toThrow("model down");
+    const r = await runAgentLoop(base(client, { onEvent }));   // 不再 rejects
+    expect(r.stopReason).toBe("error");
+    expect(r.errorMessage).toBe("model down");
     expect(onEvent.mock.calls.at(-1)![0]).toMatchObject({ type: "error", message: "model down" });
+    // 部分文本入史:纯文本 assistant,无 toolCalls(C12-5)
+    expect(r.messages.at(-1)).toEqual({ role: "assistant", content: "part" });
+  });
+
+  it("stopReason end_turn on natural finish; usage/steps aggregated in result", async () => {
+    const client = scriptedClient([
+      [{ type: "usage", inputTokens: 10, outputTokens: 5 },
+       { type: "tool-call", id: "c1", name: "listFiles", args: { path: "." } }],
+      [{ type: "usage", inputTokens: 3, outputTokens: 2 }, { type: "text", text: "done" }],
+    ]);
+    const r = await runAgentLoop(base(client));
+    expect(r.stopReason).toBe("end_turn");
+    expect(r.usage).toEqual({ inputTokens: 13, outputTokens: 7 });
+    expect(r.steps).toBe(2);
+    expect(r.errorMessage).toBeUndefined();
+  });
+
+  it("stopReason max_steps when budget exhausts with pending tool intent (C12-2)", async () => {
+    const client = scriptedClient([[{ type: "tool-call", id: "x", name: "listFiles", args: { path: "." } }]]);
+    const r = await runAgentLoop(base(client, { maxSteps: 3 }));
+    expect(client.calls.length).toBe(3);
+    expect(r.stopReason).toBe("max_steps");
+    expect(r.steps).toBe(3);
+    // 消息不变量:第 3 步的 toolCalls 已执行、已配对(C12-5)
+    expect((r.messages.at(-1) as any).role).toBe("tool");
+  });
+
+  it("final step without toolCalls is end_turn, not max_steps", async () => {
+    const client = scriptedClient([
+      [{ type: "tool-call", id: "c1", name: "listFiles", args: { path: "." } }],
+      [{ type: "text", text: "fin" }],
+    ]);
+    const r = await runAgentLoop(base(client, { maxSteps: 2 }));
+    expect(r.stopReason).toBe("end_turn");
+  });
+
+  it("stopReason aborted on mid-loop abort (existing I-1 path)", async () => {
+    const ac = new AbortController();
+    const client = scriptedClient([[{ type: "tool-call", id: "x", name: "listFiles", args: { path: "." } }]]);
+    const onEvent = vi.fn(() => ac.abort());
+    const r = await runAgentLoop(base(client, { signal: ac.signal, onEvent }));
+    expect(r.stopReason).toBe("aborted");
+  });
+
+  it("streamStep throwing due to abort is aborted, not error; no error event", async () => {
+    const ac = new AbortController();
+    const client: ModelClient = {
+      async *streamStep() {
+        ac.abort();
+        throw new DOMException("The operation was aborted.", "AbortError");
+      },
+    };
+    const onEvent = vi.fn();
+    const r = await runAgentLoop(base(client, { signal: ac.signal, onEvent }));
+    expect(r.stopReason).toBe("aborted");
+    expect(r.errorMessage).toBeUndefined();
+    expect(onEvent.mock.calls.map((c) => c[0].type)).not.toContain("error");
   });
 
   it("I-1: abort between tool calls synthesizes an aborted tool message for the un-executed call", async () => {
