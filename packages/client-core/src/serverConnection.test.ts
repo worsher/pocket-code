@@ -157,7 +157,7 @@ describe("ServerConnection", () => {
       const received: any[] = [];
       const config = makeConfig({ getAuthToken: () => "tok" });
       const handlers = makeHandlers({
-        onAgentEvent: (ev) => received.push(ev),
+        onAgentEvent: (ev: any) => received.push(ev),
         onResyncRequired: (reason: string) => resyncs.push(reason),
       } as any);
       const { conn, ws } = openWithEpoch(handlers, config);
@@ -179,7 +179,7 @@ describe("ServerConnection", () => {
       const resyncs: string[] = [];
       const received: any[] = [];
       const handlers = makeHandlers({
-        onAgentEvent: (ev) => received.push(ev),
+        onAgentEvent: (ev: any) => received.push(ev),
         onResyncRequired: (reason: string) => resyncs.push(reason),
       } as any);
       const { conn, ws } = openWithEpoch(handlers);
@@ -204,7 +204,7 @@ describe("ServerConnection", () => {
       const received: any[] = [];
       const authErrors: string[] = [];
       const handlers = makeHandlers({
-        onAgentEvent: (ev) => received.push(ev),
+        onAgentEvent: (ev: any) => received.push(ev),
         onAuthError: (m) => authErrors.push(m),
       });
       const { conn, ws } = openWithEpoch(handlers);
