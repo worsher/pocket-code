@@ -6,6 +6,7 @@ import { spawn, type ChildProcess } from "child_process";
 import { createServer, request as httpRequest, type Server } from "http";
 import { fileURLToPath } from "url";
 import { dirname, join } from "path";
+import { createRequire } from "module";
 import WebSocket from "ws";
 import { startTunnelClient, type TunnelClientHandle } from "@pocket-code/tunnel-client";
 
@@ -40,8 +41,10 @@ async function waitMachines(port: number, n: number, ms = 10000): Promise<void> 
 }
 
 function spawnRelay(env: Record<string, string>): ChildProcess {
-  const tsxBin = join(here, "..", "node_modules", ".bin", "tsx");
-  const child = spawn(tsxBin, [join(here, "index.ts")], {
+  // tsx 入口经模块解析定位(node-linker=hoisted 下包级 node_modules/.bin 不存在,
+  // 硬编码 bin 路径只在有历史残留的旧检出里侥幸可用,全新安装必 ENOENT)
+  const tsxCli = createRequire(import.meta.url).resolve("tsx/cli");
+  const child = spawn(process.execPath, [tsxCli, join(here, "index.ts")], {
     env: { ...process.env, ...env },
     stdio: "ignore",
   });
