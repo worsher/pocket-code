@@ -13,6 +13,7 @@ import { initDb, listUserSessions, deleteSession } from "./db.js";
 import { checkQuota, incrementUsage, getUserQuota } from "./resourceLimits.js";
 import { WsMessage, type ServerOutboundType } from "@pocket-code/wire";
 import { handleSyncPull, handleSyncFile } from "./sync/syncHandler.js";
+import { getSessionStream, type SessionEventStream } from "./eventBuffer.js";
 import { rm } from "fs/promises";
 
 // Shared session store — the same Map is used for all handlers
@@ -28,7 +29,7 @@ setInterval(() => {
       console.log(`[Session] Cleaned up stale session: ${id}`);
     }
   }
-}, 5 * 60 * 1000);
+}, 5 * 60 * 1000).unref();
 
 export interface MessageHandler {
   onMessage(raw: string | Buffer): Promise<void>;
@@ -54,9 +55,11 @@ export function createMessageHandler(
   options?: MessageHandlerOptions
 ): MessageHandler {
   let session: AgentSession | null = null;
-  let currentAbort: AbortController | null = null;
   let auth: AuthPayload | null = options?.preAuth || null;
   let activeSessionId: string | null = null;
+  // P14:本连接订阅的 session 事件流(publish 分配 seq + fan-out;abort 移到 session 级)
+  let stream: SessionEventStream | null = null;
+  let unsubscribe: (() => void) | null = null;
 
   return {
     async onMessage(raw: string | Buffer) {
@@ -184,12 +187,42 @@ export function createMessageHandler(
                 );
               }
             }
+            // ── P14:订阅事件流 + 发 ack(带游标)+ 补发协商 ──
+            // 先订阅后补发(D-P14-5):避免"ack 后、订阅前"的事件真空;
+            // 交错产生的重复由客户端 (epoch, seq) 去重兜底(C14-3)。
+            stream = getSessionStream(session.sessionId);
+            unsubscribe?.();
+            unsubscribe = stream.subscribe(send);
             send({
               type: "session",
               sessionId: session.sessionId,
               projectId: session.projectId,
               workspace: session.workspace,
+              eventEpoch: stream.epoch,
+              currentSeq: stream.seq,
             } satisfies ServerOutboundType);
+            if (msg.lastSeq !== undefined) {
+              if (msg.eventEpoch !== stream.epoch) {
+                send({
+                  type: "resync-required",
+                  reason: "epoch-changed",
+                  eventEpoch: stream.epoch,
+                  currentSeq: stream.seq,
+                } satisfies ServerOutboundType);
+              } else {
+                const backlog = stream.readSince(msg.lastSeq);
+                if (backlog === null) {
+                  send({
+                    type: "resync-required",
+                    reason: "buffer-overflow",
+                    eventEpoch: stream.epoch,
+                    currentSeq: stream.seq,
+                  } satisfies ServerOutboundType);
+                } else {
+                  for (const ev of backlog) send(ev); // C14-5:ack 后按 seq 升序补齐
+                }
+              }
+            }
             break;
           }
 
@@ -220,18 +253,22 @@ export function createMessageHandler(
               session.messages = session.messages.slice(0, msg.rewindTo);
             }
 
+            // P14:事件经 stream.publish(分配 seq + 广播给全部订阅者,含本连接)——
+            // 不得再直接 send,否则本连接收到双份。abort 挂 session(D-P14-3)。
             const abort = new AbortController();
-            currentAbort = abort;
+            const sess = session;
+            const sessStream = stream ?? getSessionStream(sess.sessionId);
+            sess.currentAbort = abort;
             await runAgent(
-              session,
+              sess,
               msg.content,
               (event) => {
-                send(event);
+                sessStream.publish(event);
               },
               abort.signal,
               msg.images
             );
-            currentAbort = null;
+            sess.currentAbort = undefined;
             break;
           }
 
@@ -444,9 +481,10 @@ export function createMessageHandler(
           }
 
           case "abort": {
-            if (currentAbort) {
-              currentAbort.abort();
-              currentAbort = null;
+            // session 级 abort:断线前启动的 turn 也能被重连后的新连接停止(D-P14-3)
+            if (session?.currentAbort) {
+              session.currentAbort.abort();
+              session.currentAbort = undefined;
             }
             break;
           }
@@ -465,10 +503,11 @@ export function createMessageHandler(
     },
 
     onClose() {
-      if (currentAbort) {
-        currentAbort.abort();
-        currentAbort = null;
-      }
+      // P14 C14-6:transport 断开不再 abort 进行中的 turn——事件继续产出进
+      // eventBuffer,重连后经 init 协商补发。abort 仅由显式 abort 消息触发。
+      unsubscribe?.();
+      unsubscribe = null;
+      stream = null;
       session = null;
       auth = null;
       activeSessionId = null;
