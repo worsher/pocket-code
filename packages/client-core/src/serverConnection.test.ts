@@ -99,6 +99,25 @@ describe("ServerConnection", () => {
     conn.disconnect();
   });
 
+  it("step-retrying / media-degraded / done(stopReason) 均路由到 onAgentEvent(派生集合覆盖新事件)", () => {
+    const received: unknown[] = [];
+    const conn = new ServerConnection(
+      makeConfig(),
+      makeHandlers({ onAgentEvent: (ev) => received.push(ev) })
+    );
+    conn.connect();
+    const ws = FakeWebSocket.instances[0];
+    ws.open();
+    const retry = { type: "step-retrying", failedAttempt: 1, nextAttempt: 2, maxAttempts: 5, delayMs: 500 };
+    const deg = { type: "media-degraded", level: "stripped", keptImages: 0 };
+    const done = { type: "done", stopReason: "max_steps" };
+    ws.receive(retry);
+    ws.receive(deg);
+    ws.receive(done);
+    expect(received).toEqual([retry, deg, done]);
+    conn.disconnect();
+  });
+
   it("resolves listFiles via _reqId and rejects on timeout", async () => {
     vi.useFakeTimers();
     const conn = new ServerConnection(makeConfig(), makeHandlers());

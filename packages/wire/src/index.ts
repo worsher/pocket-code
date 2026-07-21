@@ -32,10 +32,13 @@ export {
   ProcessExitedEvent,
   PreviewAvailableEvent,
   ModelSelectedEvent,
+  StepRetryingEvent,
+  MediaDegradedEvent,
   UsageEvent,
   DoneEvent,
   ErrorEvent,
   AgentEvent,
+  AGENT_EVENT_TYPE_NAMES,
   type AgentEventType,
 } from "./agentEvent.js";
 

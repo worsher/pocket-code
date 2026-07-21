@@ -7,3 +7,6 @@ export { buildSystemPrompt } from "./prompt.js";
 export { fromLegacyAiSdkMessages } from "./history.js";
 export { runAgentLoop } from "./loop.js";
 export type { RunAgentOptions } from "./loop.js";
+export { retryBackoffDelays, abortableSleep } from "./retry.js";
+export { projectMedia, countImages, MEDIA_PLACEHOLDER } from "./mediaProjection.js";
+export type { MediaProjection } from "./mediaProjection.js";

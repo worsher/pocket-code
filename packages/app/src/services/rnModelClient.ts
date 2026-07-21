@@ -9,7 +9,7 @@
 // (useAgent 层用 buildSystemPrompt({customPrompt}) 拼好后经 req.system 传入,
 // 语义等价)。
 
-import type { CoreMessage, ModelClient, ModelDelta, ToolSchema } from "@pocket-code/agent-core";
+import type { CoreMessage, ModelClient, ModelDelta, ModelErrorKind, ToolSchema } from "@pocket-code/agent-core";
 import { streamChat, type ChatMessage, type ContentPart as AiContentPart, type ToolCallRequest, type ToolDefinition } from "./aiClient";
 import type { ModelConfig } from "./modelConfig";
 
@@ -295,11 +295,24 @@ function buildStreamStep(
   };
 }
 
+/**
+ * D-P13-5:aiClient 桥接后错误只剩 message 字符串(onError(msg) → new Error(msg),
+ * 无 statusCode 结构),故按报文正则分类;正则待真机采样校准。分类失手最多退化为
+ * "不重试"(fatal,即现状行为),无正确性风险。
+ */
+function classifyByMessage(error: unknown): ModelErrorKind {
+  const msg = error instanceof Error ? error.message : String(error);
+  if (/\b413\b|too.?large|payload/i.test(msg)) return "too-large";
+  if (/\b(429|50[0-4])\b|rate.?limit|overload/i.test(msg)) return "retryable";
+  if (/image|媒体|multimodal/i.test(msg) && /\b400\b|invalid|unsupported/i.test(msg)) return "media-rejected";
+  return "fatal";
+}
+
 export function createRnModelClient(cfg: {
   modelConfig: ModelConfig;
   apiKey: string;
 }): ModelClient {
-  return { streamStep: buildStreamStep(cfg, streamChat) };
+  return { streamStep: buildStreamStep(cfg, streamChat), classifyError: classifyByMessage };
 }
 
 /**

@@ -4,7 +4,7 @@
 // 交由上层 agent-core 的 loop 去执行并把结果转回 tool 消息)。
 
 import { streamText, tool, jsonSchema, type CoreMessage as AiCoreMessage } from "ai";
-import type { CoreMessage, ModelClient, ModelDelta, ToolSchema } from "@pocket-code/agent-core";
+import type { CoreMessage, ModelClient, ModelDelta, ModelErrorKind, ToolSchema } from "@pocket-code/agent-core";
 import { getModel } from "./agent.js";
 
 type StreamTextImpl = typeof streamText;
@@ -78,6 +78,9 @@ export function createNodeModelClient(
         messages: messages.map(toAiSdkMessage),
         tools: toAiSdkTools(tools),
         maxSteps: 1,
+        // AI SDK 内建重试归零:agent-core loop 是唯一重试权威(D-P13-2),
+        // 否则 429 会形成双层指数退避放大等待。
+        maxRetries: 0,
         abortSignal: signal,
       } as any);
 
@@ -116,6 +119,26 @@ export function createNodeModelClient(
       } catch {
         // usage 不可用 → 不发不抛
       }
+    },
+
+    // structural 读取 statusCode/responseHeaders,不 import APICallError——
+    // AI SDK 错误与包装错误(fullStream error part rethrow)都满足该形态。
+    classifyError(error: unknown): ModelErrorKind {
+      const status = (error as { statusCode?: unknown } | undefined)?.statusCode;
+      if (typeof status !== "number") return "fatal";
+      if (status === 413) return "too-large";
+      if (status === 429 || (status >= 500 && status < 600)) return "retryable";
+      // 图片被拒:400 + 报文特征。已知 provider 文案在实现期真机采样后补入正则。
+      if (status === 400 && /image|媒体|multimodal/i.test((error as Error).message ?? "")) return "media-rejected";
+      return "fatal";
+    },
+
+    /** 服务端 Retry-After(秒)→ ms;缺失/非法返回 undefined(走本地退避)。 */
+    retryAfterMs(error: unknown): number | undefined {
+      const headers = (error as { responseHeaders?: Record<string, string> } | undefined)?.responseHeaders;
+      const raw = headers?.["retry-after"];
+      const sec = raw !== undefined ? Number(raw) : NaN;
+      return Number.isFinite(sec) && sec > 0 ? sec * 1000 : undefined;
     },
   };
 }

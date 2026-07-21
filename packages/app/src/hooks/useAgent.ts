@@ -26,7 +26,7 @@ import type {
 } from "@pocket-code/client-core";
 import { createRnModelClient } from "../services/rnModelClient";
 import { createDeviceBackend } from "../services/deviceBackend";
-import { runAgentLoop, buildSystemPrompt, type CoreMessage } from "@pocket-code/agent-core";
+import { runAgentLoop, buildSystemPrompt, type CoreMessage, type LoopStopReason } from "@pocket-code/agent-core";
 import type { AgentEventType } from "@pocket-code/wire";
 
 // ── Public Types(re-export) ───────────────────────────────
@@ -86,6 +86,10 @@ export function useAgent({ settings, model = "deepseek-v4-flash", customPrompt, 
   const [currentToolName, setCurrentToolName] = useState<string | undefined>();
   // 设备授权失效(token 被 daemon 拒绝):非空表示需要重新配对
   const [authError, setAuthError] = useState<string | null>(null);
+  // 上一轮 done 的 stopReason(max_steps → UI 提示"点击继续");发新消息时清空
+  const [lastStopReason, setLastStopReason] = useState<LoopStopReason | null>(null);
+  // 流式过程中的瞬时提醒(重试中/媒体降级);text-delta/done/error 即清
+  const [streamNotice, setStreamNotice] = useState<string | null>(null);
   // 最新值 refs(避免 handler/闭包中的 stale closure)
   const abortRef = useRef<AbortController | null>(null);
   const modelRef = useRef(model); modelRef.current = model;
@@ -144,6 +148,27 @@ export function useAgent({ settings, model = "deepseek-v4-flash", customPrompt, 
     }
   }, [saveMessages]);
 
+  // ── 重试/降级瞬时提醒(cloud & geek 共用,P13)─────────────
+  const applyStreamNotice = useCallback((ev: AgentEventType) => {
+    switch (ev.type) {
+      case "step-retrying":
+        setStreamNotice(`网络波动,正在重试(第 ${ev.nextAttempt}/${ev.maxAttempts} 次)…`);
+        break;
+      case "media-degraded":
+        setStreamNotice(
+          ev.level === "degraded"
+            ? "请求过大:已临时省略较早的图片(保留最近一张)"
+            : "请求过大:本轮已临时省略全部图片"
+        );
+        break;
+      case "text-delta": // 恢复输出即清提醒(setState 同值时 React 自动跳过)
+      case "error":
+      case "done":
+        setStreamNotice(null);
+        break;
+    }
+  }, []);
+
   // ── 单例 ServerConnection(惰性创建) ───────────────────
   const connRef = useRef<ServerConnection | null>(null);
   if (!connRef.current) {
@@ -177,6 +202,7 @@ export function useAgent({ settings, model = "deepseek-v4-flash", customPrompt, 
         setMessages((prev) => applyAgentEvent(prev, ev));
         const p = phaseFor(ev);
         if (p) setStreamingPhase(p);
+        applyStreamNotice(ev);
 
         switch (ev.type) {
           case "tool-call":
@@ -194,6 +220,8 @@ export function useAgent({ settings, model = "deepseek-v4-flash", customPrompt, 
           }
           case "done":
             callNamesRef.current.clear();
+            // CLI 委托路径缺省 stopReason,按 end_turn 解释(spec C12-4)
+            setLastStopReason(ev.stopReason ?? "end_turn");
             finalizeStreaming();
             break;
           case "error":
@@ -294,6 +322,8 @@ export function useAgent({ settings, model = "deepseek-v4-flash", customPrompt, 
       setMessages((prev) => [...prev, mkUserMsg(content, images), mkAssistantMsg()]);
       setIsStreaming(true);
       setStreamingPhase("connecting");
+      setLastStopReason(null);
+      setStreamNotice(null);
 
       const payload: Record<string, unknown> = { type: "message", content, model: modelRef.current };
       if (images?.length) {
@@ -310,7 +340,8 @@ export function useAgent({ settings, model = "deepseek-v4-flash", customPrompt, 
     setMessages((prev) => applyAgentEvent(prev, ev));
     const p = phaseFor(ev);
     if (p) setStreamingPhase(p);
-  }, []);
+    applyStreamNotice(ev);
+  }, [applyStreamNotice]);
 
   // ── Geek mode: App drives the agent loop(agent-core runAgentLoop) ────
   const sendGeekMessage = useCallback(
@@ -330,6 +361,8 @@ export function useAgent({ settings, model = "deepseek-v4-flash", customPrompt, 
       setMessages((prev) => [...prev, userMsg, mkAssistantMsg()]);
       setIsStreaming(true);
       setStreamingPhase("connecting");
+      setLastStopReason(null);
+      setStreamNotice(null);
 
       // 复审修复:workspace 改传真实设备工作区根,不再用字面量 "/" 或 sentinel
       // ("/workspace")。与 createDeviceBackend 内部解析真实路径用的是同一个值
@@ -341,7 +374,7 @@ export function useAgent({ settings, model = "deepseek-v4-flash", customPrompt, 
       const abortController = new AbortController();
       abortRef.current = abortController;
       try {
-        const { messages: nextHistory } = await runAgentLoop({
+        const result = await runAgentLoop({
           modelClient: createRnModelClient({ modelConfig, apiKey }),
           backend: createDeviceBackend({
             projectId: projectIdRef.current,
@@ -357,8 +390,11 @@ export function useAgent({ settings, model = "deepseek-v4-flash", customPrompt, 
           signal: abortController.signal,
           maxSteps: 10, // 保持 geek 现值
         });
-        coreHistoryRef.current = nextHistory;
+        coreHistoryRef.current = result.messages;
+        setLastStopReason(result.stopReason);
       } catch (err: any) {
+        // P12 后 loop 不再抛错(错误收敛为返回值);此 catch 仅防御构造期异常
+        // (createRnModelClient/createDeviceBackend 等),不会再对 loop 错误二次发 error 事件。
         if (err.name !== "AbortError") emitGeek({ type: "error", message: String(err.message) });
       } finally {
         abortRef.current = null;
@@ -437,6 +473,8 @@ export function useAgent({ settings, model = "deepseek-v4-flash", customPrompt, 
       setSessionId(targetSessionId);
       sessionIdRef.current = targetSessionId; // 立即更新,供 connect() 使用
       setIsStreaming(false);
+      setLastStopReason(null);
+      setStreamNotice(null);
       if (needsAutoConnect) setTimeout(() => connect(), 50); // loadSession 断开后延迟重连
     },
     [conn, connect, needsAutoConnect]
@@ -450,6 +488,8 @@ export function useAgent({ settings, model = "deepseek-v4-flash", customPrompt, 
     coreHistoryRef.current = [];
     setSessionId(null);
     setIsStreaming(false);
+    setLastStopReason(null);
+    setStreamNotice(null);
   }, [conn]);
 
   // ── Reset session when project changes ───────────────
@@ -463,6 +503,8 @@ export function useAgent({ settings, model = "deepseek-v4-flash", customPrompt, 
     sessionIdRef.current = null;
     setIsStreaming(false);
     setIsConnected(false);
+    setLastStopReason(null);
+    setStreamNotice(null);
   }, [projectId, conn]);
 
   // ── Cleanup ───────────────────────────────────────────
@@ -482,6 +524,8 @@ export function useAgent({ settings, model = "deepseek-v4-flash", customPrompt, 
     currentToolName,
     sessionId,
     authError,
+    lastStopReason,
+    streamNotice,
     needsAutoConnect,
     connect,
     disconnect,

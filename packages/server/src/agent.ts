@@ -187,7 +187,7 @@ export async function runAgent(
 
   try {
     const backend = createNodeBackend(session.workspace, session.containerId);
-    const { messages } = await runAgentLoop({
+    const result = await runAgentLoop({
       modelClient: createNodeModelClient(effectiveModelKey),
       backend,
       workspace: session.workspace,
@@ -205,23 +205,24 @@ export async function runAgent(
       maxSteps: AGENT_MAX_STEPS,
     });
 
-    // loop 返回的 messages 已含本轮 user 消息;此后持久化即 CoreMessage 格式。
-    session.messages = messages;
+    // loop 返回的 messages 已含本轮 user 消息(error 时含部分进度,spec D1);
+    // 此后持久化即 CoreMessage 格式。
+    session.messages = result.messages;
 
     // Persist to database
     saveSession(session.sessionId, session.userId, session.messages, session.modelKey, session.projectId);
 
-    onEvent({ type: "done" });
+    onEvent({ type: "done", stopReason: result.stopReason, usage: result.usage });
   } catch (err: any) {
+    // P12 后 loop 不再抛错(错误收敛为返回值),此 catch 仅编程 bug 兜底:
+    // 保留 loop 前的历史 + 本轮 user 消息落盘,尽力保留语境。
     console.error("[Agent] Error:", err.message);
-    // loop 抛出前已发 error 事件,但未返回 messages。这里保留 loop 前的历史 + 本轮 user 消息,
-    // 尽力保留语境(旧行为同样只落盘到出错前的最后一次成功状态)。
     const userContent =
       images && images.length > 0
         ? [{ type: "text" as const, text: userMessage }, ...images.map((img) => ({ type: "image" as const, ...img }))]
         : userMessage;
     session.messages = [...history, { role: "user", content: userContent }];
     saveSession(session.sessionId, session.userId, session.messages, session.modelKey, session.projectId);
-    onEvent({ type: "done" });
+    onEvent({ type: "done", stopReason: "error" });
   }
 }

@@ -121,6 +121,8 @@ function MainScreen() {
     currentToolName,
     sessionId,
     authError,
+    lastStopReason,
+    streamNotice,
     needsAutoConnect,
     connect,
     disconnect,
@@ -363,6 +365,23 @@ function MainScreen() {
               contentContainerStyle={styles.messageListContent}
               keyboardShouldPersistTaps="handled"
             />
+          )}
+
+          {/* 重试/降级瞬时提醒(P13) */}
+          {streamNotice && isStreaming && (
+            <View style={styles.streamNoticeBar}>
+              <Text style={styles.streamNoticeText}>{streamNotice}</Text>
+            </View>
+          )}
+
+          {/* 步数上限提示 + 一键继续(P12) */}
+          {lastStopReason === "max_steps" && !isStreaming && (
+            <View style={styles.maxStepsBanner}>
+              <Text style={styles.maxStepsText}>已达步数上限,本轮可能未完成</Text>
+              <TouchableOpacity onPress={() => sendMessage("继续完成上一条指令未完成的部分")}>
+                <Text style={styles.maxStepsAction}>继续</Text>
+              </TouchableOpacity>
+            </View>
           )}
 
           {/* Quick Actions */}
@@ -656,6 +675,42 @@ const styles = StyleSheet.create({
   },
   dotRed: {
     backgroundColor: "#FF453A",
+  },
+  streamNoticeBar: {
+    backgroundColor: "#1C1C1E",
+    borderRadius: 8,
+    marginHorizontal: 12,
+    marginBottom: 4,
+    paddingHorizontal: 12,
+    paddingVertical: 6,
+  },
+  streamNoticeText: {
+    color: "#8E8E93",
+    fontSize: 12,
+  },
+  maxStepsBanner: {
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "space-between",
+    backgroundColor: "#1C1C1E",
+    borderWidth: 0.5,
+    borderColor: "#38383A",
+    borderRadius: 8,
+    marginHorizontal: 12,
+    marginBottom: 4,
+    paddingHorizontal: 12,
+    paddingVertical: 8,
+  },
+  maxStepsText: {
+    color: "#8E8E93",
+    fontSize: 13,
+    flexShrink: 1,
+  },
+  maxStepsAction: {
+    color: "#0A84FF",
+    fontSize: 14,
+    fontWeight: "600",
+    marginLeft: 12,
   },
   messageList: {
     flex: 1,
