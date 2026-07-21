@@ -26,7 +26,7 @@ import type {
 } from "@pocket-code/client-core";
 import { createRnModelClient } from "../services/rnModelClient";
 import { createDeviceBackend } from "../services/deviceBackend";
-import { runAgentLoop, buildSystemPrompt, type CoreMessage, type LoopStopReason } from "@pocket-code/agent-core";
+import { runAgentLoop, compactHistory, buildSystemPrompt, type CoreMessage, type LoopStopReason } from "@pocket-code/agent-core";
 import type { AgentEventType } from "@pocket-code/wire";
 
 // ── Public Types(re-export) ───────────────────────────────
@@ -90,6 +90,9 @@ export function useAgent({ settings, model = "deepseek-v4-flash", customPrompt, 
   const [lastStopReason, setLastStopReason] = useState<LoopStopReason | null>(null);
   // 流式过程中的瞬时提醒(重试中/媒体降级);text-delta/done/error 即清
   const [streamNotice, setStreamNotice] = useState<string | null>(null);
+  // P15:压缩提示(发新消息时清)与编辑重发保护下标(本会话内持续,D-P15-3)
+  const [compactionNotice, setCompactionNotice] = useState<string | null>(null);
+  const [editCutoff, setEditCutoff] = useState(0);
   // 最新值 refs(避免 handler/闭包中的 stale closure)
   const abortRef = useRef<AbortController | null>(null);
   const modelRef = useRef(model); modelRef.current = model;
@@ -163,6 +166,12 @@ export function useAgent({ settings, model = "deepseek-v4-flash", customPrompt, 
             ? "请求过大:已临时省略较早的图片(保留最近一张)"
             : "请求过大:本轮已临时省略全部图片"
         );
+        break;
+      case "history-compacted":
+        setCompactionNotice(
+          `已压缩 ${ev.compactedMessages} 条早期消息以释放上下文(约 ${ev.tokensBefore}→${ev.tokensAfter} tokens)`
+        );
+        setEditCutoff(messagesRef.current.length); // 压缩点之前禁用编辑重发(D-P15-3)
         break;
       case "text-delta": // 恢复输出即清提醒(setState 同值时 React 自动跳过)
       case "error":
@@ -340,6 +349,7 @@ export function useAgent({ settings, model = "deepseek-v4-flash", customPrompt, 
       setStreamingPhase("connecting");
       setLastStopReason(null);
       setStreamNotice(null);
+      setCompactionNotice(null);
 
       const payload: Record<string, unknown> = { type: "message", content, model: modelRef.current };
       if (images?.length) {
@@ -379,6 +389,7 @@ export function useAgent({ settings, model = "deepseek-v4-flash", customPrompt, 
       setStreamingPhase("connecting");
       setLastStopReason(null);
       setStreamNotice(null);
+      setCompactionNotice(null);
 
       // 复审修复:workspace 改传真实设备工作区根,不再用字面量 "/" 或 sentinel
       // ("/workspace")。与 createDeviceBackend 内部解析真实路径用的是同一个值
@@ -390,8 +401,20 @@ export function useAgent({ settings, model = "deepseek-v4-flash", customPrompt, 
       const abortController = new AbortController();
       abortRef.current = abortController;
       try {
+        // P15:turn 边界压缩(与 server 侧同函数;失败静默跳过);modelClient 提升复用(D-P15-2)
+        const modelClient = createRnModelClient({ modelConfig, apiKey });
+        const { history: compactedHistory, result: compaction } = await compactHistory({
+          history: coreHistoryRef.current,
+          modelClient,
+          signal: abortController.signal,
+        });
+        if (compaction) {
+          coreHistoryRef.current = compactedHistory;
+          emitGeek({ type: "history-compacted", ...compaction });
+        }
+
         const result = await runAgentLoop({
-          modelClient: createRnModelClient({ modelConfig, apiKey }),
+          modelClient,
           backend: createDeviceBackend({
             projectId: projectIdRef.current,
             execTool: executeTool,
@@ -491,6 +514,8 @@ export function useAgent({ settings, model = "deepseek-v4-flash", customPrompt, 
       setIsStreaming(false);
       setLastStopReason(null);
       setStreamNotice(null);
+      setCompactionNotice(null);
+      setEditCutoff(0);
       if (needsAutoConnect) setTimeout(() => connect(), 50); // loadSession 断开后延迟重连
     },
     [conn, connect, needsAutoConnect]
@@ -507,6 +532,8 @@ export function useAgent({ settings, model = "deepseek-v4-flash", customPrompt, 
     setIsStreaming(false);
     setLastStopReason(null);
     setStreamNotice(null);
+    setCompactionNotice(null);
+    setEditCutoff(0);
   }, [conn]);
 
   // ── Reset session when project changes ───────────────
@@ -522,6 +549,8 @@ export function useAgent({ settings, model = "deepseek-v4-flash", customPrompt, 
     setIsConnected(false);
     setLastStopReason(null);
     setStreamNotice(null);
+    setCompactionNotice(null);
+    setEditCutoff(0);
   }, [projectId, conn]);
 
   // ── Cleanup ───────────────────────────────────────────
@@ -543,6 +572,8 @@ export function useAgent({ settings, model = "deepseek-v4-flash", customPrompt, 
     authError,
     lastStopReason,
     streamNotice,
+    compactionNotice,
+    editCutoff,
     needsAutoConnect,
     connect,
     disconnect,
