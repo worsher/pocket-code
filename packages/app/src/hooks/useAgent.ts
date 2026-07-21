@@ -93,6 +93,14 @@ export function useAgent({ settings, model = "deepseek-v4-flash", customPrompt, 
   // P15:压缩提示(发新消息时清)与编辑重发保护下标(本会话内持续,D-P15-3)
   const [compactionNotice, setCompactionNotice] = useState<string | null>(null);
   const [editCutoff, setEditCutoff] = useState(0);
+  // P16:goal 卡片状态(completion/cleared 后为 null)
+  const [goalState, setGoalState] = useState<{
+    status: "active" | "paused" | "blocked" | "complete";
+    goal?: string;
+    stopReason?: string;
+    stats: { turns: number; inputTokens: number; outputTokens: number };
+    maxTurns?: number;
+  } | null>(null);
   // 最新值 refs(避免 handler/闭包中的 stale closure)
   const abortRef = useRef<AbortController | null>(null);
   const modelRef = useRef(model); modelRef.current = model;
@@ -105,6 +113,7 @@ export function useAgent({ settings, model = "deepseek-v4-flash", customPrompt, 
   const sessionIdRef = useRef(sessionId); sessionIdRef.current = sessionId;
   const messagesRef = useRef(messages); messagesRef.current = messages;
   const isStreamingRef = useRef(isStreaming); isStreamingRef.current = isStreaming;
+  const goalStateRef = useRef(goalState); goalStateRef.current = goalState;
   // loadSession 定义在 handlers 单例块之后 → handlers 内经 ref 间接引用(P14 resync)
   const loadSessionRef = useRef<((sid: string) => Promise<void>) | null>(null);
   const modeRef = useRef(settings.mode); modeRef.current = settings.mode;
@@ -173,13 +182,44 @@ export function useAgent({ settings, model = "deepseek-v4-flash", customPrompt, 
         );
         setEditCutoff(messagesRef.current.length); // 压缩点之前禁用编辑重发(D-P15-3)
         break;
+      case "goal-updated": {
+        if (ev.change === "completion") {
+          sendLocalNotification("目标已完成 ✓", ev.goal ?? "");
+          setGoalState(null);
+        } else if (ev.change === "cleared") {
+          setGoalState(null);
+        } else {
+          setGoalState({
+            status: ev.status,
+            goal: ev.goal,
+            stopReason: ev.stopReason,
+            stats: ev.stats,
+            maxTurns: ev.maxTurns,
+          });
+          if (ev.status === "blocked") {
+            sendLocalNotification("目标受阻", ev.stopReason ?? ev.goal ?? "");
+          }
+        }
+        // goal 终局/停车:收敛 streaming 态(done 在 goal active 时被跳过收敛,D-P16-7),
+        // 顺带修剪 done 处预插的尾部空占位气泡。
+        if (ev.change !== "lifecycle" || ev.status !== "active") {
+          setMessages((prev) => {
+            const last = prev[prev.length - 1];
+            return last && last.role === "assistant" && !last.content && !last.toolCalls?.length
+              ? prev.slice(0, -1)
+              : prev;
+          });
+          finalizeStreaming();
+        }
+        break;
+      }
       case "text-delta": // 恢复输出即清提醒(setState 同值时 React 自动跳过)
       case "error":
       case "done":
         setStreamNotice(null);
         break;
     }
-  }, []);
+  }, [finalizeStreaming]);
 
   // ── 单例 ServerConnection(惰性创建) ───────────────────
   const connRef = useRef<ServerConnection | null>(null);
@@ -234,6 +274,12 @@ export function useAgent({ settings, model = "deepseek-v4-flash", customPrompt, 
             callNamesRef.current.clear();
             // CLI 委托路径缺省 stopReason,按 end_turn 解释(spec C12-4)
             setLastStopReason(ev.stopReason ?? "end_turn");
+            // P16 D-P16-7:goal 续跑的多轮输出用新气泡分隔,否则全堆进同一 assistant
+            if (goalStateRef.current?.status === "active") {
+              setMessages((prev) => [...prev, mkAssistantMsg()]);
+              setIsStreaming(true); // goal 仍在续跑,不收敛 streaming 态
+              break;
+            }
             finalizeStreaming();
             break;
           case "error":
@@ -446,6 +492,19 @@ export function useAgent({ settings, model = "deepseek-v4-flash", customPrompt, 
   // ── Send message ──────────────────────────────────────
   const sendMessage = useCallback(
     async (content: string, images?: ImageAttachment[]) => {
+      // P16 D-P16-3:/goal 前缀 → 下发目标(仅 cloud 路径;goal driver 生在 daemon)
+      if (settings.mode === "cloud" && content.startsWith("/goal ") && conn.isOpen) {
+        const goalContent = content.slice(6).trim();
+        if (!goalContent) return;
+        setMessages((prev) => [...prev, mkUserMsg(content, images), mkAssistantMsg()]);
+        setIsStreaming(true);
+        setStreamingPhase("connecting");
+        setLastStopReason(null);
+        setStreamNotice(null);
+        setCompactionNotice(null);
+        conn.sendRaw({ type: "goal-create", content: goalContent });
+        return;
+      }
       if (settings.mode === "cloud") {
         if (!conn.isOpen) {
           // 未连接:入队待重放,并本地插入 pending 用户消息以可见
@@ -459,6 +518,19 @@ export function useAgent({ settings, model = "deepseek-v4-flash", customPrompt, 
       }
     },
     [settings.mode, conn, sendCloudMessage, sendGeekMessage]
+  );
+
+  // ── P16:goal 控制(不经模型 turn) ─────────────────────
+  const goalControl = useCallback(
+    (action: "pause" | "resume" | "cancel") => {
+      conn.sendRaw({ type: "goal-control", action });
+      if (action === "resume") {
+        setIsStreaming(true);
+        setStreamingPhase("connecting");
+        setMessages((prev) => [...prev, mkAssistantMsg()]);
+      }
+    },
+    [conn]
   );
 
   // ── Edit & Resend (conversation branching) ────────────
@@ -516,6 +588,7 @@ export function useAgent({ settings, model = "deepseek-v4-flash", customPrompt, 
       setStreamNotice(null);
       setCompactionNotice(null);
       setEditCutoff(0);
+      setGoalState(null);
       if (needsAutoConnect) setTimeout(() => connect(), 50); // loadSession 断开后延迟重连
     },
     [conn, connect, needsAutoConnect]
@@ -534,6 +607,7 @@ export function useAgent({ settings, model = "deepseek-v4-flash", customPrompt, 
     setStreamNotice(null);
     setCompactionNotice(null);
     setEditCutoff(0);
+    setGoalState(null);
   }, [conn]);
 
   // ── Reset session when project changes ───────────────
@@ -551,6 +625,7 @@ export function useAgent({ settings, model = "deepseek-v4-flash", customPrompt, 
     setStreamNotice(null);
     setCompactionNotice(null);
     setEditCutoff(0);
+    setGoalState(null);
   }, [projectId, conn]);
 
   // ── Cleanup ───────────────────────────────────────────
@@ -574,6 +649,8 @@ export function useAgent({ settings, model = "deepseek-v4-flash", customPrompt, 
     streamNotice,
     compactionNotice,
     editCutoff,
+    goalState,
+    goalControl,
     needsAutoConnect,
     connect,
     disconnect,
