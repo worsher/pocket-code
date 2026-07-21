@@ -28,6 +28,39 @@ const base = (client: ModelClient, over: any = {}) => ({
   ...over,
 });
 
+class HttpErr extends Error {
+  constructor(public statusCode: number, msg = `http ${statusCode}`) { super(msg); }
+}
+
+/** 按脚本先抛后成的 client:throwPlan[i] 非空则第 i 次调用抛该错;成功调用顺序消费 okSteps。 */
+function flakyClient(throwPlan: (Error | null)[], okSteps: ModelDelta[][]) {
+  let call = 0;
+  const calls: any[] = [];
+  const remaining = [...okSteps];
+  const client: ModelClient & { calls: any[] } = {
+    calls,
+    async *streamStep(req) {
+      calls.push(req);
+      const plan = throwPlan[call++];
+      if (plan) throw plan;
+      for (const d of remaining.shift() ?? [{ type: "text", text: "ok" } as ModelDelta]) yield d;
+    },
+    classifyError(e) {
+      const s = (e as HttpErr).statusCode;
+      if (s === 413) return "too-large";
+      if (s === 415) return "media-rejected";
+      if (s === 429 || (s >= 500 && s < 600)) return "retryable";
+      return "fatal";
+    },
+  };
+  return client;
+}
+
+const IMG_HISTORY = [
+  { role: "user" as const, content: [{ type: "text" as const, text: "旧图" }, { type: "image" as const, base64: "OLD", mimeType: "image/png" }] },
+  { role: "assistant" as const, content: "ok" },
+];
+
 describe("runAgentLoop", () => {
   it("single step without tools: streams text, returns fullText, no done event", async () => {
     const client = scriptedClient([[{ type: "text", text: "he" }, { type: "text", text: "llo" }]]);
@@ -248,6 +281,99 @@ describe("runAgentLoop", () => {
     await runAgentLoop(base(client, { onEvent }));
     const usage = onEvent.mock.calls.map((c) => c[0]).filter((e) => e.type === "usage");
     expect(usage).toEqual([]);
+  });
+
+  it("retryable: 429 twice then success — two step-retrying events, final text ok (C13-1/6)", async () => {
+    const client = flakyClient([new HttpErr(429), new HttpErr(429), null], [[{ type: "text", text: "ok" }]]);
+    const onEvent = vi.fn();
+    const r = await runAgentLoop(base(client, { onEvent, retryBaseMs: 1 }));
+    expect(r.stopReason).toBe("end_turn");
+    expect(r.fullText).toBe("ok");
+    const retries = onEvent.mock.calls.map((c) => c[0]).filter((e: any) => e.type === "step-retrying");
+    expect(retries.length).toBe(2);
+    expect(retries[0]).toMatchObject({ failedAttempt: 1, nextAttempt: 2, maxAttempts: 5, statusCode: 429 });
+  });
+
+  it("retryable exhausted → stopReason error after maxRetryAttempts attempts", async () => {
+    const client = flakyClient(Array(10).fill(new HttpErr(503)), []);
+    const onEvent = vi.fn();
+    const r = await runAgentLoop(base(client, { onEvent, retryBaseMs: 1, maxRetryAttempts: 3 }));
+    expect(r.stopReason).toBe("error");
+    expect(client.calls.length).toBe(3); // 尝试总数 = maxRetryAttempts
+    expect(onEvent.mock.calls.map((c) => c[0]).filter((e: any) => e.type === "step-retrying").length).toBe(2);
+  });
+
+  it("413 → degraded resend: media-degraded emitted, request retried with projection (C13-2/6)", async () => {
+    const client = flakyClient([new HttpErr(413), null], [[{ type: "text", text: "ok" }]]);
+    const onEvent = vi.fn();
+    const r = await runAgentLoop(base(client, { onEvent, history: IMG_HISTORY }));
+    expect(r.stopReason).toBe("end_turn");
+    const deg = onEvent.mock.calls.map((c) => c[0]).find((e: any) => e.type === "media-degraded");
+    expect(deg).toEqual({ type: "media-degraded", level: "degraded", keptImages: 1 });
+    // degraded 保留全局最后一张:OLD 是唯一图 → 仍在第 2 次请求里
+    expect(JSON.stringify(client.calls[1].messages)).toContain("OLD");
+    // C13-3:history 本体未被投影污染
+    expect(JSON.stringify(r.messages)).toContain("OLD");
+  });
+
+  it("413 twice → stripped sticky: later steps stay stripped without re-rejection (C13-2, 粘性)", async () => {
+    const client = flakyClient(
+      [new HttpErr(413), new HttpErr(413), null, null],
+      [[{ type: "tool-call", id: "c1", name: "listFiles", args: { path: "." } }], [{ type: "text", text: "fin" }]],
+    );
+    const onEvent = vi.fn();
+    const r = await runAgentLoop(base(client, { onEvent, history: IMG_HISTORY }));
+    expect(r.stopReason).toBe("end_turn");
+    const degLevels = onEvent.mock.calls.map((c) => c[0]).filter((e: any) => e.type === "media-degraded").map((e: any) => e.level);
+    expect(degLevels).toEqual(["degraded", "stripped"]);
+    // 第 4 次调用(第 2 个 step)直接 stripped 投影:无 OLD、无第 3 次 413
+    expect(JSON.stringify(client.calls[3].messages)).not.toContain("OLD");
+    expect(client.calls.length).toBe(4);
+  });
+
+  it("413 on stripped projection → error (C13-2 终点)", async () => {
+    const client = flakyClient([new HttpErr(413), new HttpErr(413), new HttpErr(413)], []);
+    const r = await runAgentLoop(base(client, { history: IMG_HISTORY }));
+    expect(r.stopReason).toBe("error");
+    expect(client.calls.length).toBe(3); // normal→degraded→stripped 各一次
+  });
+
+  it("media-rejected jumps straight to stripped", async () => {
+    const client = flakyClient([new HttpErr(415), null], [[{ type: "text", text: "ok" }]]);
+    const onEvent = vi.fn();
+    const r = await runAgentLoop(base(client, { onEvent, history: IMG_HISTORY }));
+    expect(r.stopReason).toBe("end_turn");
+    const deg = onEvent.mock.calls.map((c) => c[0]).find((e: any) => e.type === "media-degraded");
+    expect(deg).toMatchObject({ level: "stripped", keptImages: 0 });
+    expect(JSON.stringify(client.calls[1].messages)).not.toContain("OLD");
+  });
+
+  it("D-P13-1: partial output before a retryable error → no retry, stopReason error", async () => {
+    const client: ModelClient = {
+      async *streamStep() {
+        yield { type: "text", text: "half" } as ModelDelta;
+        throw new HttpErr(503);
+      },
+      classifyError: () => "retryable",
+    };
+    const onEvent = vi.fn();
+    const r = await runAgentLoop(base(client, { onEvent, retryBaseMs: 1 }));
+    expect(r.stopReason).toBe("error");
+    expect(onEvent.mock.calls.map((c) => c[0].type)).not.toContain("step-retrying");
+    expect(r.messages.at(-1)).toEqual({ role: "assistant", content: "half" }); // T1 部分入史语义仍成立
+  });
+
+  it("abort during retry sleep → aborted promptly, no further requests (C13-5)", async () => {
+    const ac = new AbortController();
+    const client = flakyClient([new HttpErr(429)], []);
+    const onEvent = vi.fn((ev: any) => {
+      if (ev.type === "step-retrying") ac.abort();
+    });
+    const t0 = Date.now();
+    const r = await runAgentLoop(base(client, { onEvent, signal: ac.signal, retryBaseMs: 60_000 }));
+    expect(r.stopReason).toBe("aborted");
+    expect(client.calls.length).toBe(1); // abort 后不再发起新请求
+    expect(Date.now() - t0).toBeLessThan(5_000); // 60s 退避被立即打断
   });
 
   it("editFile success emits file-changed with changeType modified", async () => {

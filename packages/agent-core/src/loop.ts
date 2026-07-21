@@ -1,11 +1,14 @@
 // runAgentLoop: core 包的主循环,替换 App/Server 两侧旧 loop 实现。
 // 循环语义详见 .superpowers/sdd/task-5-brief.md 的"循环语义 1-8"。
 import { buildToolRegistry } from "./tools/registry.js";
+import { retryBackoffDelays, abortableSleep } from "./retry.js";
+import { projectMedia, type MediaProjection } from "./mediaProjection.js";
 import type {
   AgentEventType,
   CoreMessage,
   LoopStopReason,
   ModelClient,
+  ModelErrorKind,
   RunAgentResult,
   RuntimeBackend,
   ToolCallReq,
@@ -22,6 +25,10 @@ export interface RunAgentOptions {
   onEvent: (ev: AgentEventType) => void;
   signal?: AbortSignal;
   maxSteps?: number; // 默认 25
+  /** retryable 错误的每 step 最大尝试数(含首次),默认 5。 */
+  maxRetryAttempts?: number;
+  /** 退避基数 ms(默认 500)。仅测试覆盖用(D-P13-3),生产不传。 */
+  retryBaseMs?: number;
 }
 
 const FILE_CHANGE_TOOLS = new Set(["writeFile", "editFile"]);
@@ -49,6 +56,11 @@ export async function runAgentLoop(
   let stopReason: LoopStopReason = "max_steps";
   let steps = 0;
   let errorMessage: string | undefined;
+  // turn 级粘性投影(spec §4.3):某级降级重发成功后,本 turn 后续 step 直接用
+  // 该投影构建请求——完整媒体史确定性超限,重建只会每 step 白付一次拒绝。
+  let projection: MediaProjection = "normal";
+  const maxRetryAttempts = opts.maxRetryAttempts ?? 5;
+  const delays = retryBackoffDelays(maxRetryAttempts, opts.retryBaseMs);
 
   for (let step = 0; step < maxSteps; step++) {
     if (signal?.aborted) {
@@ -58,43 +70,103 @@ export async function runAgentLoop(
     steps++;
 
     let stepText = "";
-    const toolCalls: ToolCallReq[] = [];
+    let toolCalls: ToolCallReq[] = [];
+    let retryAttempt = 0; // 仅 retryable 消耗;降级重发不占预算(D-P13-4)
+    let converged = false; // catch 内已定终态(aborted/error)→ 跳出 step 循环
 
-    try {
-      for await (const delta of modelClient.streamStep({ system, messages: [...messages], tools: registry.schemas, signal })) {
-        switch (delta.type) {
-          case "text":
-            stepText += delta.text;
-            fullText += delta.text;
-            onEvent({ type: "text-delta", text: delta.text });
-            break;
-          case "reasoning":
-            onEvent({ type: "reasoning-delta", text: delta.text });
-            break;
-          case "tool-call":
-            toolCalls.push({ id: delta.id, name: delta.name, args: delta.args });
-            break;
-          case "usage":
-            totalInputTokens += delta.inputTokens || 0;
-            totalOutputTokens += delta.outputTokens || 0;
-            break;
+    attemptLoop: while (true) {
+      stepText = "";
+      toolCalls = [];
+      // 本次尝试是否已向 onEvent/内部状态吐过 delta:吐过就不能重试/降级重发,
+      // 否则 text-delta 会在 reducer 里双份追加(P14 前客户端无去重,D-P13-1)。
+      let emitted = false;
+      const sendMessages = projection === "normal" ? [...messages] : projectMedia(messages, projection);
+
+      try {
+        for await (const delta of modelClient.streamStep({ system, messages: sendMessages, tools: registry.schemas, signal })) {
+          emitted = true;
+          switch (delta.type) {
+            case "text":
+              stepText += delta.text;
+              fullText += delta.text;
+              onEvent({ type: "text-delta", text: delta.text });
+              break;
+            case "reasoning":
+              onEvent({ type: "reasoning-delta", text: delta.text });
+              break;
+            case "tool-call":
+              toolCalls.push({ id: delta.id, name: delta.name, args: delta.args });
+              break;
+            case "usage":
+              totalInputTokens += delta.inputTokens || 0;
+              totalOutputTokens += delta.outputTokens || 0;
+              break;
+          }
         }
+        break attemptLoop; // 本次尝试成功
+      } catch (err) {
+        if (!signal?.aborted && !emitted) {
+          const kind: ModelErrorKind = modelClient.classifyError?.(err) ?? "fatal";
+
+          if (kind === "retryable" && retryAttempt < maxRetryAttempts - 1) {
+            const delayMs = Math.round(modelClient.retryAfterMs?.(err) ?? delays[retryAttempt] ?? 0);
+            retryAttempt++;
+            const statusCode = (err as { statusCode?: unknown } | undefined)?.statusCode;
+            const msg = err instanceof Error ? err.message.slice(0, 200) : undefined;
+            onEvent({
+              type: "step-retrying",
+              failedAttempt: retryAttempt,
+              nextAttempt: retryAttempt + 1,
+              maxAttempts: maxRetryAttempts,
+              delayMs,
+              ...(typeof statusCode === "number" ? { statusCode } : {}),
+              ...(msg ? { message: msg } : {}),
+            });
+            try {
+              await abortableSleep(delayMs, signal);
+              continue attemptLoop;
+            } catch {
+              stopReason = "aborted"; // 等待期被 abort(C13-5),不再发起新请求
+              converged = true;
+              break attemptLoop;
+            }
+          }
+
+          if (kind === "too-large" && projection !== "stripped") {
+            // 三级投影只进不退:normal→degraded→stripped,每级至多重发一次(C13-2)
+            projection = projection === "normal" ? "degraded" : "stripped";
+            onEvent({
+              type: "media-degraded",
+              level: projection,
+              keptImages: projection === "degraded" ? 1 : 0,
+            });
+            continue attemptLoop;
+          }
+
+          if (kind === "media-rejected" && projection !== "stripped") {
+            projection = "stripped";
+            onEvent({ type: "media-degraded", level: "stripped", keptImages: 0 });
+            continue attemptLoop;
+          }
+        }
+
+        // 终态收敛(spec D1):错误不再向调用方抛出。已积累的部分文本以纯文本
+        // assistant 入史(不带 toolCalls——本 step 浮出的 toolCalls 未执行,带上
+        // 会破坏"每个 toolCall 必有配对 tool 消息"的不变量,C12-5)。
+        if (stepText.length > 0) messages.push({ role: "assistant", content: stepText });
+        if (signal?.aborted) {
+          // streamStep 因 abort 抛出(AbortError):归 aborted,不发 error 事件
+          stopReason = "aborted";
+        } else {
+          errorMessage = err instanceof Error ? err.message : String(err);
+          onEvent({ type: "error", message: errorMessage });
+          stopReason = "error";
+        }
+        converged = true;
+        break attemptLoop;
       }
-    } catch (err) {
-      // spec D1:错误不再向调用方抛出,收敛为返回值。已积累的部分文本以纯文本
-      // assistant 入史(不带 toolCalls——本 step 浮出的 toolCalls 未执行,带上
-      // 会破坏"每个 toolCall 必有配对 tool 消息"的不变量,C12-5)。
-      if (stepText.length > 0) messages.push({ role: "assistant", content: stepText });
-      if (signal?.aborted) {
-        // streamStep 因 abort 抛出(AbortError):归 aborted,不发 error 事件
-        stopReason = "aborted";
-      } else {
-        errorMessage = err instanceof Error ? err.message : String(err);
-        onEvent({ type: "error", message: errorMessage });
-        stopReason = "error";
-      }
-      break;
     }
+    if (converged) break;
 
     // 3. 步末:assistant 消息(stepText+toolCalls)入 messages
     const assistantMsg: CoreMessage =
