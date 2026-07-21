@@ -58,9 +58,10 @@
 
 1. ~~**P11:RN App 切换消费 client-core**,删除三个冻结副本(services/serverConnection.ts、services/relayClient.ts、hooks/chatReducer.ts 及其测试)~~(✅ 2026-07-11 完成,连带 iOS 平台隔离:iOS 默认 relay、local 置灰、终端 Tab 不渲染;spec/plan 见 docs/superpowers/{specs,plans}/2026-07-11-内核统一-iOS平台隔离*)。
 2. ~~**esbuild-wasm 离线前端预览**（模式 B/C）~~(✅ 2026-07-11 完成:PreviewTab「构建」→ WebView 内 esbuild-wasm 打包 → dist file:// 渲染;esm.sh 依赖缓存,缓存命中真离线;真机人工验收后置。spec/plan 见 docs/superpowers/{specs,plans}/2026-07-11-esbuild-wasm离线前端预览*)。
-3. **端侧 shell spike**（proot/Alpine over SELinux，真机验证）。
-4. **iOS**。
-5. 小增强：DeepSeek V4 think 参数透传、codex MCP/todo 事件精细渲染。
+3. **P12–P16:五项可靠性/自治改进(借鉴 kimi-code)**——loop 结构化 stopReason → 瞬时错误重试+媒体降级 → 事件流 seq+重连补发 → 上下文压缩 → Goal 模式(自治多轮)。spec 见 specs/2026-07-21-kimi-code借鉴五项改进-design.md(待评审;评审后各项单独出 plan)。
+4. **端侧 shell spike**（proot/Alpine over SELinux，真机验证）。
+5. **iOS**。
+6. 小增强：DeepSeek V4 think 参数透传、codex MCP/todo 事件精细渲染。
 
 ## 拆分路线（评估结论,详见 specs/2026-07-06-p9 第一部分）
 
