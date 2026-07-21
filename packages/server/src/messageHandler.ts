@@ -9,7 +9,9 @@ import { createNodeBackend } from "./nodeBackend.js";
 import { setupGitCredentials } from "./gitCredentials.js";
 import { verifyToken, registerAnonymous, type AuthPayload } from "./auth.js";
 import { isDockerEnabled, getContainer } from "./docker.js";
-import { initDb, listUserSessions, deleteSession } from "./db.js";
+import { initDb, listUserSessions, deleteSession, saveSessionGoal } from "./db.js";
+import { createGoal, goalUpdatedEvent, clearedEvent, type GoalState } from "./goal/types.js";
+import { runGoalDriver } from "./goal/driver.js";
 import { checkQuota, incrementUsage, getUserQuota } from "./resourceLimits.js";
 import { WsMessage, type ServerOutboundType } from "@pocket-code/wire";
 import { handleSyncPull, handleSyncFile } from "./sync/syncHandler.js";
@@ -476,6 +478,79 @@ export function createMessageHandler(
                 success: false,
                 error: err.message,
               } satisfies ServerOutboundType);
+            }
+            break;
+          }
+
+          // ── P16:Goal 模式 ──
+          case "goal-create": {
+            if (!session) {
+              send({ type: "error", error: "No session. Send init first." });
+              return;
+            }
+            if (session.goal && !msg.replace) {
+              send({ type: "error", error: "已有进行中的目标,重复创建需 replace" });
+              return;
+            }
+            session.lastActivity = Date.now();
+            session.goal = createGoal(msg.content, msg.acceptance, msg.maxTurns);
+            saveSessionGoal(session.sessionId, JSON.stringify(session.goal));
+            const goalStream = stream ?? getSessionStream(session.sessionId);
+            goalStream.publish(goalUpdatedEvent(session.goal, "lifecycle"));
+            await runGoalDriver(session, {
+              runAgent,
+              persistGoal: (sid: string, g: GoalState | null) =>
+                saveSessionGoal(sid, g ? JSON.stringify(g) : null),
+              publish: (ev) => {
+                goalStream.publish(ev);
+              },
+            });
+            break;
+          }
+
+          case "goal-control": {
+            if (!session) {
+              send({ type: "error", error: "No session. Send init first." });
+              return;
+            }
+            const g = session.goal;
+            const ctlStream = stream ?? getSessionStream(session.sessionId);
+            switch (msg.action) {
+              case "pause":
+                // 先置态后 abort:driver 在 turn 返回后读到 paused 停车并发通告(单一事件源)
+                if (g && g.status === "active") {
+                  g.status = "paused";
+                  g.stopReason = "用户暂停";
+                  g.updatedAt = Date.now();
+                  saveSessionGoal(session.sessionId, JSON.stringify(g));
+                  session.currentAbort?.abort();
+                }
+                break;
+              case "resume":
+                if (g && (g.status === "paused" || g.status === "blocked")) {
+                  g.status = "active";
+                  g.stopReason = undefined; // C16-5:resume 清 stopReason,新的尝试
+                  g.updatedAt = Date.now();
+                  saveSessionGoal(session.sessionId, JSON.stringify(g));
+                  ctlStream.publish(goalUpdatedEvent(g, "lifecycle"));
+                  await runGoalDriver(session, {
+                    runAgent,
+                    persistGoal: (sid: string, gg: GoalState | null) =>
+                      saveSessionGoal(sid, gg ? JSON.stringify(gg) : null),
+                    publish: (ev) => {
+                      ctlStream.publish(ev);
+                    },
+                  });
+                }
+                break;
+              case "cancel":
+                if (g) {
+                  session.currentAbort?.abort();
+                  ctlStream.publish(clearedEvent(g.stats));
+                  session.goal = undefined;
+                  saveSessionGoal(session.sessionId, null);
+                }
+                break;
             }
             break;
           }
