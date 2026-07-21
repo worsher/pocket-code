@@ -115,6 +115,8 @@ export interface AgentSession {
   cliSessions?: Record<string, string>;
   /** 进行中 turn 的中止控制(session 级:断线重连后任何连接均可 abort,P14 D-P14-3)。 */
   currentAbort?: AbortController;
+  /** 当前目标(P16;同一 session 至多一个,complete/cancel 即清除)。 */
+  goal?: import("./goal/types.js").GoalState;
   /** Timestamp of last activity, used for TTL cleanup */
   lastActivity: number;
 }
