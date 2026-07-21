@@ -210,4 +210,30 @@ describe("createNodeModelClient", () => {
       })
     ).not.toThrow();
   });
+
+  describe("classifyError / retryAfterMs (P13,spec §4.1)", () => {
+    const client = createNodeModelClient("deepseek-v4-flash");
+    const err = (statusCode: number, message = "x", responseHeaders?: Record<string, string>) =>
+      Object.assign(new Error(message), { statusCode, responseHeaders });
+
+    it("429/5xx → retryable; 413 → too-large; 其余 → fatal", () => {
+      expect(client.classifyError!(err(429))).toBe("retryable");
+      expect(client.classifyError!(err(500))).toBe("retryable");
+      expect(client.classifyError!(err(503))).toBe("retryable");
+      expect(client.classifyError!(err(413))).toBe("too-large");
+      expect(client.classifyError!(err(401))).toBe("fatal");
+      expect(client.classifyError!(new Error("plain"))).toBe("fatal");
+      expect(client.classifyError!(undefined)).toBe("fatal");
+    });
+
+    it("400 + image 特征文案 → media-rejected", () => {
+      expect(client.classifyError!(err(400, "Invalid image format"))).toBe("media-rejected");
+      expect(client.classifyError!(err(400, "bad json"))).toBe("fatal");
+    });
+
+    it("retryAfterMs reads retry-after seconds header", () => {
+      expect(client.retryAfterMs!(err(429, "x", { "retry-after": "3" }))).toBe(3000);
+      expect(client.retryAfterMs!(err(429))).toBeUndefined();
+    });
+  });
 });
