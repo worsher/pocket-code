@@ -1,7 +1,7 @@
 import initSqlJs, { type Database as SqlJsDatabase } from "sql.js";
 import { join, resolve, dirname } from "path";
 import { homedir } from "os";
-import { mkdirSync, readFileSync, writeFileSync, existsSync } from "fs";
+import { mkdirSync, readFileSync, existsSync } from "fs";
 import { randomUUID } from "crypto";
 import type { CoreMessage } from "@pocket-code/agent-core";
 import {
@@ -12,28 +12,54 @@ import {
   parseStorageKey,
   type UuidFactory,
 } from "@pocket-code/workspace-core";
+import { atomicWriteFileSync } from "./atomicFile.js";
 
 // ── Database setup ──────────────────────────────────────
 
-const DB_PATH =
-  process.env.DB_PATH ||
-  resolve(join(homedir(), ".pocket-code", "pocket-code.db"));
+const DB_PATH = process.env.DB_PATH || resolve(join(homedir(), ".pocket-code", "pocket-code.db"));
+const DB_BACKUP_PATH = `${DB_PATH}.backup`;
 
 // Ensure directory exists
 mkdirSync(dirname(DB_PATH), { recursive: true });
 
 let db: SqlJsDatabase;
+let primaryDatabaseFileIsValid = false;
 
 /** Initialise the database. Must be called (and awaited) once before using
  *  any of the other exported functions. */
 export async function initDb(): Promise<void> {
   const SQL = await initSqlJs();
+  const openVerifiedDatabase = (data: Uint8Array): SqlJsDatabase => {
+    const candidate = new SQL.Database(data);
+    try {
+      // sql.js defers malformed-file errors until the first statement.
+      candidate.exec("PRAGMA schema_version");
+      return candidate;
+    } catch (error) {
+      candidate.close();
+      throw error;
+    }
+  };
 
   if (existsSync(DB_PATH)) {
-    const buffer = readFileSync(DB_PATH);
-    db = new SQL.Database(buffer);
+    try {
+      db = openVerifiedDatabase(readFileSync(DB_PATH));
+      primaryDatabaseFileIsValid = true;
+    } catch (primaryError) {
+      if (!existsSync(DB_BACKUP_PATH)) throw primaryError;
+      try {
+        db = openVerifiedDatabase(readFileSync(DB_BACKUP_PATH));
+        primaryDatabaseFileIsValid = false;
+      } catch (backupError) {
+        throw new AggregateError(
+          [primaryError, backupError],
+          "Primary and backup Pocket Code databases are both unreadable"
+        );
+      }
+    }
   } else {
     db = new SQL.Database();
+    primaryDatabaseFileIsValid = false;
   }
 
   // WAL is not supported by sql.js (in-memory), but we persist manually
@@ -116,7 +142,11 @@ export async function initDb(): Promise<void> {
 /** Flush current database state to disk */
 function persist(): void {
   const data = db.export();
-  writeFileSync(DB_PATH, Buffer.from(data));
+  if (primaryDatabaseFileIsValid && existsSync(DB_PATH)) {
+    atomicWriteFileSync(DB_BACKUP_PATH, readFileSync(DB_PATH));
+  }
+  atomicWriteFileSync(DB_PATH, data);
+  primaryDatabaseFileIsValid = true;
 }
 
 // ── Types ───────────────────────────────────────────────
@@ -162,14 +192,11 @@ export function saveSession(
   userId: string,
   messages: CoreMessage[],
   modelKey: string,
-  projectId: string = ''
+  projectId: string = ""
 ): void {
   const now = Date.now();
   const firstUserMsg = messages.find((m) => m.role === "user");
-  const title =
-    typeof firstUserMsg?.content === "string"
-      ? firstUserMsg.content.slice(0, 50)
-      : "";
+  const title = typeof firstUserMsg?.content === "string" ? firstUserMsg.content.slice(0, 50) : "";
 
   db.run(
     `INSERT INTO sessions (session_id, user_id, project_id, title, messages, model_key, created_at, updated_at)
@@ -198,7 +225,7 @@ export function getSession(sessionId: string): SessionRecord | null {
   return {
     sessionId: row.session_id as string,
     userId: row.user_id as string,
-    projectId: (row.project_id as string) || '',
+    projectId: (row.project_id as string) || "",
     title: row.title as string,
     messages: JSON.parse(row.messages as string),
     modelKey: row.model_key as string,
@@ -224,14 +251,15 @@ export function listUserSessions(
   limit: number = 50,
   projectId?: string
 ): SessionInfo[] {
-  const sql = projectId !== undefined
-    ? `SELECT session_id, user_id, project_id, title, model_key, messages,
+  const sql =
+    projectId !== undefined
+      ? `SELECT session_id, user_id, project_id, title, model_key, messages,
               created_at, updated_at
        FROM sessions
        WHERE user_id = ? AND project_id = ?
        ORDER BY updated_at DESC
        LIMIT ?`
-    : `SELECT session_id, user_id, project_id, title, model_key, messages,
+      : `SELECT session_id, user_id, project_id, title, model_key, messages,
               created_at, updated_at
        FROM sessions
        WHERE user_id = ?
@@ -247,7 +275,7 @@ export function listUserSessions(
     const msgs = JSON.parse(row.messages as string);
     results.push({
       sessionId: row.session_id as string,
-      projectId: (row.project_id as string) || '',
+      projectId: (row.project_id as string) || "",
       title: row.title as string,
       modelKey: row.model_key as string,
       messageCount: Array.isArray(msgs) ? msgs.length : 0,
@@ -262,10 +290,7 @@ export function listUserSessions(
 /** Delete a session */
 export function deleteSession(sessionId: string, userId: string): boolean {
   const before = db.getRowsModified();
-  db.run("DELETE FROM sessions WHERE session_id = ? AND user_id = ?", [
-    sessionId,
-    userId,
-  ]);
+  db.run("DELETE FROM sessions WHERE session_id = ? AND user_id = ?", [sessionId, userId]);
   const after = db.getRowsModified();
   if (after > 0) persist();
   return after > 0;
@@ -366,7 +391,12 @@ export function getQuotaRecord(userId: string): QuotaRecord | null {
 export function upsertQuotaRecord(
   userId: string,
   tier: string,
-  usage: { dailyApiCallsUsed: number; totalContainerTimeSec: number; diskUsageMB: number; lastResetDate: string }
+  usage: {
+    dailyApiCallsUsed: number;
+    totalContainerTimeSec: number;
+    diskUsageMB: number;
+    lastResetDate: string;
+  }
 ): void {
   db.run(
     `INSERT INTO user_quotas (user_id, tier, daily_api_calls_used, total_container_time_sec, disk_usage_mb, last_reset_date, updated_at)
@@ -378,7 +408,15 @@ export function upsertQuotaRecord(
        disk_usage_mb = excluded.disk_usage_mb,
        last_reset_date = excluded.last_reset_date,
        updated_at = excluded.updated_at`,
-    [userId, tier, usage.dailyApiCallsUsed, usage.totalContainerTimeSec, usage.diskUsageMB, usage.lastResetDate, Date.now()]
+    [
+      userId,
+      tier,
+      usage.dailyApiCallsUsed,
+      usage.totalContainerTimeSec,
+      usage.diskUsageMB,
+      usage.lastResetDate,
+      Date.now(),
+    ]
   );
   persist();
 }
@@ -443,7 +481,16 @@ export function upsertUser(user: UserRecord): void {
        display_name = excluded.display_name,
        avatar_url = excluded.avatar_url,
        updated_at = excluded.updated_at`,
-    [user.userId, user.githubId, user.githubLogin, user.githubToken, user.displayName, user.avatarUrl, Date.now(), Date.now()]
+    [
+      user.userId,
+      user.githubId,
+      user.githubLogin,
+      user.githubToken,
+      user.displayName,
+      user.avatarUrl,
+      Date.now(),
+      Date.now(),
+    ]
   );
   persist();
 }

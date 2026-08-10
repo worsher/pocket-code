@@ -12,7 +12,12 @@ import {
 } from "./projectCatalog";
 
 const STORAGE_KEY = "pocket-code:projects";
+const BACKUP_KEY = "pocket-code:projects:backup";
+const CORRUPT_KEY = "pocket-code:projects:corrupt";
 const CURRENT_KEY = "pocket-code:current-project";
+
+let catalogWriteTail: Promise<void> = Promise.resolve();
+let currentProjectWriteTail: Promise<void> = Promise.resolve();
 
 export type { Project } from "./projectCatalog";
 
@@ -26,17 +31,54 @@ export function createProject(name: string, description?: string, gitUrl?: strin
   return createCatalogProject(name, RUNTIME_FACTORIES, description, gitUrl);
 }
 
+function parseCatalogJson(raw: string | null): unknown[] | null {
+  if (!raw) return null;
+  try {
+    const parsed: unknown = JSON.parse(raw);
+    return Array.isArray(parsed) ? parsed : null;
+  } catch {
+    return null;
+  }
+}
+
+function serializeWrite(
+  tail: Promise<void>,
+  write: () => Promise<void>
+): { result: Promise<void>; tail: Promise<void> } {
+  const result = tail.catch(() => undefined).then(write);
+  return { result, tail: result.catch(() => undefined) };
+}
+
+async function preserveCorruptCatalog(raw: string): Promise<void> {
+  await AsyncStorage.setItem(CORRUPT_KEY, JSON.stringify({ raw, detectedAt: Date.now() })).catch(
+    () => {
+      // Recovery must still be attempted when diagnostic persistence is full.
+    }
+  );
+}
+
 export async function loadProjects(): Promise<Project[]> {
+  await catalogWriteTail.catch(() => undefined);
   let parsed: unknown = null;
+  let needsRecoveryWrite = false;
   try {
     const raw = await AsyncStorage.getItem(STORAGE_KEY);
-    parsed = raw ? JSON.parse(raw) : null;
+    if (raw) {
+      const current = parseCatalogJson(raw);
+      if (current) {
+        parsed = current;
+      } else {
+        await preserveCorruptCatalog(raw);
+        parsed = parseCatalogJson(await AsyncStorage.getItem(BACKUP_KEY));
+        needsRecoveryWrite = true;
+      }
+    }
   } catch {
-    // A corrupt catalog is recovered to the compatibility default below.
+    // An unavailable catalog is recovered to the compatibility default below.
   }
 
   const upgraded = upgradeProjectCatalog(parsed, RUNTIME_FACTORIES);
-  if (upgraded.changed) {
+  if (upgraded.changed || needsRecoveryWrite) {
     await saveProjects(upgraded.projects).catch(() => {
       // Keep the in-memory catalog usable when persistence is temporarily
       // unavailable. A later update/load retries the versioned write.
@@ -46,10 +88,20 @@ export async function loadProjects(): Promise<Project[]> {
 }
 
 export async function saveProjects(projects: Project[]): Promise<void> {
-  await AsyncStorage.setItem(STORAGE_KEY, JSON.stringify(projects));
+  const payload = JSON.stringify(projects);
+  const queued = serializeWrite(catalogWriteTail, async () => {
+    const current = await AsyncStorage.getItem(STORAGE_KEY);
+    if (parseCatalogJson(current)) {
+      await AsyncStorage.setItem(BACKUP_KEY, current!);
+    }
+    await AsyncStorage.setItem(STORAGE_KEY, payload);
+  });
+  catalogWriteTail = queued.tail;
+  await queued.result;
 }
 
 export async function loadCurrentProjectId(projects?: readonly Project[]): Promise<string> {
+  await currentProjectWriteTail.catch(() => undefined);
   try {
     const storedId = await AsyncStorage.getItem(CURRENT_KEY);
     if (!projects) return storedId || "default";
@@ -64,5 +116,9 @@ export async function loadCurrentProjectId(projects?: readonly Project[]): Promi
 }
 
 export async function saveCurrentProjectId(id: string): Promise<void> {
-  await AsyncStorage.setItem(CURRENT_KEY, id);
+  const queued = serializeWrite(currentProjectWriteTail, () =>
+    AsyncStorage.setItem(CURRENT_KEY, id)
+  );
+  currentProjectWriteTail = queued.tail;
+  await queued.result;
 }

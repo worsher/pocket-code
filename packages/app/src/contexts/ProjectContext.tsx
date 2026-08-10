@@ -1,14 +1,7 @@
 // ── Project Context ──────────────────────────────────────
 // Provides project state across the app via React Context.
 
-import React, {
-  createContext,
-  useContext,
-  useState,
-  useEffect,
-  useCallback,
-  useMemo,
-} from "react";
+import React, { createContext, useContext, useState, useEffect, useCallback, useMemo } from "react";
 import type { WorkspaceHandle } from "@pocket-code/workspace-core";
 import {
   type Project,
@@ -75,7 +68,9 @@ export function ProjectProvider({ children }: { children: React.ReactNode }) {
 
   const switchProject = useCallback((projectId: string) => {
     setCurrentProjectId(projectId);
-    saveCurrentProjectId(projectId);
+    void saveCurrentProjectId(projectId).catch((error) => {
+      console.error("[Projects] Failed to persist current project:", error);
+    });
   }, []);
 
   const createProject = useCallback(
@@ -83,7 +78,9 @@ export function ProjectProvider({ children }: { children: React.ReactNode }) {
       const newProject = createProjectRecord(name, description, gitUrl);
       setProjects((prev) => {
         const updated = [...prev, newProject];
-        saveProjects(updated);
+        void saveProjects(updated).catch((error) => {
+          console.error("[Projects] Failed to persist created project:", error);
+        });
         return updated;
       });
       switchProject(newProject.id);
@@ -96,7 +93,9 @@ export function ProjectProvider({ children }: { children: React.ReactNode }) {
       if (projectId === "default") return; // Can't delete default
       setProjects((prev) => {
         const updated = prev.filter((p) => p.id !== projectId);
-        saveProjects(updated);
+        void saveProjects(updated).catch((error) => {
+          console.error("[Projects] Failed to persist deleted project:", error);
+        });
         return updated;
       });
       if (currentProjectId === projectId) {
@@ -111,7 +110,9 @@ export function ProjectProvider({ children }: { children: React.ReactNode }) {
       const updated = prev.map((p) =>
         p.id === projectId ? { ...p, ...updates, updatedAt: Date.now() } : p
       );
-      saveProjects(updated);
+      void saveProjects(updated).catch((error) => {
+        console.error("[Projects] Failed to persist project update:", error);
+      });
       return updated;
     });
   }, []);

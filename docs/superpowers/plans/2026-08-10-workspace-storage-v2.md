@@ -27,7 +27,7 @@
 - [x] 实现 `WorkspaceResolver`，受管理路径只接受 catalog 分配的 storage key。
 - [ ] 建立 `projects/<storage-key>/{worktree,state,cache}`、runtime、staging、trash。
 - [ ] 移除 default project 的特殊目录语义，新建项目全部进入 v2。
-- [ ] 加入 catalog 原子写、损坏恢复和并发测试。
+- [x] 加入 catalog 原子写、损坏恢复和并发测试。
 
 ## 阶段 3：迁移路径消费者
 
