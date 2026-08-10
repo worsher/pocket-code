@@ -15,6 +15,8 @@ import {
   deleteSession,
   saveSessionGoal,
   getWorkspaceAuthorityId,
+  getWorkspaceProject,
+  deleteWorkspaceProject,
   listWorkspaceProjects,
   updateWorkspaceProjectDisplayName,
 } from "./db.js";
@@ -29,23 +31,30 @@ import {
   type WorkspaceSessionScopeType,
 } from "@pocket-code/wire";
 import { handleSyncPull, handleSyncFile } from "./sync/syncHandler.js";
+import { bindLinkedDirectory } from "./linkedImport.js";
 import { getSessionStream, type SessionEventStream } from "./eventBuffer.js";
 import { rm } from "fs/promises";
+import { homedir } from "os";
+import { join, resolve } from "path";
+import { getManagedWorkspaceRelativeRoots, isUuid } from "@pocket-code/workspace-core";
 
 // Shared session store — the same Map is used for all handlers
 const sessions = new Map<string, AgentSession>();
 
 // TTL cleanup: remove sessions idle for more than 30 minutes
 const SESSION_TTL_MS = 30 * 60 * 1000;
-setInterval(() => {
-  const now = Date.now();
-  for (const [id, sess] of sessions) {
-    if (now - (sess.lastActivity || 0) > SESSION_TTL_MS) {
-      sessions.delete(id);
-      console.log(`[Session] Cleaned up stale session: ${id}`);
+setInterval(
+  () => {
+    const now = Date.now();
+    for (const [id, sess] of sessions) {
+      if (now - (sess.lastActivity || 0) > SESSION_TTL_MS) {
+        sessions.delete(id);
+        console.log(`[Session] Cleaned up stale session: ${id}`);
+      }
     }
-  }
-}, 5 * 60 * 1000).unref();
+  },
+  5 * 60 * 1000
+).unref();
 
 export interface MessageHandler {
   onMessage(raw: string | Buffer): Promise<void>;
@@ -57,6 +66,8 @@ export interface MessageHandlerOptions {
   preAuth?: AuthPayload;
   /** Direct server defaults to cloud; relay daemon binds workspaces to a dev machine. */
   replicaKind?: WorkspaceReplicaKindType;
+  /** Only a trusted desktop daemon may resolve user-supplied host paths. */
+  allowLinkedWorkspaceBinding?: boolean;
 }
 
 /**
@@ -80,8 +91,7 @@ export function createMessageHandler(
   let unsubscribe: (() => void) | null = null;
   const replicaKind = options?.replicaKind ?? "cloud";
   let workspaceAuthorityId: string | null = null;
-  const getAuthorityId = () =>
-    (workspaceAuthorityId ??= getWorkspaceAuthorityId());
+  const getAuthorityId = () => (workspaceAuthorityId ??= getWorkspaceAuthorityId());
 
   const scopeForSession = (value: AgentSession): WorkspaceSessionScopeType | undefined => {
     const handle = value.workspaceHandle;
@@ -111,12 +121,7 @@ export function createMessageHandler(
           const errMsg = parsed.error.issues
             .map((i) => `${i.path.join(".")}: ${i.message}`)
             .join("; ");
-          console.log(
-            "[Handler] Validation failed for type:",
-            raw_msg?.type,
-            "errors:",
-            errMsg
-          );
+          console.log("[Handler] Validation failed for type:", raw_msg?.type, "errors:", errMsg);
           send({ type: "error", error: `Invalid message: ${errMsg}` });
           return;
         }
@@ -126,10 +131,7 @@ export function createMessageHandler(
         switch (msg.type) {
           // ── Anonymous registration ─────────────────────
           case "register": {
-            console.log(
-              "[Handler] Processing register, deviceId:",
-              msg.deviceId
-            );
+            console.log("[Handler] Processing register, deviceId:", msg.deviceId);
             const deviceId = msg.deviceId;
             if (!deviceId) {
               send({ type: "error", error: "deviceId is required" });
@@ -212,18 +214,10 @@ export function createMessageHandler(
             // Docker isolation
             if (isDockerEnabled() && !session.containerId) {
               try {
-                session.containerId = await getContainer(
-                  auth.userId,
-                  session.workspace
-                );
-                console.log(
-                  `[Handler] Docker container: ${session.containerId.slice(0, 12)}`
-                );
+                session.containerId = await getContainer(auth.userId, session.workspace);
+                console.log(`[Handler] Docker container: ${session.containerId.slice(0, 12)}`);
               } catch (err: any) {
-                console.error(
-                  "[Handler] Failed to create Docker container:",
-                  err.message
-                );
+                console.error("[Handler] Failed to create Docker container:", err.message);
               }
             }
             if (msg.model) {
@@ -234,15 +228,9 @@ export function createMessageHandler(
             }
             if (msg.gitCredentials && msg.gitCredentials.length > 0) {
               try {
-                await setupGitCredentials(
-                  session.workspace,
-                  msg.gitCredentials as any
-                );
+                await setupGitCredentials(session.workspace, msg.gitCredentials as any);
               } catch (err: any) {
-                console.error(
-                  "[Handler] Failed to setup git credentials:",
-                  err.message
-                );
+                console.error("[Handler] Failed to setup git credentials:", err.message);
               }
             }
             // ── P14:订阅事件流 + 发 ack(带游标)+ 补发协商 ──
@@ -262,6 +250,17 @@ export function createMessageHandler(
                     authorityId: getAuthorityId(),
                     replicaKind,
                     updatedAt: project.updatedAt,
+                    ...(project.importSource
+                      ? {
+                          importSource: {
+                            ...project.importSource,
+                            identity: {
+                              ...project.importSource.identity,
+                              weakKeys: [...project.importSource.identity.weakKeys],
+                            },
+                          },
+                        }
+                      : {}),
                   }))
                 : undefined;
             send({
@@ -366,6 +365,82 @@ export function createMessageHandler(
             break;
           }
 
+          case "workspace-bind-linked": {
+            if (!auth) {
+              send({
+                type: "workspace-import-result",
+                _reqId: msg._reqId,
+                status: "error",
+                error: "Not authenticated.",
+              });
+              return;
+            }
+            if (!options?.allowLinkedWorkspaceBinding || replicaKind !== "dev-binding") {
+              send({
+                type: "workspace-import-result",
+                _reqId: msg._reqId,
+                status: "error",
+                error: "Linked workspaces are only available through a trusted daemon.",
+              });
+              return;
+            }
+            try {
+              const result = await bindLinkedDirectory({
+                userId: auth.userId,
+                projectId: msg.projectId,
+                displayName: msg.displayName,
+                path: msg.path,
+                allowWeakDuplicate: msg.allowWeakDuplicate,
+              });
+              if (result.status !== "imported") {
+                send({
+                  type: "workspace-import-result",
+                  _reqId: msg._reqId,
+                  status: result.status,
+                  existingProjectId: result.existingProjectId,
+                });
+                break;
+              }
+              const project = result.committed.project;
+              send({
+                type: "workspace-import-result",
+                _reqId: msg._reqId,
+                status: "imported",
+                project: {
+                  projectId: project.projectId,
+                  displayName: project.displayName,
+                  replicaId: project.replicaId,
+                  workspaceGeneration: project.generation,
+                  authorityId: getAuthorityId(),
+                  replicaKind,
+                  updatedAt: project.updatedAt,
+                  importSource: {
+                    ...result.committed.importSource,
+                    identity: {
+                      ...result.committed.importSource.identity,
+                      weakKeys: [...result.committed.importSource.identity.weakKeys],
+                    },
+                  },
+                },
+                importSource: {
+                  ...result.committed.importSource,
+                  identity: {
+                    ...result.committed.importSource.identity,
+                    weakKeys: [...result.committed.importSource.identity.weakKeys],
+                  },
+                },
+              });
+            } catch (error: any) {
+              send({
+                type: "workspace-import-result",
+                _reqId: msg._reqId,
+                status: "error",
+                error: error?.message ?? "Linked workspace binding failed.",
+              });
+            }
+            break;
+          }
+
           // ── Geek mode: execute a single tool on demand ──
           case "tool-exec": {
             if (!session) {
@@ -379,14 +454,22 @@ export function createMessageHandler(
               session.workspace
             );
             if (!registry.has(toolName)) {
-              send({ type: "tool-result", callId, result: { success: false, error: `Unknown tool: ${toolName}` } } satisfies ServerOutboundType);
+              send({
+                type: "tool-result",
+                callId,
+                result: { success: false, error: `Unknown tool: ${toolName}` },
+              } satisfies ServerOutboundType);
               break;
             }
             try {
               const result = await registry.run(toolName, args);
               send({ type: "tool-result", callId, result } satisfies ServerOutboundType);
             } catch (err: any) {
-              send({ type: "tool-result", callId, result: { success: false, error: err.message } } satisfies ServerOutboundType);
+              send({
+                type: "tool-result",
+                callId,
+                result: { success: false, error: err.message },
+              } satisfies ServerOutboundType);
             }
             break;
           }
@@ -461,7 +544,13 @@ export function createMessageHandler(
               return;
             }
             try {
-              await handleSyncPull(session.workspace, msg.sinceCommit ?? null, send, msg._reqId);
+              await handleSyncPull(
+                session.workspace,
+                msg.sinceCommit ?? null,
+                send,
+                msg._reqId,
+                session.workspaceHandle?.stateRoot
+              );
             } catch (err: any) {
               send({ type: "error", error: `sync-pull failed: ${err.message}` });
             }
@@ -474,7 +563,14 @@ export function createMessageHandler(
               return;
             }
             try {
-              await handleSyncFile(session.workspace, msg.commit, msg.path, send, msg._reqId);
+              await handleSyncFile(
+                session.workspace,
+                msg.commit,
+                msg.path,
+                send,
+                msg._reqId,
+                session.workspaceHandle?.stateRoot
+              );
             } catch (err: any) {
               send({ type: "error", error: `sync-file failed: ${err.message}` });
             }
@@ -487,13 +583,8 @@ export function createMessageHandler(
               send({ type: "error", error: "Not authenticated." });
               return;
             }
-            const projectFilter: string | undefined =
-              msg.projectId || undefined;
-            const userSessions = listUserSessions(
-              auth.userId,
-              msg.limit || 50,
-              projectFilter
-            );
+            const projectFilter: string | undefined = msg.projectId || undefined;
+            const userSessions = listUserSessions(auth.userId, msg.limit || 50, projectFilter);
             send({
               type: "sessions-list",
               sessions: userSessions as unknown as Record<string, unknown>[],
@@ -525,11 +616,34 @@ export function createMessageHandler(
               send({ type: "error", error: "projectId is required." });
               return;
             }
-            const projectSessions = listUserSessions(
-              auth.userId,
-              1,
-              delProjectId
-            );
+            const catalogProject = isUuid(delProjectId)
+              ? getWorkspaceProject(auth.userId, delProjectId)
+              : null;
+            if (catalogProject) {
+              const root =
+                process.env.POCKET_CODE_DATA_ROOT || resolve(join(homedir(), ".pocket-code", "v2"));
+              const managed = getManagedWorkspaceRelativeRoots(catalogProject.storageKey);
+              try {
+                // linked worktrees are external user data. Deleting a v2 project
+                // only removes its managed state/cache and catalog binding.
+                await rm(join(root, managed.projectRoot), { recursive: true, force: true });
+                deleteWorkspaceProject(auth.userId, delProjectId);
+                send({
+                  type: "project-workspace-deleted",
+                  projectId: delProjectId,
+                  success: true,
+                } satisfies ServerOutboundType);
+              } catch (err: any) {
+                send({
+                  type: "project-workspace-deleted",
+                  projectId: delProjectId,
+                  success: false,
+                  error: err.message,
+                } satisfies ServerOutboundType);
+              }
+              break;
+            }
+            const projectSessions = listUserSessions(auth.userId, 1, delProjectId);
             if (projectSessions.length === 0) {
               send({
                 type: "project-workspace-deleted",

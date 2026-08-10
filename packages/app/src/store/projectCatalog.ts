@@ -6,6 +6,9 @@ import {
   parseProjectId,
   parseReplicaId,
   parseStorageKey,
+  type ImportMode,
+  type ImportSourceKind,
+  type SourceIdentity,
   type UuidFactory,
 } from "@pocket-code/workspace-core";
 
@@ -31,6 +34,18 @@ export interface RemoteReplicaCatalogEntry {
   updatedAt: number;
 }
 
+export interface ProjectImportSource {
+  mode: ImportMode;
+  sourceKind: ImportSourceKind;
+  sourceDeviceId: string;
+  canonicalLocator?: string;
+  identity: SourceIdentity;
+  importedSnapshot: string;
+  importedAt: number;
+  /** copy imports never write through to the locator. */
+  writeBackPolicy: "explicit" | "linked" | "git";
+}
+
 export interface Project {
   catalogVersion: typeof PROJECT_CATALOG_VERSION;
   id: string;
@@ -47,6 +62,7 @@ export interface Project {
   cloudProjectId?: string;
   localReplica: MobileReplicaCatalogEntry;
   remoteReplicas?: RemoteReplicaCatalogEntry[];
+  importSource?: ProjectImportSource;
   createdAt: number;
   updatedAt: number;
 }
@@ -134,20 +150,59 @@ function parseRemoteReplica(value: unknown): RemoteReplicaCatalogEntry | null {
   }
 }
 
-export function upsertRemoteReplica(
-  project: Project,
-  replica: RemoteReplicaCatalogEntry,
-): Project {
+function parseProjectImportSource(value: unknown): ProjectImportSource | null {
+  if (!isRecord(value) || !isRecord(value.identity)) return null;
+  const mode = value.mode;
+  const sourceKind = value.sourceKind;
+  const sourceDeviceId = value.sourceDeviceId;
+  const canonicalLocator = value.canonicalLocator;
+  const importedSnapshot = value.importedSnapshot;
+  const importedAt = Number(value.importedAt);
+  const writeBackPolicy = value.writeBackPolicy;
+  const identity = value.identity;
+  if (
+    (mode !== "copy" && mode !== "linked" && mode !== "git") ||
+    (sourceKind !== "directory" && sourceKind !== "archive" && sourceKind !== "git") ||
+    typeof sourceDeviceId !== "string" ||
+    !sourceDeviceId ||
+    (canonicalLocator !== undefined && typeof canonicalLocator !== "string") ||
+    typeof importedSnapshot !== "string" ||
+    !importedSnapshot ||
+    !Number.isFinite(importedAt) ||
+    (writeBackPolicy !== "explicit" && writeBackPolicy !== "linked" && writeBackPolicy !== "git") ||
+    identity.importMode !== mode ||
+    identity.sourceKind !== sourceKind ||
+    (identity.strongKey !== undefined && typeof identity.strongKey !== "string") ||
+    !Array.isArray(identity.weakKeys) ||
+    !identity.weakKeys.every((key) => typeof key === "string")
+  ) {
+    return null;
+  }
+  return {
+    mode,
+    sourceKind,
+    sourceDeviceId,
+    canonicalLocator: canonicalLocator as string | undefined,
+    identity: {
+      importMode: mode,
+      sourceKind,
+      strongKey: identity.strongKey as string | undefined,
+      weakKeys: identity.weakKeys as string[],
+    },
+    importedSnapshot,
+    importedAt,
+    writeBackPolicy,
+  };
+}
+
+export function upsertRemoteReplica(project: Project, replica: RemoteReplicaCatalogEntry): Project {
   const parsed = parseRemoteReplica(replica);
   if (!parsed) throw new Error("Invalid remote replica catalog entry");
   const existing = project.remoteReplicas ?? [];
   const remoteReplicas = [
     ...existing.filter(
       (entry) =>
-        !(
-          entry.authorityId === parsed.authorityId &&
-          entry.connectionKey === parsed.connectionKey
-        ),
+        !(entry.authorityId === parsed.authorityId && entry.connectionKey === parsed.connectionKey)
     ),
     parsed,
   ];
@@ -183,10 +238,10 @@ function migrateLegacyProject(
   const layout: MobileWorkspaceLayout = existingV2Id
     ? "v2"
     : safeLegacyId
-    ? safeLegacyId === "default"
-      ? "legacy-default"
-      : "legacy-project"
-    : "v2";
+      ? safeLegacyId === "default"
+        ? "legacy-default"
+        : "legacy-project"
+      : "v2";
   const id = existingV2Id ?? safeLegacyId ?? createProjectId(factories.projectUuid);
 
   return {
@@ -230,7 +285,7 @@ export function createProjectFromRemote(
   projectId: string,
   displayName: string,
   factories: ProjectIdFactories,
-  now: number = Date.now(),
+  now: number = Date.now()
 ): Project {
   return {
     catalogVersion: PROJECT_CATALOG_VERSION,
@@ -240,6 +295,20 @@ export function createProjectFromRemote(
     localReplica: createReplicaMetadata("v2", factories),
     createdAt: now,
     updatedAt: now,
+  };
+}
+
+export function createImportedProject(
+  name: string,
+  source: ProjectImportSource,
+  factories: ProjectIdFactories,
+  now: number = Date.now()
+): Project {
+  const parsedSource = parseProjectImportSource(source);
+  if (!parsedSource) throw new Error("Invalid project import source metadata");
+  return {
+    ...createProject(name, factories, "", undefined, now),
+    importSource: parsedSource,
   };
 }
 
@@ -254,24 +323,33 @@ export function upgradeProjectCatalog(
 
   for (const item of input) {
     if (isValidV2Project(item)) {
+      let repaired: Project = item;
       if (item.remoteReplicas === undefined) {
-        projects.push(item);
+        // Nothing to normalize.
       } else if (Array.isArray(item.remoteReplicas)) {
         const remoteReplicas = item.remoteReplicas
           .map(parseRemoteReplica)
           .filter((entry): entry is RemoteReplicaCatalogEntry => entry !== null);
         if (remoteReplicas.length === item.remoteReplicas.length) {
-          projects.push(item);
+          // Already valid.
         } else {
-          projects.push({ ...item, remoteReplicas });
+          repaired = { ...repaired, remoteReplicas };
           changed = true;
         }
       } else {
-        const repaired = { ...item };
+        repaired = { ...repaired };
         delete repaired.remoteReplicas;
-        projects.push(repaired);
         changed = true;
       }
+      if (item.importSource !== undefined) {
+        const importSource = parseProjectImportSource(item.importSource);
+        if (!importSource) {
+          repaired = { ...repaired };
+          delete repaired.importSource;
+          changed = true;
+        }
+      }
+      projects.push(repaired);
       continue;
     }
     const migrated = migrateLegacyProject(item, factories, now);

@@ -11,7 +11,18 @@ import {
   type AgentEventType,
   type WorkspaceSessionScopeType,
   type WorkspaceProjectCatalogEntryType,
+  type WorkspaceImportSourceType,
 } from "@pocket-code/wire";
+
+export interface LinkedWorkspaceImportResponse {
+  type: "workspace-import-result";
+  status: "imported" | "confirmation-required" | "blocked" | "error";
+  existingProjectId?: string;
+  project?: WorkspaceProjectCatalogEntryType;
+  importSource?: WorkspaceImportSourceType;
+  error?: string;
+  _reqId: string;
+}
 
 export interface ConnectionConfig {
   getServerUrl(): string;
@@ -90,7 +101,8 @@ export class ServerConnection {
     if (this.isOpen) return;
 
     const persisted = this.config.getEventCursor?.();
-    if (persisted && !this.cursor.epoch) this.cursor = { epoch: persisted.epoch, lastSeq: persisted.lastSeq };
+    if (persisted && !this.cursor.epoch)
+      this.cursor = { epoch: persisted.epoch, lastSeq: persisted.lastSeq };
 
     const url = this.config.getServerUrl();
     console.log("[Conn] Connecting to:", url, "relay:", this.config.isRelayMode());
@@ -121,7 +133,11 @@ export class ServerConnection {
       if (this.config.isRelayMode()) {
         // relay 模式:daemon 侧 preAuth,已配对则直接 init(不带 token)
         if (this.config.isRelayPaired()) {
-          this.sendRaw({ type: "init", ...this.config.buildInitPayload(), ...this.cursorInitFields() });
+          this.sendRaw({
+            type: "init",
+            ...this.config.buildInitPayload(),
+            ...this.cursorInitFields(),
+          });
         } else {
           console.log("[Conn] Connected to relay but not paired yet.");
         }
@@ -170,7 +186,12 @@ export class ServerConnection {
   }
 
   private sendInit(token: string): void {
-    this.sendRaw({ type: "init", token, ...this.config.buildInitPayload(), ...this.cursorInitFields() });
+    this.sendRaw({
+      type: "init",
+      token,
+      ...this.config.buildInitPayload(),
+      ...this.cursorInitFields(),
+    });
   }
 
   /** init 携带的补发协商字段(仅当有 epoch,即此前收过带序事件)。 */
@@ -195,7 +216,11 @@ export class ServerConnection {
         this.handlers.onResyncRequired?.("gap");
         return true;
       }
-      try { this.ws?.close(); } catch { /* onclose 调度重连 */ }
+      try {
+        this.ws?.close();
+      } catch {
+        /* onclose 调度重连 */
+      }
       return false;
     }
     this.cursor.lastSeq = seq;
@@ -284,8 +309,11 @@ export class ServerConnection {
         return;
       }
       // RPC 响应:_reqId 关联(file-list/file-content/sync-manifest/sync-file-content)
-      case data.type === "file-list" || data.type === "file-content" ||
-           data.type === "sync-manifest" || data.type === "sync-file-content": {
+      case data.type === "file-list" ||
+        data.type === "file-content" ||
+        data.type === "sync-manifest" ||
+        data.type === "sync-file-content" ||
+        data.type === "workspace-import-result": {
         const resolver = data._reqId && this.resolvers.get(data._reqId);
         if (resolver) {
           resolver(data);
@@ -318,7 +346,11 @@ export class ServerConnection {
           this.shouldConnect = false;
           this.clearReconnect();
           this.handlers.onAuthError("设备未授权或配对已失效,请在设置中重新配对");
-          try { this.ws?.close(); } catch { /* ignore */ }
+          try {
+            this.ws?.close();
+          } catch {
+            /* ignore */
+          }
           return;
         }
         // 其余控制错误作为归一化 error 事件交给上层(字段名适配:出站 error 用 {error})
@@ -342,7 +374,12 @@ export class ServerConnection {
   }
 
   // ── RPC helpers(_reqId 请求-响应 + 超时) ──────────────
-  private request<T>(payload: Record<string, unknown>, key: string, timeoutMs: number, what: string): Promise<T> {
+  private request<T>(
+    payload: Record<string, unknown>,
+    key: string,
+    timeoutMs: number,
+    what: string
+  ): Promise<T> {
     return new Promise((resolve, reject) => {
       if (!this.isOpen) {
         reject(new Error(`WebSocket not connected (${what})`));
@@ -361,7 +398,12 @@ export class ServerConnection {
 
   execTool(toolName: string, args: Record<string, unknown>): Promise<unknown> {
     const callId = `tc_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
-    return this.request({ type: "tool-exec", callId, toolName, args }, callId, 30000, `Tool ${toolName}`);
+    return this.request(
+      { type: "tool-exec", callId, toolName, args },
+      callId,
+      30000,
+      `Tool ${toolName}`
+    );
   }
 
   listFiles(path: string = "."): Promise<any> {
@@ -376,12 +418,41 @@ export class ServerConnection {
 
   syncPull(sinceCommit?: string): Promise<any> {
     const reqId = `sp_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
-    return this.request({ type: "sync-pull", sinceCommit, _reqId: reqId }, reqId, 30000, "Sync pull");
+    return this.request(
+      { type: "sync-pull", sinceCommit, _reqId: reqId },
+      reqId,
+      30000,
+      "Sync pull"
+    );
+  }
+
+  bindLinkedWorkspace(args: {
+    projectId: string;
+    displayName?: string;
+    path: string;
+    allowWeakDuplicate?: boolean;
+  }): Promise<LinkedWorkspaceImportResponse> {
+    const reqId = `wi_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+    return this.request(
+      {
+        type: "workspace-bind-linked",
+        _reqId: reqId,
+        ...args,
+      },
+      reqId,
+      30_000,
+      "Linked workspace import"
+    );
   }
 
   syncFile(commit: string, path: string): Promise<any> {
     const reqId = `sf_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
-    return this.request({ type: "sync-file", commit, path, _reqId: reqId }, reqId, 30000, "Sync file");
+    return this.request(
+      { type: "sync-file", commit, path, _reqId: reqId },
+      reqId,
+      30000,
+      "Sync file"
+    );
   }
 
   // ── 重连(指数退避) ────────────────────────────────────
@@ -395,7 +466,10 @@ export class ServerConnection {
   private scheduleReconnect(): void {
     if (!this.shouldConnect) return;
     this.clearReconnect();
-    const delay = Math.min(RECONNECT_BASE_MS * Math.pow(2, this.reconnectAttempt), RECONNECT_MAX_MS);
+    const delay = Math.min(
+      RECONNECT_BASE_MS * Math.pow(2, this.reconnectAttempt),
+      RECONNECT_MAX_MS
+    );
     this.reconnectAttempt += 1;
     console.log(`[Conn] Reconnecting in ${(delay / 1000).toFixed(1)}s`);
     this.reconnectTimer = setTimeout(() => {

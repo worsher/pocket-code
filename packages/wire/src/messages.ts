@@ -168,6 +168,15 @@ export const SyncFileMessage = z.object({
   _reqId: optStr(),
 });
 
+export const BindLinkedWorkspaceMessage = z.object({
+  type: z.literal("workspace-bind-linked"),
+  projectId: z.string().uuid(),
+  displayName: optStr(256),
+  path: z.string().min(1).max(4096),
+  allowWeakDuplicate: z.boolean().optional(),
+  _reqId: z.string().min(1).max(128),
+});
+
 /** Discriminated union of all valid business messages */
 export const WsMessage = z.discriminatedUnion("type", [
   RegisterMessage,
@@ -185,6 +194,7 @@ export const WsMessage = z.discriminatedUnion("type", [
   GoalControlMessage,
   SyncPullMessage,
   SyncFileMessage,
+  BindLinkedWorkspaceMessage,
 ]);
 
 export type WsMessageType = z.infer<typeof WsMessage>;

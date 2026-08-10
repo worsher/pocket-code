@@ -5,7 +5,11 @@
 
 import { z } from "zod";
 import { AgentEvent } from "./agentEvent.js";
-import { WorkspaceProjectCatalogEntry, WorkspaceSessionScope } from "./workspace.js";
+import {
+  WorkspaceImportSource,
+  WorkspaceProjectCatalogEntry,
+  WorkspaceSessionScope,
+} from "./workspace.js";
 
 export const AuthMsg = z.object({
   type: z.literal("auth"),
@@ -100,6 +104,16 @@ export const ProjectWorkspaceDeletedMsg = z.object({
   error: z.string().optional(),
 });
 
+export const WorkspaceImportResultMsg = z.object({
+  type: z.literal("workspace-import-result"),
+  _reqId: z.string(),
+  status: z.enum(["imported", "confirmation-required", "blocked", "error"]),
+  existingProjectId: z.string().uuid().optional(),
+  project: WorkspaceProjectCatalogEntry.optional(),
+  importSource: WorkspaceImportSource.optional(),
+  error: z.string().optional(),
+});
+
 export const ServerErrorMsg = z.object({
   type: z.literal("error"),
   error: z.string(),
@@ -118,6 +132,7 @@ export const ServerOutbound = z.union([
   SessionsListMsg,
   SessionDeletedMsg,
   ProjectWorkspaceDeletedMsg,
+  WorkspaceImportResultMsg,
   ServerErrorMsg,
   ResyncRequiredMsg,
 ]);

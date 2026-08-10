@@ -6,6 +6,7 @@ import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import { existsSync } from "node:fs";
 import { join } from "node:path";
+import { mkdir } from "node:fs/promises";
 import type { ServerOutboundType } from "@pocket-code/wire";
 import {
   createSnapshot,
@@ -17,7 +18,15 @@ import {
 const exec = promisify(execFile);
 
 /** 工作区不是 git 仓库时,初始化一个(同步需要 git 做快照)。 */
-export async function ensureGitRepo(workspace: string): Promise<void> {
+export async function ensureGitRepo(workspace: string, stateRoot?: string): Promise<void> {
+  if (stateRoot) {
+    const shadowRepo = join(stateRoot, "shadow-snapshot");
+    if (!existsSync(join(shadowRepo, ".git"))) {
+      await mkdir(stateRoot, { recursive: true });
+      await exec("git", ["init", "-q", shadowRepo]);
+    }
+    return;
+  }
   if (!existsSync(join(workspace, ".git"))) {
     await exec("git", ["init", "-q"], { cwd: workspace });
   }
@@ -31,19 +40,26 @@ export async function handleSyncPull(
   workspace: string,
   sinceCommit: string | null,
   send: (msg: ServerOutboundType) => void,
-  reqId?: string
+  reqId?: string,
+  stateRoot?: string
 ): Promise<void> {
-  await ensureGitRepo(workspace);
-  const snap = await createSnapshot(workspace);
+  await ensureGitRepo(workspace, stateRoot);
+  const snap = await createSnapshot(workspace, stateRoot);
   let files: ChangedFile[];
   try {
-    files = await changedFiles(workspace, sinceCommit, snap.commit);
+    files = await changedFiles(workspace, sinceCommit, snap.commit, stateRoot);
   } catch {
     // sinceCommit 不可达 → 回退全量
-    files = await changedFiles(workspace, null, snap.commit);
+    files = await changedFiles(workspace, null, snap.commit, stateRoot);
   }
   // _reqId 回显:relay 模式下 RelayClient 拆信封会丢 requestId,响应须自带 _reqId 供客户端关联。
-  send({ type: "sync-manifest", commit: snap.commit, parent: snap.parent, files, _reqId: reqId } satisfies ServerOutboundType);
+  send({
+    type: "sync-manifest",
+    commit: snap.commit,
+    parent: snap.parent,
+    files,
+    _reqId: reqId,
+  } satisfies ServerOutboundType);
 }
 
 /** 处理 sync-file:返回某快照里某文件的 base64 内容(失败则带 error)。 */
@@ -52,10 +68,11 @@ export async function handleSyncFile(
   commit: string,
   path: string,
   send: (msg: ServerOutboundType) => void,
-  reqId?: string
+  reqId?: string,
+  stateRoot?: string
 ): Promise<void> {
   try {
-    const content = await readSnapshotFile(workspace, commit, path);
+    const content = await readSnapshotFile(workspace, commit, path, stateRoot);
     send({
       type: "sync-file-content",
       path,
@@ -64,6 +81,11 @@ export async function handleSyncFile(
       _reqId: reqId,
     } satisfies ServerOutboundType);
   } catch (err: any) {
-    send({ type: "sync-file-content", path, error: err?.message ?? "read failed", _reqId: reqId } satisfies ServerOutboundType);
+    send({
+      type: "sync-file-content",
+      path,
+      error: err?.message ?? "read failed",
+      _reqId: reqId,
+    } satisfies ServerOutboundType);
   }
 }

@@ -11,8 +11,8 @@ import { dirname, join as joinPath } from "path";
 loadEnv();
 {
   const here = dirname(fileURLToPath(import.meta.url)); // src/ 或 dist/
-  loadEnv({ path: joinPath(here, "..", ".env") });               // 包根
-  loadEnv({ path: joinPath(here, "..", "..", "..", ".env") });   // 仓库根
+  loadEnv({ path: joinPath(here, "..", ".env") }); // 包根
+  loadEnv({ path: joinPath(here, "..", "..", "..", ".env") }); // 仓库根
 }
 import crypto from "crypto";
 import { readFileSync, writeFileSync, mkdirSync } from "fs";
@@ -46,9 +46,7 @@ function hostname(): string {
 }
 
 // Machine ID: persisted per machine so it's stable across restarts
-const POCKET_HOME = resolve(
-  process.env.POCKET_HOME || join(homedir(), ".pocket-code")
-);
+const POCKET_HOME = resolve(process.env.POCKET_HOME || join(homedir(), ".pocket-code"));
 
 function loadOrGenerateMachineId(): string {
   const path = join(POCKET_HOME, "machine-id");
@@ -160,16 +158,19 @@ const deviceHandlers = new Map<string, DeviceHandlerEntry>();
 const HANDLER_TTL_MS = 30 * 60 * 1000; // 30 minutes (matches server session TTL)
 
 // Periodic cleanup of idle handlers
-setInterval(() => {
-  const now = Date.now();
-  for (const [deviceId, entry] of deviceHandlers) {
-    if (now - entry.lastActivity > HANDLER_TTL_MS) {
-      console.log(`[Daemon] Cleaning up idle handler for device: ${deviceId}`);
-      entry.handler.onClose();
-      deviceHandlers.delete(deviceId);
+setInterval(
+  () => {
+    const now = Date.now();
+    for (const [deviceId, entry] of deviceHandlers) {
+      if (now - entry.lastActivity > HANDLER_TTL_MS) {
+        console.log(`[Daemon] Cleaning up idle handler for device: ${deviceId}`);
+        entry.handler.onClose();
+        deviceHandlers.delete(deviceId);
+      }
     }
-  }
-}, 5 * 60 * 1000);
+  },
+  5 * 60 * 1000
+);
 
 // ── Message Handler ───────────────────────────────────
 
@@ -181,12 +182,7 @@ function handleRelayMessage(msg: DaemonInboundType) {
         `[Daemon] Pair request from device: ${msg.deviceName} (code: ${msg.pairingCode})`
       );
 
-      const result = verifyPairingCode(
-        msg.pairingCode,
-        msg.deviceId,
-        msg.deviceName,
-        MACHINE_ID
-      );
+      const result = verifyPairingCode(msg.pairingCode, msg.deviceId, msg.deviceName, MACHINE_ID);
 
       if (result.success) {
         connection.send({
@@ -252,6 +248,7 @@ function handleRelayMessage(msg: DaemonInboundType) {
 
         newEntry.handler = createMessageHandler(sendFn, {
           replicaKind: "dev-binding",
+          allowLinkedWorkspaceBinding: true,
           preAuth: {
             userId: `relay_${device.deviceId}`,
             deviceId: device.deviceId,

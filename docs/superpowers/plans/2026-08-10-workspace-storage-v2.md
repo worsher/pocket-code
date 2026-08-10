@@ -47,11 +47,11 @@
 
 ## 阶段 5：导入与绑定
 
-- [ ] 实现通用 import pipeline：probe → identity → duplicate check → stage → verify → catalog commit。
-- [ ] 移动端目录/归档导入实现为 `copy`，处理权限中断和空间不足。
-- [ ] daemon 实现 `linked` 绑定；state/shadow Git 存在管理目录而非用户仓库。
-- [ ] Git URL 导入实现为 `git`，规范化 remote 并记录来源。
-- [ ] UI 区分 strong duplicate、weak duplicate、权限丢失和独立副本。
+- [x] 实现通用 import pipeline：probe → identity → duplicate check → stage → verify → catalog commit。
+- [x] 移动端目录/ZIP 归档导入实现为 `copy`，处理权限中断、空间不足、路径穿越和归档碰撞。
+- [x] daemon 实现 `linked` 绑定；state/shadow Git 存在管理目录而非用户仓库。
+- [x] Git HTTPS URL 导入实现为 `git`，规范化 remote、清除持久化凭据并记录来源。
+- [x] UI 区分 strong duplicate、weak duplicate、权限丢失、独立副本、linked 与 Git 回写语义。
 
 ## 阶段 6：事务同步与 writer handoff
 

@@ -11,6 +11,9 @@ import { Paths, Directory } from "expo-file-system";
 import { createFsAdapter } from "./expoFsAdapter";
 import type { AppSettings } from "../store/settings";
 import { normalizeWorkspaceRelativePath } from "@pocket-code/workspace-core";
+import { sanitizeGitRemoteUrl } from "./gitUrl";
+
+export { sanitizeGitRemoteUrl } from "./gitUrl";
 
 // ── Workspace helpers ──────────────────────────────────
 
@@ -50,13 +53,23 @@ function injectCredentialsIntoUrl(url: string, settings: AppSettings): string {
     const hostname = hostPart.replace(/^[^@]*@/, "");
 
     console.log("[Git] Looking for credentials for host:", hostname);
-    console.log("[Git] Available credentials:", settings.gitCredentials?.map((c) => `${c.platform}/${c.host} (token: ${c.token ? "yes" : "no"})`));
+    console.log(
+      "[Git] Available credentials:",
+      settings.gitCredentials?.map(
+        (c) => `${c.platform}/${c.host} (token: ${c.token ? "yes" : "no"})`
+      )
+    );
 
     const cred = settings.gitCredentials?.find((c) => c.host === hostname);
     if (cred?.token) {
       const username = encodeURIComponent(cred.username || "oauth2");
       const password = encodeURIComponent(cred.token);
-      console.log("[Git] Credentials injected for:", cred.platform, "username:", cred.username || "oauth2");
+      console.log(
+        "[Git] Credentials injected for:",
+        cred.platform,
+        "username:",
+        cred.username || "oauth2"
+      );
       return `${protocol}${username}:${password}@${hostname}${pathPart}`;
     }
 
@@ -86,13 +99,58 @@ function createOnAuth(settings: AppSettings) {
   };
 }
 
+export async function probeGitRemote(
+  url: string,
+  settings: AppSettings
+): Promise<{ url: string; head: string }> {
+  const safeUrl = sanitizeGitRemoteUrl(url);
+  if (!/^https?:\/\//i.test(safeUrl)) {
+    throw new Error("Mobile Git import requires an HTTP(S) remote URL");
+  }
+  const refs = await git.listServerRefs({
+    http,
+    url: injectCredentialsIntoUrl(safeUrl, settings),
+    prefix: "HEAD",
+    symrefs: true,
+    onAuth: createOnAuth(settings),
+  });
+  const head = refs.find((ref) => ref.ref === "HEAD")?.oid;
+  if (!head) throw new Error("Git remote does not advertise a default HEAD");
+  return { url: safeUrl, head };
+}
+
+export async function cloneGitIntoWorkspaceRoot(
+  url: string,
+  settings: AppSettings,
+  workspaceRoot: string
+): Promise<string> {
+  const safeUrl = sanitizeGitRemoteUrl(url);
+  const { fs } = getFsAndDir(workspaceRoot);
+  await git.clone({
+    fs,
+    http,
+    dir: "/",
+    url: injectCredentialsIntoUrl(safeUrl, settings),
+    singleBranch: true,
+    depth: 1,
+    onAuth: createOnAuth(settings),
+  });
+  await git.setConfig({ fs, dir: "/", path: "remote.origin.url", value: safeUrl });
+  return git.resolveRef({ fs, dir: "/", ref: "HEAD" });
+}
+
+export async function resolveGitWorkspaceHead(workspaceRoot: string): Promise<string> {
+  const { fs } = getFsAndDir(workspaceRoot);
+  return git.resolveRef({ fs, dir: "/", ref: "HEAD" });
+}
+
 // ── Git operations ─────────────────────────────────────
 
 export async function gitClone(
   url: string,
   targetDir: string | undefined,
   settings: AppSettings,
-  workspaceRoot?: string,
+  workspaceRoot?: string
 ): Promise<{ success: boolean; error?: string }> {
   try {
     // Derive directory name from URL if not specified
@@ -131,7 +189,7 @@ export async function gitClone(
 
 export async function gitStatus(
   path?: string,
-  workspaceRoot?: string,
+  workspaceRoot?: string
 ): Promise<{
   success: boolean;
   files?: Array<{ filepath: string; status: string }>;
@@ -147,13 +205,15 @@ export async function gitStatus(
         return !(head === 1 && workdir === 1 && stage === 1);
       })
       .map(([filepath, head, workdir, stage]) => {
-        let status = "unknown";
+        let status: string;
         if (head === 0 && workdir === 2 && stage === 0) status = "new, untracked";
         else if (head === 0 && workdir === 2 && stage === 2) status = "added, staged";
-        else if (head === 0 && workdir === 2 && stage === 3) status = "added, staged, with unstaged changes";
+        else if (head === 0 && workdir === 2 && stage === 3)
+          status = "added, staged, with unstaged changes";
         else if (head === 1 && workdir === 2 && stage === 1) status = "modified, unstaged";
         else if (head === 1 && workdir === 2 && stage === 2) status = "modified, staged";
-        else if (head === 1 && workdir === 2 && stage === 3) status = "modified, staged, with unstaged changes";
+        else if (head === 1 && workdir === 2 && stage === 3)
+          status = "modified, staged, with unstaged changes";
         else if (head === 1 && workdir === 0 && stage === 1) status = "deleted, unstaged";
         else if (head === 1 && workdir === 0 && stage === 0) status = "deleted, staged";
         else status = `H:${head} W:${workdir} S:${stage}`;
@@ -169,7 +229,7 @@ export async function gitStatus(
 export async function gitAdd(
   filepath: string,
   path?: string,
-  workspaceRoot?: string,
+  workspaceRoot?: string
 ): Promise<{ success: boolean; error?: string }> {
   try {
     const { fs, dir } = getFsAndDir(workspaceRoot, path);
@@ -198,7 +258,7 @@ export async function gitAdd(
 export async function gitCommit(
   message: string,
   path?: string,
-  workspaceRoot?: string,
+  workspaceRoot?: string
 ): Promise<{ success: boolean; sha?: string; error?: string }> {
   try {
     const { fs, dir } = getFsAndDir(workspaceRoot, path);
@@ -224,7 +284,7 @@ export async function gitPush(
   path?: string,
   remote?: string,
   branch?: string,
-  workspaceRoot?: string,
+  workspaceRoot?: string
 ): Promise<{ success: boolean; error?: string }> {
   try {
     const { fs, dir } = getFsAndDir(workspaceRoot, path);
@@ -257,7 +317,7 @@ export async function gitPull(
   path?: string,
   remote?: string,
   branch?: string,
-  workspaceRoot?: string,
+  workspaceRoot?: string
 ): Promise<{ success: boolean; error?: string }> {
   try {
     const { fs, dir } = getFsAndDir(workspaceRoot, path);
@@ -293,7 +353,7 @@ export async function gitPull(
 export async function gitLog(
   path?: string,
   depth?: number,
-  workspaceRoot?: string,
+  workspaceRoot?: string
 ): Promise<{
   success: boolean;
   commits?: Array<{
@@ -324,7 +384,7 @@ export async function gitLog(
 export async function gitBranch(
   name?: string,
   path?: string,
-  workspaceRoot?: string,
+  workspaceRoot?: string
 ): Promise<{
   success: boolean;
   branches?: string[];
@@ -352,7 +412,7 @@ export async function gitBranch(
 export async function gitCheckout(
   ref: string,
   path?: string,
-  workspaceRoot?: string,
+  workspaceRoot?: string
 ): Promise<{ success: boolean; error?: string }> {
   try {
     const { fs, dir } = getFsAndDir(workspaceRoot, path);

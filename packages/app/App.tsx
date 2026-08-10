@@ -15,10 +15,7 @@ import {
   type AppStateStatus,
 } from "react-native";
 import { StatusBar } from "expo-status-bar";
-import {
-  SafeAreaProvider,
-  useSafeAreaInsets,
-} from "react-native-safe-area-context";
+import { SafeAreaProvider, useSafeAreaInsets } from "react-native-safe-area-context";
 import { useAgent, type Message, AVAILABLE_MODELS } from "./src/hooks/useAgent";
 import ChatMessage from "./src/components/ChatMessage";
 import ChatInput from "./src/components/ChatInput";
@@ -63,11 +60,11 @@ function MainScreen() {
   useEffect(() => {
     const showSub = Keyboard.addListener(
       Platform.OS === "ios" ? "keyboardWillShow" : "keyboardDidShow",
-      () => setKeyboardVisible(true),
+      () => setKeyboardVisible(true)
     );
     const hideSub = Keyboard.addListener(
       Platform.OS === "ios" ? "keyboardWillHide" : "keyboardDidHide",
-      () => setKeyboardVisible(false),
+      () => setKeyboardVisible(false)
     );
     return () => {
       showSub.remove();
@@ -85,13 +82,10 @@ function MainScreen() {
     requestNotificationPermissions();
   }, []);
 
-  const {
-    currentProject,
-    currentWorkspaceHandle,
-    currentWorkspaceRoot,
-    registerRemoteReplica,
-  } = useProject();
-  const { pushFileChange, pendingFilePath, pendingPreviewUrl, clearPendingPreview } = useWorkspace();
+  const { currentProject, currentWorkspaceHandle, currentWorkspaceRoot, registerRemoteReplica } =
+    useProject();
+  const { pushFileChange, pendingFilePath, pendingPreviewUrl, clearPendingPreview } =
+    useWorkspace();
 
   // Auto-switch to Files tab when navigateToFile is called from chat
   useEffect(() => {
@@ -114,9 +108,12 @@ function MainScreen() {
     await saveSettings(newSettings);
   }, []);
 
-  const handleFileChanged = useCallback((path: string, action: "created" | "modified" | "deleted") => {
-    pushFileChange({ path, action });
-  }, [pushFileChange]);
+  const handleFileChanged = useCallback(
+    (path: string, action: "created" | "modified" | "deleted") => {
+      pushFileChange({ path, action });
+    },
+    [pushFileChange]
+  );
 
   const {
     messages,
@@ -144,6 +141,7 @@ function MainScreen() {
     requestFileContent,
     requestSyncPull,
     requestSyncFile,
+    bindLinkedWorkspace,
     deleteProjectWorkspace,
   } = useAgent({
     settings,
@@ -196,10 +194,7 @@ function MainScreen() {
   useEffect(() => {
     if (!needsAutoConnect) return;
     const subscription = AppState.addEventListener("change", (nextState) => {
-      if (
-        appStateRef.current.match(/inactive|background/) &&
-        nextState === "active"
-      ) {
+      if (appStateRef.current.match(/inactive|background/) && nextState === "active") {
         if (!isConnected) {
           connect();
         }
@@ -283,25 +278,19 @@ function MainScreen() {
   }
 
   return (
-    <View
-      style={[
-        styles.container,
-        { paddingTop: insets.top, paddingBottom: insets.bottom },
-      ]}
-    >
+    <View style={[styles.container, { paddingTop: insets.top, paddingBottom: insets.bottom }]}>
       <StatusBar style="light" />
 
       {/* Header */}
       <View style={styles.header}>
         <View style={styles.headerLeft}>
           {/* Hamburger menu */}
-          <TouchableOpacity
-            style={styles.menuBtn}
-            onPress={() => setShowSessionDrawer(true)}
-          >
+          <TouchableOpacity style={styles.menuBtn} onPress={() => setShowSessionDrawer(true)}>
             <Text style={styles.menuIcon}>☰</Text>
           </TouchableOpacity>
-          <Text style={styles.title} numberOfLines={1}>Pocket Code</Text>
+          <Text style={styles.title} numberOfLines={1}>
+            Pocket Code
+          </Text>
           {isGeek && (
             <View style={styles.geekBadge}>
               <Text style={styles.geekBadgeText}>⚡ 极客</Text>
@@ -310,50 +299,30 @@ function MainScreen() {
         </View>
         <View style={styles.headerRight}>
           {/* Model Selector */}
-          <TouchableOpacity
-            style={styles.modelBadge}
-            onPress={() => setShowModelPicker(true)}
-          >
+          <TouchableOpacity style={styles.modelBadge} onPress={() => setShowModelPicker(true)}>
             <Text style={styles.modelBadgeText} numberOfLines={1}>
               {selectedModel?.label ?? currentModel}
             </Text>
           </TouchableOpacity>
           {/* Search Button */}
-          <TouchableOpacity
-            style={styles.settingsBtn}
-            onPress={() => setShowSearch(true)}
-          >
+          <TouchableOpacity style={styles.settingsBtn} onPress={() => setShowSearch(true)}>
             <Text style={styles.settingsIcon}>🔍</Text>
           </TouchableOpacity>
           {/* File Explorer Button */}
-          <TouchableOpacity
-            style={styles.settingsBtn}
-            onPress={() => setShowFileExplorer(true)}
-          >
+          <TouchableOpacity style={styles.settingsBtn} onPress={() => setShowFileExplorer(true)}>
             <Text style={styles.settingsIcon}>📁</Text>
           </TouchableOpacity>
           {/* Settings Button */}
-          <TouchableOpacity
-            style={styles.settingsBtn}
-            onPress={() => setShowSettings(true)}
-          >
+          <TouchableOpacity style={styles.settingsBtn} onPress={() => setShowSettings(true)}>
             <Text style={styles.settingsIcon}>⚙️</Text>
           </TouchableOpacity>
           {/* Connection Status — hide in geek+local mode (no WS needed) */}
           {needsAutoConnect && (
             <TouchableOpacity
-              style={[
-                styles.statusBadge,
-                isConnected ? styles.connected : styles.disconnected,
-              ]}
+              style={[styles.statusBadge, isConnected ? styles.connected : styles.disconnected]}
               onPress={isConnected ? disconnect : connect}
             >
-              <View
-                style={[
-                  styles.dot,
-                  isConnected ? styles.dotGreen : styles.dotRed,
-                ]}
-              />
+              <View style={[styles.dot, isConnected ? styles.dotGreen : styles.dotRed]} />
             </TouchableOpacity>
           )}
         </View>
@@ -371,13 +340,9 @@ function MainScreen() {
           {messages.length === 0 ? (
             <View style={styles.emptyState}>
               <Text style={styles.emptyTitle}>Pocket Code</Text>
-              <Text style={styles.emptySubtitle}>
-                Your AI coding agent on mobile
-              </Text>
+              <Text style={styles.emptySubtitle}>Your AI coding agent on mobile</Text>
               <Text style={styles.emptyHint}>
-                {isGeek
-                  ? `极客模式已启用 ⚡\n直接调用 AI API`
-                  : `云端模式 ☁️\n通过 Server 中转`}
+                {isGeek ? `极客模式已启用 ⚡\n直接调用 AI API` : `云端模式 ☁️\n通过 Server 中转`}
               </Text>
               <Text style={[styles.emptyHint, { marginTop: 16 }]}>
                 Try: "Create a simple Express server" {"\n"}
@@ -399,11 +364,20 @@ function MainScreen() {
           {/* Goal 卡片(P16):状态/进度/控制 */}
           {goalState && (
             <View style={styles.goalCard}>
-              <View style={[styles.goalDot,
-                goalState.status === "active" ? styles.goalDotActive :
-                goalState.status === "blocked" ? styles.goalDotBlocked : styles.goalDotPaused]} />
+              <View
+                style={[
+                  styles.goalDot,
+                  goalState.status === "active"
+                    ? styles.goalDotActive
+                    : goalState.status === "blocked"
+                      ? styles.goalDotBlocked
+                      : styles.goalDotPaused,
+                ]}
+              />
               <View style={styles.goalBody}>
-                <Text style={styles.goalText} numberOfLines={1}>{goalState.goal ?? "目标"}</Text>
+                <Text style={styles.goalText} numberOfLines={1}>
+                  {goalState.goal ?? "目标"}
+                </Text>
                 <Text style={styles.goalMeta}>
                   第 {goalState.stats.turns}/{goalState.maxTurns ?? "?"} 轮
                   {goalState.stopReason ? ` · ${goalState.stopReason}` : ""}
@@ -449,10 +423,7 @@ function MainScreen() {
           )}
 
           {/* Quick Actions */}
-          <QuickActions
-            onSend={sendMessage}
-            disabled={isStreaming || (!isGeek && !isConnected)}
-          />
+          <QuickActions onSend={sendMessage} disabled={isStreaming || (!isGeek && !isConnected)} />
 
           {/* Input */}
           <ChatInput
@@ -477,15 +448,22 @@ function MainScreen() {
         {/* ── Files Tab ── */}
         <View style={[styles.flex1, activeTab !== "files" && styles.hidden]}>
           <FilesTab
-            requestFileList={isGeek && settings.workspaceMode === "local"
-              ? (path: string) => listLocalFiles(path, localWorkspaceRoot)
-              : requestFileList}
-            requestFileContent={isGeek && settings.workspaceMode === "local"
-              ? (path: string) => readLocalFile(path, localWorkspaceRoot)
-              : requestFileContent}
-            writeFile={isGeek && settings.workspaceMode === "local"
-              ? (path: string, content: string) => writeLocalFile(path, content, localWorkspaceRoot)
-              : undefined}
+            requestFileList={
+              isGeek && settings.workspaceMode === "local"
+                ? (path: string) => listLocalFiles(path, localWorkspaceRoot)
+                : requestFileList
+            }
+            requestFileContent={
+              isGeek && settings.workspaceMode === "local"
+                ? (path: string) => readLocalFile(path, localWorkspaceRoot)
+                : requestFileContent
+            }
+            writeFile={
+              isGeek && settings.workspaceMode === "local"
+                ? (path: string, content: string) =>
+                    writeLocalFile(path, content, localWorkspaceRoot)
+                : undefined
+            }
             requestSyncPull={requestSyncPull}
             requestSyncFile={requestSyncFile}
             isStreaming={isStreaming}
@@ -525,24 +503,27 @@ function MainScreen() {
           setTimeout(() => setShowPromptEditor(true), 250);
         }}
         onDeleteWorkspace={deleteProjectWorkspace}
+        settings={settings}
+        onBindLinkedWorkspace={bindLinkedWorkspace}
       />
 
       {/* Project Prompt Editor */}
-      <ProjectPromptEditor
-        visible={showPromptEditor}
-        onClose={() => setShowPromptEditor(false)}
-      />
+      <ProjectPromptEditor visible={showPromptEditor} onClose={() => setShowPromptEditor(false)} />
 
       {/* File Explorer */}
       <FileExplorer
         visible={showFileExplorer}
         onClose={() => setShowFileExplorer(false)}
-        requestFileList={isGeek && settings.workspaceMode === "local"
-          ? (path: string) => listLocalFiles(path, localWorkspaceRoot)
-          : requestFileList}
-        requestFileContent={isGeek && settings.workspaceMode === "local"
-          ? (path: string) => readLocalFile(path, localWorkspaceRoot)
-          : requestFileContent}
+        requestFileList={
+          isGeek && settings.workspaceMode === "local"
+            ? (path: string) => listLocalFiles(path, localWorkspaceRoot)
+            : requestFileList
+        }
+        requestFileContent={
+          isGeek && settings.workspaceMode === "local"
+            ? (path: string) => readLocalFile(path, localWorkspaceRoot)
+            : requestFileContent
+        }
       />
 
       {/* Model Picker Modal */}
@@ -562,10 +543,7 @@ function MainScreen() {
             {AVAILABLE_MODELS.map((m) => (
               <TouchableOpacity
                 key={m.key}
-                style={[
-                  styles.modelOption,
-                  m.key === currentModel && styles.modelOptionActive,
-                ]}
+                style={[styles.modelOption, m.key === currentModel && styles.modelOptionActive]}
                 onPress={() => {
                   setCurrentModel(m.key);
                   setShowModelPicker(false);
@@ -582,9 +560,7 @@ function MainScreen() {
                   </Text>
                   <Text style={styles.modelOptionDesc}>{m.description}</Text>
                 </View>
-                {m.key === currentModel && (
-                  <Text style={styles.checkmark}>✓</Text>
-                )}
+                {m.key === currentModel && <Text style={styles.checkmark}>✓</Text>}
               </TouchableOpacity>
             ))}
           </View>
@@ -611,17 +587,16 @@ function MainScreen() {
         <View style={styles.tabBar}>
           {tabsForPlatform(Platform.OS).map((tab) => {
             const icons = { chat: "💬", terminal: "💻", files: "📁", preview: "🌐" };
-            const labels = { chat: "Chat", terminal: "Terminal", files: "Files", preview: "Preview" };
+            const labels = {
+              chat: "Chat",
+              terminal: "Terminal",
+              files: "Files",
+              preview: "Preview",
+            };
             const active = activeTab === tab;
             return (
-              <TouchableOpacity
-                key={tab}
-                style={styles.tabItem}
-                onPress={() => setActiveTab(tab)}
-              >
-                <Text style={[styles.tabIcon, active && styles.tabIconActive]}>
-                  {icons[tab]}
-                </Text>
+              <TouchableOpacity key={tab} style={styles.tabItem} onPress={() => setActiveTab(tab)}>
+                <Text style={[styles.tabIcon, active && styles.tabIconActive]}>{icons[tab]}</Text>
                 <Text style={[styles.tabLabel, active && styles.tabLabelActive]}>
                   {labels[tab]}
                 </Text>
@@ -633,7 +608,6 @@ function MainScreen() {
     </View>
   );
 }
-
 
 export default function App() {
   return (

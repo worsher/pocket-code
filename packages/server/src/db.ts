@@ -10,6 +10,9 @@ import {
   parseProjectId,
   parseReplicaId,
   parseStorageKey,
+  type ImportMode,
+  type ImportSourceKind,
+  type SourceIdentity,
   type UuidFactory,
 } from "@pocket-code/workspace-core";
 import { atomicWriteFileSync } from "./atomicFile.js";
@@ -53,7 +56,8 @@ export async function initDb(): Promise<void> {
       } catch (backupError) {
         throw new AggregateError(
           [primaryError, backupError],
-          "Primary and backup Pocket Code databases are both unreadable"
+          "Primary and backup Pocket Code databases are both unreadable",
+          { cause: backupError }
         );
       }
     }
@@ -102,6 +106,8 @@ export async function initDb(): Promise<void> {
       replica_id TEXT NOT NULL,
       storage_key TEXT NOT NULL UNIQUE,
       display_name TEXT NOT NULL DEFAULT '',
+      worktree_path TEXT,
+      import_source_json TEXT,
       generation INTEGER NOT NULL DEFAULT 1,
       created_at INTEGER NOT NULL,
       updated_at INTEGER NOT NULL,
@@ -111,6 +117,16 @@ export async function initDb(): Promise<void> {
   db.run(`CREATE INDEX IF NOT EXISTS idx_workspace_projects_user ON workspace_projects(user_id);`);
   try {
     db.run(`ALTER TABLE workspace_projects ADD COLUMN display_name TEXT NOT NULL DEFAULT ''`);
+  } catch {
+    // Column already exists.
+  }
+  try {
+    db.run(`ALTER TABLE workspace_projects ADD COLUMN worktree_path TEXT`);
+  } catch {
+    // Column already exists.
+  }
+  try {
+    db.run(`ALTER TABLE workspace_projects ADD COLUMN import_source_json TEXT`);
   } catch {
     // Column already exists.
   }
@@ -195,9 +211,22 @@ export interface WorkspaceProjectRecord {
   replicaId: string;
   storageKey: string;
   displayName: string;
+  worktreePath?: string;
+  importSource?: WorkspaceImportSourceRecord;
   generation: number;
   createdAt: number;
   updatedAt: number;
+}
+
+export interface WorkspaceImportSourceRecord {
+  mode: ImportMode;
+  sourceKind: ImportSourceKind;
+  sourceDeviceId: string;
+  canonicalLocator?: string;
+  identity: SourceIdentity;
+  importedSnapshot: string;
+  importedAt: number;
+  writeBackPolicy: "explicit" | "linked" | "git";
 }
 
 // ── Public API ──────────────────────────────────────────
@@ -323,12 +352,67 @@ export function cleanupOldSessions(maxAgeDays: number = 7): number {
 
 // ── Workspace Storage v2 catalog ───────────────────────
 
+function parseWorkspaceImportSource(value: unknown): WorkspaceImportSourceRecord | undefined {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return undefined;
+  const source = value as Partial<WorkspaceImportSourceRecord>;
+  const identity = source.identity;
+  if (
+    (source.mode !== "copy" && source.mode !== "linked" && source.mode !== "git") ||
+    (source.sourceKind !== "directory" &&
+      source.sourceKind !== "archive" &&
+      source.sourceKind !== "git") ||
+    typeof source.sourceDeviceId !== "string" ||
+    !source.sourceDeviceId ||
+    (source.canonicalLocator !== undefined && typeof source.canonicalLocator !== "string") ||
+    !identity ||
+    identity.importMode !== source.mode ||
+    identity.sourceKind !== source.sourceKind ||
+    (identity.strongKey !== undefined && typeof identity.strongKey !== "string") ||
+    !Array.isArray(identity.weakKeys) ||
+    !identity.weakKeys.every((key) => typeof key === "string") ||
+    typeof source.importedSnapshot !== "string" ||
+    !source.importedSnapshot ||
+    typeof source.importedAt !== "number" ||
+    !Number.isFinite(source.importedAt) ||
+    (source.writeBackPolicy !== "explicit" &&
+      source.writeBackPolicy !== "linked" &&
+      source.writeBackPolicy !== "git")
+  ) {
+    return undefined;
+  }
+  return source as WorkspaceImportSourceRecord;
+}
+
+function workspaceProjectFromRow(row: Record<string, unknown>): WorkspaceProjectRecord {
+  let importSource: WorkspaceImportSourceRecord | undefined;
+  if (typeof row.import_source_json === "string" && row.import_source_json) {
+    try {
+      importSource = parseWorkspaceImportSource(JSON.parse(row.import_source_json));
+    } catch {
+      // Corrupt optional metadata must not make the project catalog unreadable.
+    }
+  }
+  return {
+    userId: row.user_id as string,
+    projectId: parseProjectId(row.project_id as string),
+    replicaId: parseReplicaId(row.replica_id as string),
+    storageKey: parseStorageKey(row.storage_key as string),
+    displayName: (row.display_name as string) || "",
+    worktreePath: (row.worktree_path as string) || undefined,
+    importSource,
+    generation: row.generation as number,
+    createdAt: row.created_at as number,
+    updatedAt: row.updated_at as number,
+  };
+}
+
 export function getWorkspaceProject(
   userId: string,
   projectId: string
 ): WorkspaceProjectRecord | null {
   const stmt = db.prepare(
-    `SELECT user_id, project_id, replica_id, storage_key, display_name, generation, created_at, updated_at
+    `SELECT user_id, project_id, replica_id, storage_key, display_name, worktree_path,
+            import_source_json, generation, created_at, updated_at
      FROM workspace_projects
      WHERE user_id = ? AND project_id = ?`
   );
@@ -339,39 +423,21 @@ export function getWorkspaceProject(
   }
   const row = stmt.getAsObject();
   stmt.free();
-  return {
-    userId: row.user_id as string,
-    projectId: row.project_id as string,
-    replicaId: parseReplicaId(row.replica_id as string),
-    storageKey: parseStorageKey(row.storage_key as string),
-    displayName: (row.display_name as string) || "",
-    generation: row.generation as number,
-    createdAt: row.created_at as number,
-    updatedAt: row.updated_at as number,
-  };
+  return workspaceProjectFromRow(row);
 }
 
 export function listWorkspaceProjects(userId: string): WorkspaceProjectRecord[] {
   const stmt = db.prepare(
-    `SELECT user_id, project_id, replica_id, storage_key, display_name, generation, created_at, updated_at
+    `SELECT user_id, project_id, replica_id, storage_key, display_name, worktree_path,
+            import_source_json, generation, created_at, updated_at
      FROM workspace_projects
      WHERE user_id = ?
-     ORDER BY created_at ASC`,
+     ORDER BY created_at ASC`
   );
   stmt.bind([userId]);
   const records: WorkspaceProjectRecord[] = [];
   while (stmt.step()) {
-    const row = stmt.getAsObject();
-    records.push({
-      userId: row.user_id as string,
-      projectId: parseProjectId(row.project_id as string),
-      replicaId: parseReplicaId(row.replica_id as string),
-      storageKey: parseStorageKey(row.storage_key as string),
-      displayName: (row.display_name as string) || "",
-      generation: row.generation as number,
-      createdAt: row.created_at as number,
-      updatedAt: row.updated_at as number,
-    });
+    records.push(workspaceProjectFromRow(stmt.getAsObject()));
   }
   stmt.free();
   return records;
@@ -380,7 +446,7 @@ export function listWorkspaceProjects(userId: string): WorkspaceProjectRecord[] 
 export function updateWorkspaceProjectDisplayName(
   userId: string,
   projectId: string,
-  displayName: string,
+  displayName: string
 ): void {
   const normalized = displayName.trim().slice(0, 256);
   if (!normalized) return;
@@ -388,7 +454,7 @@ export function updateWorkspaceProjectDisplayName(
     `UPDATE workspace_projects
      SET display_name = ?, updated_at = ?
      WHERE user_id = ? AND project_id = ? AND display_name <> ?`,
-    [normalized, Date.now(), userId, parseProjectId(projectId), normalized],
+    [normalized, Date.now(), userId, parseProjectId(projectId), normalized]
   );
   if (db.getRowsModified() > 0) persist();
 }
@@ -419,9 +485,62 @@ export function ensureWorkspaceProject(
   return created;
 }
 
-export function getWorkspaceAuthorityId(
+export function bindLinkedWorkspaceProject(
+  args: {
+    userId: string;
+    projectId: string;
+    displayName: string;
+    worktreePath: string;
+    importSource: WorkspaceImportSourceRecord;
+  },
   uuidFactory: UuidFactory = randomUUID
-): string {
+): WorkspaceProjectRecord {
+  if (!args.userId) throw new Error("User ID is required for a linked workspace");
+  const projectId = parseProjectId(args.projectId);
+  if (getWorkspaceProject(args.userId, projectId)) {
+    throw new Error("Project already exists in this workspace catalog");
+  }
+  const importSource = parseWorkspaceImportSource(args.importSource);
+  if (!importSource || importSource.mode !== "linked") {
+    throw new Error("Invalid linked workspace source metadata");
+  }
+  const now = Date.now();
+  const replicaId = createReplicaId(uuidFactory);
+  const storageKey = createStorageKey(uuidFactory);
+  db.run(
+    `INSERT INTO workspace_projects
+       (user_id, project_id, replica_id, storage_key, display_name, worktree_path,
+        import_source_json, generation, created_at, updated_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, 1, ?, ?)`,
+    [
+      args.userId,
+      projectId,
+      replicaId,
+      storageKey,
+      args.displayName.trim().slice(0, 256),
+      args.worktreePath,
+      JSON.stringify(importSource),
+      now,
+      now,
+    ]
+  );
+  persist();
+  const created = getWorkspaceProject(args.userId, projectId);
+  if (!created) throw new Error("Failed to bind linked workspace project");
+  return created;
+}
+
+export function deleteWorkspaceProject(userId: string, projectId: string): boolean {
+  db.run("DELETE FROM workspace_projects WHERE user_id = ? AND project_id = ?", [
+    userId,
+    parseProjectId(projectId),
+  ]);
+  const changed = db.getRowsModified() > 0;
+  if (changed) persist();
+  return changed;
+}
+
+export function getWorkspaceAuthorityId(uuidFactory: UuidFactory = randomUUID): string {
   const stmt = db.prepare("SELECT value FROM workspace_meta WHERE key = 'authority_id'");
   let existing: string | null = null;
   if (stmt.step()) existing = stmt.getAsObject().value as string;

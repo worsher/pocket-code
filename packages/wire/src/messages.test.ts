@@ -27,14 +27,19 @@ describe("wire — WsMessage validation", () => {
 
   it("goal-create / goal-control round-trip (P16)", () => {
     const create = WsMessage.safeParse({
-      type: "goal-create", content: "清零 lint 错误", acceptance: "pnpm lint 通过",
-      replace: null, maxTurns: 30,
+      type: "goal-create",
+      content: "清零 lint 错误",
+      acceptance: "pnpm lint 通过",
+      replace: null,
+      maxTurns: 30,
     });
     expect(create.success).toBe(true);
     expect(create.success && (create.data as any).replace).toBeUndefined();
     expect(create.success && (create.data as any).maxTurns).toBe(30);
     expect(WsMessage.safeParse({ type: "goal-create", content: "" }).success).toBe(false);
-    expect(WsMessage.safeParse({ type: "goal-create", content: "x", maxTurns: 0 }).success).toBe(false);
+    expect(WsMessage.safeParse({ type: "goal-create", content: "x", maxTurns: 0 }).success).toBe(
+      false
+    );
 
     expect(WsMessage.safeParse({ type: "goal-control", action: "pause" }).success).toBe(true);
     expect(WsMessage.safeParse({ type: "goal-control", action: "resume" }).success).toBe(true);
@@ -146,5 +151,24 @@ describe("wire — WsMessage validation", () => {
   it("should reject sync-file without commit/path", () => {
     expect(WsMessage.safeParse({ type: "sync-file", path: "a" }).success).toBe(false);
     expect(WsMessage.safeParse({ type: "sync-file", commit: "x" }).success).toBe(false);
+  });
+
+  it("validates linked workspace binding requests", () => {
+    expect(
+      WsMessage.safeParse({
+        type: "workspace-bind-linked",
+        _reqId: "req-1",
+        projectId: "10ed836e-ae48-4d67-9e26-a74cbf55a52e",
+        path: "/Users/example/code/project",
+      }).success
+    ).toBe(true);
+    expect(
+      WsMessage.safeParse({
+        type: "workspace-bind-linked",
+        _reqId: "req-1",
+        projectId: "not-a-uuid",
+        path: "/tmp/project",
+      }).success
+    ).toBe(false);
   });
 });

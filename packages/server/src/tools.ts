@@ -1,6 +1,7 @@
 import { homedir } from "os";
 import { isAbsolute, join, relative, resolve } from "path";
 import { pathToFileURL } from "url";
+import { realpathSync, statSync } from "fs";
 import {
   getManagedWorkspaceRelativeRoots,
   isUuid,
@@ -58,9 +59,16 @@ export function getWorkspaceHandle(request: V2WorkspaceRequest): WorkspaceHandle
   const dataRoot =
     process.env.POCKET_CODE_DATA_ROOT || resolve(join(homedir(), ".pocket-code", "v2"));
   const roots = getManagedWorkspaceRelativeRoots(catalogEntry.storageKey);
-  const worktreeRoot = assertContained(dataRoot, join(dataRoot, roots.worktreeRoot));
   const stateRoot = assertContained(dataRoot, join(dataRoot, roots.stateRoot));
   const cacheRoot = assertContained(dataRoot, join(dataRoot, roots.cacheRoot));
+  const managedWorktreeRoot = assertContained(dataRoot, join(dataRoot, roots.worktreeRoot));
+  let worktreeRoot = managedWorktreeRoot;
+  if (catalogEntry.worktreePath) {
+    worktreeRoot = realpathSync(catalogEntry.worktreePath);
+    if (!statSync(worktreeRoot).isDirectory()) {
+      throw new Error("Linked workspace path is not a directory");
+    }
+  }
 
   return {
     projectId,

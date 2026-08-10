@@ -20,10 +20,7 @@ import {
   dequeueMessage,
   rebindProvisionalQueue,
 } from "../services/offlineQueue";
-import {
-  getWorkspaceConnectionKey,
-  usesRemoteWorkspace,
-} from "../services/workspaceConnection";
+import { getWorkspaceConnectionKey, usesRemoteWorkspace } from "../services/workspaceConnection";
 import type { RemoteReplicaCatalogEntry } from "../store/projectCatalog";
 import { sendLocalNotification } from "../services/notifications";
 import {
@@ -43,9 +40,16 @@ import type {
 } from "@pocket-code/client-core";
 import { createRnModelClient } from "../services/rnModelClient";
 import { createDeviceBackend } from "../services/deviceBackend";
-import { runAgentLoop, compactHistory, buildSystemPrompt, type CoreMessage, type LoopStopReason } from "@pocket-code/agent-core";
+import {
+  runAgentLoop,
+  compactHistory,
+  buildSystemPrompt,
+  type CoreMessage,
+  type LoopStopReason,
+} from "@pocket-code/agent-core";
 import type {
   AgentEventType,
+  WorkspaceImportSourceType,
   WorkspaceProjectCatalogEntryType,
   WorkspaceSessionScopeType,
 } from "@pocket-code/wire";
@@ -53,8 +57,16 @@ import type {
 // ── Public Types(re-export) ───────────────────────────────
 export type { StreamingPhase, Message, ToolCall, ImageAttachment } from "@pocket-code/client-core";
 
-export interface ModelInfo { key: string; label: string; description: string; }
-export const AVAILABLE_MODELS: ModelInfo[] = MODELS.map((m) => ({ key: m.key, label: m.label, description: m.description }));
+export interface ModelInfo {
+  key: string;
+  label: string;
+  description: string;
+}
+export const AVAILABLE_MODELS: ModelInfo[] = MODELS.map((m) => ({
+  key: m.key,
+  label: m.label,
+  description: m.description,
+}));
 
 // ── Hook Options ───────────────────────────────────────
 interface UseAgentOptions {
@@ -75,11 +87,22 @@ interface UseAgentOptions {
     projectId: string,
     replica: RemoteReplicaCatalogEntry,
     displayName?: string,
+    importSource?: WorkspaceImportSourceType
   ) => void;
 }
 
 // ── Sync filtering ────────────────────────────────────────
-const SYNC_IGNORE_DIRS = ["node_modules", ".git", "dist", "build", ".next", ".cache", "__pycache__", ".tox", "vendor"];
+const SYNC_IGNORE_DIRS = [
+  "node_modules",
+  ".git",
+  "dist",
+  "build",
+  ".next",
+  ".cache",
+  "__pycache__",
+  ".tox",
+  "vendor",
+];
 const SYNC_IGNORE_EXTENSIONS = [".lock", ".log"];
 const SYNC_IGNORE_FILES = [".gitconfig", ".git-credentials"];
 const MAX_SYNC_FILE_SIZE = 512 * 1024; // 512KB
@@ -98,15 +121,29 @@ function notifyRunCommand(result: unknown) {
   if (AppState.currentState === "active") return;
   const res = result as { success?: boolean; stdout?: string; stderr?: string; error?: string };
   const ok = res?.success !== false;
-  const firstLine = (res?.stdout || res?.stderr || res?.error || "").trim().split("\n")[0].slice(0, 80);
-  sendLocalNotification(ok ? "命令执行完成 ✓" : "命令执行失败 ✗", firstLine || (ok ? "命令已完成" : "命令执行失败"));
+  const firstLine = (res?.stdout || res?.stderr || res?.error || "")
+    .trim()
+    .split("\n")[0]
+    .slice(0, 80);
+  sendLocalNotification(
+    ok ? "命令执行完成 ✓" : "命令执行失败 ✗",
+    firstLine || (ok ? "命令已完成" : "命令执行失败")
+  );
 }
 
 const mkUserMsg = (content: string, images?: ImageAttachment[]): Message => ({
-  id: Date.now().toString(), role: "user", content, images, timestamp: Date.now(),
+  id: Date.now().toString(),
+  role: "user",
+  content,
+  images,
+  timestamp: Date.now(),
 });
 const mkAssistantMsg = (): Message => ({
-  id: (Date.now() + 1).toString(), role: "assistant", content: "", toolCalls: [], timestamp: Date.now(),
+  id: (Date.now() + 1).toString(),
+  role: "assistant",
+  content: "",
+  toolCalls: [],
+  timestamp: Date.now(),
 });
 
 // ── Main Hook ──────────────────────────────────────────
@@ -149,33 +186,50 @@ export function useAgent({
   } | null>(null);
   // 最新值 refs(避免 handler/闭包中的 stale closure)
   const abortRef = useRef<AbortController | null>(null);
-  const modelRef = useRef(model); modelRef.current = model;
-  const customPromptRef = useRef(customPrompt); customPromptRef.current = customPrompt;
-  const projectIdRef = useRef(projectId); projectIdRef.current = projectId;
-  const projectNameRef = useRef(projectName); projectNameRef.current = projectName;
+  const modelRef = useRef(model);
+  modelRef.current = model;
+  const customPromptRef = useRef(customPrompt);
+  customPromptRef.current = customPrompt;
+  const projectIdRef = useRef(projectId);
+  projectIdRef.current = projectId;
+  const projectNameRef = useRef(projectName);
+  projectNameRef.current = projectName;
   const workspaceReplicaIdRef = useRef(workspaceReplicaId);
   workspaceReplicaIdRef.current = workspaceReplicaId;
   const workspaceGenerationRef = useRef(workspaceGeneration);
   workspaceGenerationRef.current = workspaceGeneration;
   const remoteReplicasRef = useRef(remoteReplicas);
   remoteReplicasRef.current = remoteReplicas;
-  const workspaceHandleRef = useRef(workspaceHandle); workspaceHandleRef.current = workspaceHandle;
-  const workspaceRootRef = useRef(workspaceRoot); workspaceRootRef.current = workspaceRoot;
-  const onFileChangedRef = useRef(onFileChanged); onFileChangedRef.current = onFileChanged;
+  const workspaceHandleRef = useRef(workspaceHandle);
+  workspaceHandleRef.current = workspaceHandle;
+  const workspaceRootRef = useRef(workspaceRoot);
+  workspaceRootRef.current = workspaceRoot;
+  const onFileChangedRef = useRef(onFileChanged);
+  onFileChangedRef.current = onFileChanged;
   const onRemoteReplicaRef = useRef(onRemoteReplica);
   onRemoteReplicaRef.current = onRemoteReplica;
-  const workspaceModeRef = useRef(settings.workspaceMode); workspaceModeRef.current = settings.workspaceMode;
-  const settingsRef = useRef(settings); settingsRef.current = settings;
-  const gitCredentialsRef = useRef(settings.gitCredentials); gitCredentialsRef.current = settings.gitCredentials;
-  const sessionIdRef = useRef(sessionId); sessionIdRef.current = sessionId;
-  const messagesRef = useRef(messages); messagesRef.current = messages;
-  const isStreamingRef = useRef(isStreaming); isStreamingRef.current = isStreaming;
-  const goalStateRef = useRef(goalState); goalStateRef.current = goalState;
+  const workspaceModeRef = useRef(settings.workspaceMode);
+  workspaceModeRef.current = settings.workspaceMode;
+  const settingsRef = useRef(settings);
+  settingsRef.current = settings;
+  const gitCredentialsRef = useRef(settings.gitCredentials);
+  gitCredentialsRef.current = settings.gitCredentials;
+  const sessionIdRef = useRef(sessionId);
+  sessionIdRef.current = sessionId;
+  const messagesRef = useRef(messages);
+  messagesRef.current = messages;
+  const isStreamingRef = useRef(isStreaming);
+  isStreamingRef.current = isStreaming;
+  const goalStateRef = useRef(goalState);
+  goalStateRef.current = goalState;
   // loadSession 定义在 handlers 单例块之后 → handlers 内经 ref 间接引用(P14 resync)
   const loadSessionRef = useRef<((sid: string) => Promise<void>) | null>(null);
-  const modeRef = useRef(settings.mode); modeRef.current = settings.mode;
-  const authTokenRef = useRef(settings.authToken); authTokenRef.current = settings.authToken;
-  const deviceIdRef = useRef(settings.deviceId); deviceIdRef.current = settings.deviceId;
+  const modeRef = useRef(settings.mode);
+  modeRef.current = settings.mode;
+  const authTokenRef = useRef(settings.authToken);
+  authTokenRef.current = settings.authToken;
+  const deviceIdRef = useRef(settings.deviceId);
+  deviceIdRef.current = settings.deviceId;
 
   const activeRemoteReplicaRef = useRef<{
     connectionKey: string;
@@ -230,10 +284,14 @@ export function useAgent({
   // 这样 load 一个旧会话后立即在 geek 模式续聊,模型仍能看到之前的对话上下文。
   const coreHistoryRef = useRef<CoreMessage[]>([]);
 
-  const serverUrl = settings.mode === "geek"
-    ? settings.toolServerUrl
-    : (settings.workspaceMode === "relay" ? (settings.relayServerUrl || "wss://relay.your-vps.com") : settings.cloudServerUrl);
-  const serverUrlRef = useRef(serverUrl); serverUrlRef.current = serverUrl;
+  const serverUrl =
+    settings.mode === "geek"
+      ? settings.toolServerUrl
+      : settings.workspaceMode === "relay"
+        ? settings.relayServerUrl || "wss://relay.your-vps.com"
+        : settings.cloudServerUrl;
+  const serverUrlRef = useRef(serverUrl);
+  serverUrlRef.current = serverUrl;
 
   // 需自动连接:cloud 恒真;geek+server(Termux)恒真;geek+local 否(runCommand 惰性回退)
   const needsAutoConnect = settings.mode === "cloud" || settings.workspaceMode === "server";
@@ -249,7 +307,7 @@ export function useAgent({
 
   const saveMessages = useCallback((msgs: Message[], sid: string | null) => {
     if (!sid || msgs.length === 0) return;
-    saveChatHistory(sid, msgs as StoredMessage[], projectIdRef.current || '').catch(() => { });
+    saveChatHistory(sid, msgs as StoredMessage[], projectIdRef.current || "").catch(() => {});
   }, []);
 
   // ── done 收敛(云端 & geek 共用) ─────────────────────
@@ -266,62 +324,65 @@ export function useAgent({
   }, [saveMessages]);
 
   // ── 重试/降级瞬时提醒(cloud & geek 共用,P13)─────────────
-  const applyStreamNotice = useCallback((ev: AgentEventType) => {
-    switch (ev.type) {
-      case "step-retrying":
-        setStreamNotice(`网络波动,正在重试(第 ${ev.nextAttempt}/${ev.maxAttempts} 次)…`);
-        break;
-      case "media-degraded":
-        setStreamNotice(
-          ev.level === "degraded"
-            ? "请求过大:已临时省略较早的图片(保留最近一张)"
-            : "请求过大:本轮已临时省略全部图片"
-        );
-        break;
-      case "history-compacted":
-        setCompactionNotice(
-          `已压缩 ${ev.compactedMessages} 条早期消息以释放上下文(约 ${ev.tokensBefore}→${ev.tokensAfter} tokens)`
-        );
-        setEditCutoff(messagesRef.current.length); // 压缩点之前禁用编辑重发(D-P15-3)
-        break;
-      case "goal-updated": {
-        if (ev.change === "completion") {
-          sendLocalNotification("目标已完成 ✓", ev.goal ?? "");
-          setGoalState(null);
-        } else if (ev.change === "cleared") {
-          setGoalState(null);
-        } else {
-          setGoalState({
-            status: ev.status,
-            goal: ev.goal,
-            stopReason: ev.stopReason,
-            stats: ev.stats,
-            maxTurns: ev.maxTurns,
-          });
-          if (ev.status === "blocked") {
-            sendLocalNotification("目标受阻", ev.stopReason ?? ev.goal ?? "");
+  const applyStreamNotice = useCallback(
+    (ev: AgentEventType) => {
+      switch (ev.type) {
+        case "step-retrying":
+          setStreamNotice(`网络波动,正在重试(第 ${ev.nextAttempt}/${ev.maxAttempts} 次)…`);
+          break;
+        case "media-degraded":
+          setStreamNotice(
+            ev.level === "degraded"
+              ? "请求过大:已临时省略较早的图片(保留最近一张)"
+              : "请求过大:本轮已临时省略全部图片"
+          );
+          break;
+        case "history-compacted":
+          setCompactionNotice(
+            `已压缩 ${ev.compactedMessages} 条早期消息以释放上下文(约 ${ev.tokensBefore}→${ev.tokensAfter} tokens)`
+          );
+          setEditCutoff(messagesRef.current.length); // 压缩点之前禁用编辑重发(D-P15-3)
+          break;
+        case "goal-updated": {
+          if (ev.change === "completion") {
+            sendLocalNotification("目标已完成 ✓", ev.goal ?? "");
+            setGoalState(null);
+          } else if (ev.change === "cleared") {
+            setGoalState(null);
+          } else {
+            setGoalState({
+              status: ev.status,
+              goal: ev.goal,
+              stopReason: ev.stopReason,
+              stats: ev.stats,
+              maxTurns: ev.maxTurns,
+            });
+            if (ev.status === "blocked") {
+              sendLocalNotification("目标受阻", ev.stopReason ?? ev.goal ?? "");
+            }
           }
+          // goal 终局/停车:收敛 streaming 态(done 在 goal active 时被跳过收敛,D-P16-7),
+          // 顺带修剪 done 处预插的尾部空占位气泡。
+          if (ev.change !== "lifecycle" || ev.status !== "active") {
+            setMessages((prev) => {
+              const last = prev[prev.length - 1];
+              return last && last.role === "assistant" && !last.content && !last.toolCalls?.length
+                ? prev.slice(0, -1)
+                : prev;
+            });
+            finalizeStreaming();
+          }
+          break;
         }
-        // goal 终局/停车:收敛 streaming 态(done 在 goal active 时被跳过收敛,D-P16-7),
-        // 顺带修剪 done 处预插的尾部空占位气泡。
-        if (ev.change !== "lifecycle" || ev.status !== "active") {
-          setMessages((prev) => {
-            const last = prev[prev.length - 1];
-            return last && last.role === "assistant" && !last.content && !last.toolCalls?.length
-              ? prev.slice(0, -1)
-              : prev;
-          });
-          finalizeStreaming();
-        }
-        break;
+        case "text-delta": // 恢复输出即清提醒(setState 同值时 React 自动跳过)
+        case "error":
+        case "done":
+          setStreamNotice(null);
+          break;
       }
-      case "text-delta": // 恢复输出即清提醒(setState 同值时 React 自动跳过)
-      case "error":
-      case "done":
-        setStreamNotice(null);
-        break;
-    }
-  }, [finalizeStreaming]);
+    },
+    [finalizeStreaming]
+  );
 
   // ── 单例 ServerConnection(惰性创建) ───────────────────
   const connRef = useRef<ServerConnection | null>(null);
@@ -344,8 +405,7 @@ export function useAgent({
         model: modelRef.current,
         gitCredentials: gitCredentialsRef.current?.filter((c) => c.token) || [],
       }),
-      isRelayPaired: () =>
-        !!(settingsRef.current.relayToken && settingsRef.current.relayMachineId),
+      isRelayPaired: () => !!(settingsRef.current.relayToken && settingsRef.current.relayMachineId),
       onTokenPersist: (token, machineId) =>
         updateSettings({ relayToken: token, relayMachineId: machineId }),
     };
@@ -401,7 +461,7 @@ export function useAgent({
       onSession: (
         sid: string,
         workspaceScope?: WorkspaceSessionScopeType,
-        workspaceCatalog?: WorkspaceProjectCatalogEntryType[],
+        workspaceCatalog?: WorkspaceProjectCatalogEntryType[]
       ) => {
         sessionIdRef.current = sid;
         setSessionId(sid);
@@ -420,6 +480,7 @@ export function useAgent({
                 updatedAt: Date.now(),
               },
               project.displayName,
+              project.importSource
             );
           }
         }
@@ -434,11 +495,7 @@ export function useAgent({
               updatedAt: Date.now(),
             };
             activeRemoteReplicaRef.current = { connectionKey, entry };
-            onRemoteReplicaRef.current?.(
-              workspaceScope.projectId,
-              entry,
-              projectNameRef.current,
-            );
+            onRemoteReplicaRef.current?.(workspaceScope.projectId, entry, projectNameRef.current);
             const authoritativeScope = createWorkspaceScope(workspaceScope);
             void (async () => {
               if (previousScope && !isSameWorkspaceScope(previousScope, authoritativeScope)) {
@@ -474,13 +531,21 @@ export function useAgent({
         onFileChangedRef.current?.(path, changeType);
         // local 模式:自动同步到本地(读取失败非致命,文件仍在远端)
         if (workspaceModeRef.current === "local" && projectIdRef.current && shouldSyncFile(path)) {
-          const localRoot =
-            workspaceHandleRef.current?.worktreeRoot ?? workspaceRootRef.current;
-          connRef.current?.readFile(path).then((result: any) => {
-            if (result?.success && result.content != null && result.content.length <= MAX_SYNC_FILE_SIZE) {
-              writeLocalFile(path, result.content, localRoot);
-            }
-          }).catch(() => { /* non-critical */ });
+          const localRoot = workspaceHandleRef.current?.worktreeRoot ?? workspaceRootRef.current;
+          connRef.current
+            ?.readFile(path)
+            .then((result: any) => {
+              if (
+                result?.success &&
+                result.content != null &&
+                result.content.length <= MAX_SYNC_FILE_SIZE
+              ) {
+                writeLocalFile(path, result.content, localRoot);
+              }
+            })
+            .catch(() => {
+              /* non-critical */
+            });
         }
       },
     };
@@ -530,7 +595,7 @@ export function useAgent({
           toolName,
           args,
           settingsRef.current,
-          workspaceRootRef.current,
+          workspaceRootRef.current
         );
         if (localResult !== null) return localResult;
       }
@@ -545,10 +610,24 @@ export function useAgent({
   const requestFileList = useCallback((path: string = ".") => conn.listFiles(path), [conn]);
   const requestFileContent = useCallback((path: string) => conn.readFile(path), [conn]);
   const requestSyncPull = useCallback((sinceCommit?: string) => conn.syncPull(sinceCommit), [conn]);
-  const requestSyncFile = useCallback((commit: string, path: string) => conn.syncFile(commit, path), [conn]);
+  const requestSyncFile = useCallback(
+    (commit: string, path: string) => conn.syncFile(commit, path),
+    [conn]
+  );
+  const bindLinkedWorkspace = useCallback(
+    (args: {
+      projectId: string;
+      displayName?: string;
+      path: string;
+      allowWeakDuplicate?: boolean;
+    }) => conn.bindLinkedWorkspace(args),
+    [conn]
+  );
 
   const deleteProjectWorkspace = useCallback(
-    (pid: string) => { conn.sendRaw({ type: "delete-project-workspace", projectId: pid }); },
+    (pid: string) => {
+      conn.sendRaw({ type: "delete-project-workspace", projectId: pid });
+    },
     [conn]
   );
 
@@ -562,7 +641,11 @@ export function useAgent({
       setStreamNotice(null);
       setCompactionNotice(null);
 
-      const payload: Record<string, unknown> = { type: "message", content, model: modelRef.current };
+      const payload: Record<string, unknown> = {
+        type: "message",
+        content,
+        model: modelRef.current,
+      };
       if (images?.length) {
         payload.images = images.map((img) => ({ base64: img.base64, mimeType: img.mimeType }));
       }
@@ -573,12 +656,15 @@ export function useAgent({
   );
 
   // ── geek 模式:reducer 喂事件 ──────────────────────────
-  const emitGeek = useCallback((ev: AgentEventType) => {
-    setMessages((prev) => applyAgentEvent(prev, ev));
-    const p = phaseFor(ev);
-    if (p) setStreamingPhase(p);
-    applyStreamNotice(ev);
-  }, [applyStreamNotice]);
+  const emitGeek = useCallback(
+    (ev: AgentEventType) => {
+      setMessages((prev) => applyAgentEvent(prev, ev));
+      const p = phaseFor(ev);
+      if (p) setStreamingPhase(p);
+      applyStreamNotice(ev);
+    },
+    [applyStreamNotice]
+  );
 
   // ── Geek mode: App drives the agent loop(agent-core runAgentLoop) ────
   const sendGeekMessage = useCallback(
@@ -592,7 +678,7 @@ export function useAgent({
 
       const modelConfig = getModelConfig(modelRef.current);
       const apiKeyField = getApiKeyField(modelConfig.provider);
-      const apiKey = apiKeyField ? (settings.apiKeys[apiKeyField] || "") : "";
+      const apiKey = apiKeyField ? settings.apiKeys[apiKeyField] || "" : "";
 
       const userMsg = mkUserMsg(content, images);
       setMessages((prev) => [...prev, userMsg, mkAssistantMsg()]);
@@ -734,7 +820,10 @@ export function useAgent({
         setStreamingPhase("connecting");
 
         const payload: Record<string, unknown> = {
-          type: "message", content: newContent, model: modelRef.current, rewindTo: idx,
+          type: "message",
+          content: newContent,
+          model: modelRef.current,
+          rewindTo: idx,
         };
         if (customPromptRef.current) payload.customPrompt = customPromptRef.current;
         conn.sendRaw(payload);
@@ -842,6 +931,7 @@ export function useAgent({
     requestFileContent,
     requestSyncPull,
     requestSyncFile,
+    bindLinkedWorkspace,
     deleteProjectWorkspace,
   };
 }

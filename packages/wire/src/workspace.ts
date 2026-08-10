@@ -22,6 +22,24 @@ export const WorkspaceSessionScope = z.object({
   replicaKind: WorkspaceReplicaKind,
 });
 
+export const WorkspaceSourceIdentity = z.object({
+  importMode: z.enum(["copy", "linked", "git"]),
+  sourceKind: z.enum(["directory", "archive", "git"]),
+  strongKey: z.string().optional(),
+  weakKeys: z.array(z.string()),
+});
+
+export const WorkspaceImportSource = z.object({
+  mode: z.enum(["copy", "linked", "git"]),
+  sourceKind: z.enum(["directory", "archive", "git"]),
+  sourceDeviceId: z.string().min(1),
+  canonicalLocator: z.string().optional(),
+  identity: WorkspaceSourceIdentity,
+  importedSnapshot: z.string().min(1),
+  importedAt: z.number().int().nonnegative(),
+  writeBackPolicy: z.enum(["explicit", "linked", "git"]),
+});
+
 /** One logical project and this authority's replica of it. */
 export const WorkspaceProjectCatalogEntry = z.object({
   projectId: z.string().uuid(),
@@ -31,8 +49,10 @@ export const WorkspaceProjectCatalogEntry = z.object({
   authorityId: z.string().uuid(),
   replicaKind: WorkspaceReplicaKind,
   updatedAt: z.number().int().nonnegative(),
+  importSource: WorkspaceImportSource.optional(),
 });
 
 export type WorkspaceReplicaKindType = z.infer<typeof WorkspaceReplicaKind>;
 export type WorkspaceSessionScopeType = z.infer<typeof WorkspaceSessionScope>;
 export type WorkspaceProjectCatalogEntryType = z.infer<typeof WorkspaceProjectCatalogEntry>;
+export type WorkspaceImportSourceType = z.infer<typeof WorkspaceImportSource>;

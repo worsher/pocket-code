@@ -1,5 +1,9 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { ServerConnection, type ConnectionConfig, type ConnectionHandlers } from "./serverConnection";
+import {
+  ServerConnection,
+  type ConnectionConfig,
+  type ConnectionHandlers,
+} from "./serverConnection";
 
 class FakeWebSocket {
   static OPEN = 1;
@@ -107,7 +111,14 @@ describe("ServerConnection", () => {
       conn.connect();
       const ws = FakeWebSocket.instances.at(-1)!;
       ws.open();
-      ws.receive({ type: "session", sessionId: "s1", projectId: "", workspace: "/w", eventEpoch: "ep_1", currentSeq });
+      ws.receive({
+        type: "session",
+        sessionId: "s1",
+        projectId: "",
+        workspace: "/w",
+        eventEpoch: "ep_1",
+        currentSeq,
+      });
       return { conn, ws };
     }
 
@@ -135,8 +146,14 @@ describe("ServerConnection", () => {
     it("③ first gap → drop event, close socket, reconnect init carries lastSeq/eventEpoch", () => {
       vi.useFakeTimers();
       const received: any[] = [];
-      const config = makeConfig({ getAuthToken: () => "tok", buildInitPayload: () => ({ sessionId: "s1" }) });
-      const { conn, ws } = openWithEpoch(makeHandlers({ onAgentEvent: (ev) => received.push(ev) }), config);
+      const config = makeConfig({
+        getAuthToken: () => "tok",
+        buildInitPayload: () => ({ sessionId: "s1" }),
+      });
+      const { conn, ws } = openWithEpoch(
+        makeHandlers({ onAgentEvent: (ev) => received.push(ev) }),
+        config
+      );
       ws.receive({ type: "text-delta", text: "a", seq: 1 });
       ws.receive({ type: "text-delta", text: "jump", seq: 5 }); // 缺口
       expect(received.map((e: any) => e.seq)).toEqual([1]); // 跳号事件未投递
@@ -166,7 +183,14 @@ describe("ServerConnection", () => {
       vi.advanceTimersByTime(2_000);
       const ws2 = FakeWebSocket.instances.at(-1)!;
       ws2.open();
-      ws2.receive({ type: "session", sessionId: "s1", projectId: "", workspace: "/w", eventEpoch: "ep_1", currentSeq: 1 });
+      ws2.receive({
+        type: "session",
+        sessionId: "s1",
+        projectId: "",
+        workspace: "/w",
+        eventEpoch: "ep_1",
+        currentSeq: 1,
+      });
       ws2.receive({ type: "text-delta", text: "gap2", seq: 9 }); // 第二次缺口 → resync
       expect(resyncs).toEqual(["gap"]);
       expect((received.at(-1) as any).seq).toBe(9); // 采纳现值后放行
@@ -183,7 +207,12 @@ describe("ServerConnection", () => {
         onResyncRequired: (reason: string) => resyncs.push(reason),
       } as any);
       const { conn, ws } = openWithEpoch(handlers);
-      ws.receive({ type: "resync-required", reason: "epoch-changed", eventEpoch: "ep_2", currentSeq: 40 });
+      ws.receive({
+        type: "resync-required",
+        reason: "epoch-changed",
+        eventEpoch: "ep_2",
+        currentSeq: 40,
+      });
       expect(resyncs).toEqual(["epoch-changed"]);
       ws.receive({ type: "text-delta", text: "old", seq: 40 }); // ≤ 游标 → 丢弃
       ws.receive({ type: "text-delta", text: "new", seq: 41 });
@@ -193,7 +222,11 @@ describe("ServerConnection", () => {
 
     it("⑥ cold start adopts ack epoch/currentSeq; next seq flows", () => {
       const received: any[] = [];
-      const { conn, ws } = openWithEpoch(makeHandlers({ onAgentEvent: (ev) => received.push(ev) }), makeConfig(), 7);
+      const { conn, ws } = openWithEpoch(
+        makeHandlers({ onAgentEvent: (ev) => received.push(ev) }),
+        makeConfig(),
+        7
+      );
       ws.receive({ type: "text-delta", text: "a", seq: 8 });
       ws.receive({ type: "text-delta", text: "stale", seq: 7 }); // ≤ currentSeq → 丢弃
       expect(received.map((e: any) => e.seq)).toEqual([8]);
@@ -225,7 +258,13 @@ describe("ServerConnection", () => {
     conn.connect();
     const ws = FakeWebSocket.instances[0];
     ws.open();
-    const retry = { type: "step-retrying", failedAttempt: 1, nextAttempt: 2, maxAttempts: 5, delayMs: 500 };
+    const retry = {
+      type: "step-retrying",
+      failedAttempt: 1,
+      nextAttempt: 2,
+      maxAttempts: 5,
+      delayMs: 500,
+    };
     const deg = { type: "media-degraded", level: "stripped", keptImages: 0 };
     const done = { type: "done", stopReason: "max_steps" };
     ws.receive(retry);
@@ -252,6 +291,35 @@ describe("ServerConnection", () => {
     const rejected = expect(p2).rejects.toThrow("File list timed out");
     vi.advanceTimersByTime(10_001);
     await rejected;
+    conn.disconnect();
+  });
+
+  it("correlates linked workspace import responses by request id", async () => {
+    const conn = new ServerConnection(makeConfig(), makeHandlers());
+    conn.connect();
+    const ws = FakeWebSocket.instances[0];
+    ws.open();
+
+    const pending = conn.bindLinkedWorkspace({
+      projectId: "10ed836e-ae48-4d67-9e26-a74cbf55a52e",
+      displayName: "Existing project",
+      path: "/Users/example/code/project",
+    });
+    const sent = JSON.parse(ws.sent.at(-1)!);
+    expect(sent).toMatchObject({
+      type: "workspace-bind-linked",
+      path: "/Users/example/code/project",
+    });
+    ws.receive({
+      type: "workspace-import-result",
+      _reqId: sent._reqId,
+      status: "blocked",
+      existingProjectId: "0f3d985e-0a3a-458e-932d-c89dbbf671c6",
+    });
+    await expect(pending).resolves.toMatchObject({
+      status: "blocked",
+      existingProjectId: "0f3d985e-0a3a-458e-932d-c89dbbf671c6",
+    });
     conn.disconnect();
   });
 
@@ -344,7 +412,7 @@ describe("ServerConnection", () => {
     const files: string[] = [];
     const conn = new ServerConnection(
       makeConfig(),
-      makeHandlers({ onFileChanged: (path) => files.push(path) }),
+      makeHandlers({ onFileChanged: (path) => files.push(path) })
     );
     conn.connect();
     const oldSocket = FakeWebSocket.instances[0];
@@ -360,7 +428,7 @@ describe("ServerConnection", () => {
       makeConfig(),
       makeHandlers({
         onSession: (_sessionId, _scope, catalog) => catalogs.push(catalog),
-      }),
+      })
     );
     conn.connect();
     const ws = FakeWebSocket.instances[0];

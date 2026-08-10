@@ -6,16 +6,19 @@ import { randomUUID } from "expo-crypto";
 import {
   createProject as createCatalogProject,
   createProjectFromRemote,
+  createImportedProject as createImportedCatalogProject,
   resolveStoredCurrentProjectId,
   upgradeProjectCatalog,
   type Project,
   type ProjectIdFactories,
+  type ProjectImportSource,
 } from "./projectCatalog";
 
 const STORAGE_KEY = "pocket-code:projects";
 const BACKUP_KEY = "pocket-code:projects:backup";
 const CORRUPT_KEY = "pocket-code:projects:corrupt";
 const CURRENT_KEY = "pocket-code:current-project";
+const SOURCE_DEVICE_KEY = "pocket-code:source-device-id";
 
 let catalogWriteTail: Promise<void> = Promise.resolve();
 let currentProjectWriteTail: Promise<void> = Promise.resolve();
@@ -34,6 +37,18 @@ export function createProject(name: string, description?: string, gitUrl?: strin
 
 export function adoptRemoteProject(projectId: string, displayName: string): Project {
   return createProjectFromRemote(projectId, displayName, RUNTIME_FACTORIES);
+}
+
+export function createImportedProject(name: string, source: ProjectImportSource): Project {
+  return createImportedCatalogProject(name, source, RUNTIME_FACTORIES);
+}
+
+export async function getOrCreateSourceDeviceId(): Promise<string> {
+  const existing = await AsyncStorage.getItem(SOURCE_DEVICE_KEY);
+  if (existing) return existing;
+  const created = `source_${randomUUID()}`;
+  await AsyncStorage.setItem(SOURCE_DEVICE_KEY, created);
+  return created;
 }
 
 function parseCatalogJson(raw: string | null): unknown[] | null {

@@ -35,9 +35,19 @@ const DEFAULT_EXCLUDES = [
 ];
 const EXCLUDE_MARKER = "# pocket-code shadow-snapshot defaults";
 
+function shadowGitDir(repoDir: string, stateRoot?: string): string {
+  return stateRoot ? join(stateRoot, "shadow-snapshot", ".git") : join(repoDir, ".git");
+}
+
+function gitArgs(repoDir: string, args: string[], stateRoot?: string): string[] {
+  return stateRoot
+    ? [`--git-dir=${shadowGitDir(repoDir, stateRoot)}`, `--work-tree=${repoDir}`, ...args]
+    : args;
+}
+
 /** 幂等地把默认忽略写入 .git/info/exclude(保留用户已有内容)。 */
-async function ensureDefaultExcludes(repoDir: string): Promise<void> {
-  const infoDir = join(repoDir, ".git", "info");
+async function ensureDefaultExcludes(repoDir: string, stateRoot?: string): Promise<void> {
+  const infoDir = join(shadowGitDir(repoDir, stateRoot), "info");
   await mkdir(infoDir, { recursive: true });
   const excludePath = join(infoDir, "exclude");
   let current = "";
@@ -59,8 +69,13 @@ const IDENTITY_ENV: NodeJS.ProcessEnv = {
   GIT_COMMITTER_EMAIL: "pocket@local",
 };
 
-async function git(repoDir: string, args: string[], env?: NodeJS.ProcessEnv): Promise<string> {
-  const { stdout } = await exec("git", args, {
+async function git(
+  repoDir: string,
+  args: string[],
+  env?: NodeJS.ProcessEnv,
+  stateRoot?: string
+): Promise<string> {
+  const { stdout } = await exec("git", gitArgs(repoDir, args, stateRoot), {
     cwd: repoDir,
     env: env ? { ...process.env, ...env } : process.env,
     maxBuffer: MAX_BUFFER,
@@ -68,9 +83,9 @@ async function git(repoDir: string, args: string[], env?: NodeJS.ProcessEnv): Pr
   return stdout;
 }
 
-async function tryGit(repoDir: string, args: string[]): Promise<string | null> {
+async function tryGit(repoDir: string, args: string[], stateRoot?: string): Promise<string | null> {
   try {
-    return (await git(repoDir, args)).trim();
+    return (await git(repoDir, args, undefined, stateRoot)).trim();
   } catch {
     return null;
   }
@@ -93,9 +108,9 @@ export interface ChangedFile {
  * 对 repoDir 的当前工作区做零污染快照,提交到 refs/pocket-code/worktree。
  * 捕获已跟踪改动 + 未跟踪非忽略文件;遵守 .gitignore。
  */
-export async function createSnapshot(repoDir: string): Promise<SnapshotResult> {
-  await ensureDefaultExcludes(repoDir);
-  const snapDir = join(repoDir, ".git", "pocket-code");
+export async function createSnapshot(repoDir: string, stateRoot?: string): Promise<SnapshotResult> {
+  await ensureDefaultExcludes(repoDir, stateRoot);
+  const snapDir = join(shadowGitDir(repoDir, stateRoot), "pocket-code");
   await mkdir(snapDir, { recursive: true });
   const snapIdx = join(snapDir, "snapidx");
   // 必须指向不存在的索引(git 自建新索引);清掉可能残留的索引与锁
@@ -104,14 +119,14 @@ export async function createSnapshot(repoDir: string): Promise<SnapshotResult> {
   const env: NodeJS.ProcessEnv = { GIT_INDEX_FILE: snapIdx };
 
   try {
-    await git(repoDir, ["add", "-A"], env);
-    const tree = (await git(repoDir, ["write-tree"], env)).trim();
-    const parent = await tryGit(repoDir, ["rev-parse", "--verify", "-q", SNAP_REF]);
+    await git(repoDir, ["add", "-A"], env, stateRoot);
+    const tree = (await git(repoDir, ["write-tree"], env, stateRoot)).trim();
+    const parent = await tryGit(repoDir, ["rev-parse", "--verify", "-q", SNAP_REF], stateRoot);
     const commitArgs = ["commit-tree", tree];
     if (parent) commitArgs.push("-p", parent);
     commitArgs.push("-m", "pocket snapshot");
-    const commit = (await git(repoDir, commitArgs, IDENTITY_ENV)).trim();
-    await git(repoDir, ["update-ref", SNAP_REF, commit]);
+    const commit = (await git(repoDir, commitArgs, IDENTITY_ENV, stateRoot)).trim();
+    await git(repoDir, ["update-ref", SNAP_REF, commit], undefined, stateRoot);
     return { commit, parent: parent || null };
   } finally {
     await rm(snapIdx, { force: true });
@@ -125,10 +140,16 @@ export async function createSnapshot(repoDir: string): Promise<SnapshotResult> {
 export async function changedFiles(
   repoDir: string,
   fromCommit: string | null,
-  toCommit: string
+  toCommit: string,
+  stateRoot?: string
 ): Promise<ChangedFile[]> {
   if (!fromCommit) {
-    const out = await git(repoDir, ["ls-tree", "-r", "--name-only", toCommit]);
+    const out = await git(
+      repoDir,
+      ["ls-tree", "-r", "--name-only", toCommit],
+      undefined,
+      stateRoot
+    );
     return out
       .split("\n")
       .filter(Boolean)
@@ -138,14 +159,12 @@ export async function changedFiles(
   // --no-renames: 现代 git 默认对 --name-status 开启 rename/copy 检测,R<score>/C<score>
   // 记录在 -z 格式下是三段(status\0oldpath\0newpath),会破坏下面按二元组消费的解析循环。
   // 关掉后 rename 恒被拆成 D+A 两条两段式记录,与手机端按 A/M/D 三态 apply 的语义天然等价。
-  const out = await git(repoDir, [
-    "diff",
-    "--name-status",
-    "-z",
-    "--no-renames",
-    fromCommit,
-    toCommit,
-  ]);
+  const out = await git(
+    repoDir,
+    ["diff", "--name-status", "-z", "--no-renames", fromCommit, toCommit],
+    undefined,
+    stateRoot
+  );
   const parts = out.split("\0").filter(Boolean);
   const result: ChangedFile[] = [];
   // 格式: <status>\0<path>\0<status>\0<path>...
@@ -173,17 +192,22 @@ export async function changedFiles(
 export async function readSnapshotFile(
   repoDir: string,
   commit: string,
-  relPath: string
+  relPath: string,
+  stateRoot?: string
 ): Promise<Buffer> {
-  const { stdout } = await exec("git", ["show", `${commit}:${relPath}`], {
-    cwd: repoDir,
-    encoding: "buffer",
-    maxBuffer: MAX_BUFFER,
-  });
+  const { stdout } = await exec(
+    "git",
+    gitArgs(repoDir, ["show", `${commit}:${relPath}`], stateRoot),
+    {
+      cwd: repoDir,
+      encoding: "buffer",
+      maxBuffer: MAX_BUFFER,
+    }
+  );
   return stdout as Buffer;
 }
 
 /** 删除私有快照 ref(清理同步痕迹,不影响用户分支)。 */
-export async function clearSnapshots(repoDir: string): Promise<void> {
-  await tryGit(repoDir, ["update-ref", "-d", SNAP_REF]);
+export async function clearSnapshots(repoDir: string, stateRoot?: string): Promise<void> {
+  await tryGit(repoDir, ["update-ref", "-d", SNAP_REF], stateRoot);
 }
