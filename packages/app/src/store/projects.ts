@@ -77,7 +77,11 @@ async function preserveCorruptCatalog(raw: string): Promise<void> {
   );
 }
 
-export async function loadProjects(): Promise<Project[]> {
+export async function loadProjects(
+  options: {
+    preserveImplicitLegacyDefault?: boolean;
+  } = {}
+): Promise<Project[]> {
   await catalogWriteTail.catch(() => undefined);
   let parsed: unknown = null;
   let needsRecoveryWrite = false;
@@ -97,7 +101,7 @@ export async function loadProjects(): Promise<Project[]> {
     // An unavailable catalog is recovered to the compatibility default below.
   }
 
-  const upgraded = upgradeProjectCatalog(parsed, RUNTIME_FACTORIES);
+  const upgraded = upgradeProjectCatalog(parsed, RUNTIME_FACTORIES, Date.now(), options);
   if (upgraded.changed || needsRecoveryWrite) {
     await saveProjects(upgraded.projects).catch(() => {
       // Keep the in-memory catalog usable when persistence is temporarily

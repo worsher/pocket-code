@@ -7,7 +7,7 @@
  */
 
 import { RelayClient } from "@pocket-code/client-core";
-import { writeLocalFile } from "./localFileSystem";
+import { writeLocalFile, type MobileWorkspaceTarget } from "./localFileSystem";
 import { updateSettings, type AppSettings } from "../store/settings";
 
 export interface SyncResult {
@@ -31,14 +31,11 @@ interface FileItem {
 export async function syncRemoteToLocal(
   settings: AppSettings,
   projectId: string,
-  localWorkspaceRoot?: string,
+  localWorkspaceTarget: MobileWorkspaceTarget,
   onProgress?: (message: string) => void
 ): Promise<SyncResult> {
   // 1. Determine connection method
-  const hasRelay =
-    !!settings.relayToken &&
-    !!settings.relayMachineId &&
-    !!settings.relayServerUrl;
+  const hasRelay = !!settings.relayToken && !!settings.relayMachineId && !!settings.relayServerUrl;
   const hasCloud = !!settings.cloudServerUrl;
   const hasTool = !!settings.toolServerUrl;
 
@@ -83,9 +80,7 @@ export async function syncRemoteToLocal(
 
   ws.onmessage = (event: { data: string } | MessageEvent) => {
     try {
-      const data = JSON.parse(
-        typeof event.data === "string" ? event.data : event.data.toString()
-      );
+      const data = JSON.parse(typeof event.data === "string" ? event.data : event.data.toString());
 
       switch (data.type) {
         case "session":
@@ -151,11 +146,7 @@ export async function syncRemoteToLocal(
       try {
         const content = await readRemoteFile(ws, resolvers, filePath);
         if (content != null) {
-          const result = await writeLocalFile(
-            filePath,
-            content,
-            localWorkspaceRoot
-          );
+          const result = await writeLocalFile(filePath, content, localWorkspaceTarget);
           if (result.success) written++;
         }
       } catch {
@@ -185,10 +176,7 @@ function closeWs(ws: WebSocket | RelayClient) {
   }
 }
 
-function waitForOpen(
-  ws: WebSocket | RelayClient,
-  timeoutMs: number
-): Promise<void> {
+function waitForOpen(ws: WebSocket | RelayClient, timeoutMs: number): Promise<void> {
   return new Promise((resolve, reject) => {
     if (ws.readyState === WebSocket.OPEN) {
       resolve();
@@ -223,8 +211,7 @@ function sendInit(
       projectId,
       model: settings.defaultModel || "deepseek-v4-flash",
       ...(authToken ? { token: authToken } : {}),
-      gitCredentials:
-        settings.gitCredentials?.filter((c) => c.token) || [],
+      gitCredentials: settings.gitCredentials?.filter((c) => c.token) || [],
     })
   );
 }
@@ -260,8 +247,7 @@ function initSession(
           type: "init",
           projectId,
           model: settings.defaultModel || "deepseek-v4-flash",
-          gitCredentials:
-            settings.gitCredentials?.filter((c) => c.token) || [],
+          gitCredentials: settings.gitCredentials?.filter((c) => c.token) || [],
         })
       );
     } else {
@@ -272,8 +258,7 @@ function initSession(
         // Register anonymously — the server will respond with "auth" type
         // which triggers sendInit in the onmessage handler
         const deviceId =
-          settings.deviceId ||
-          `dev_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+          settings.deviceId || `dev_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
         ws.send(JSON.stringify({ type: "register", deviceId }));
       }
     }
@@ -328,15 +313,12 @@ async function listAllFiles(
 
       const items: FileItem[] = res?.items || [];
       for (const item of items) {
-        const fullPath =
-          dirPath === "." ? item.name : `${dirPath}/${item.name}`;
+        const fullPath = dirPath === "." ? item.name : `${dirPath}/${item.name}`;
 
         // Skip common large/unnecessary directories
         if (
           item.type === "directory" &&
-          ["node_modules", ".git", "dist", "build", ".next"].includes(
-            item.name
-          )
+          ["node_modules", ".git", "dist", "build", ".next"].includes(item.name)
         ) {
           continue;
         }

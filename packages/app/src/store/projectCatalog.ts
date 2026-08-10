@@ -72,6 +72,11 @@ export interface CatalogUpgradeResult {
   changed: boolean;
 }
 
+export interface CatalogUpgradeOptions {
+  /** Preserve the pre-v2 shared workspace only when it actually exists. */
+  preserveImplicitLegacyDefault?: boolean;
+}
+
 export interface ProjectIdFactories {
   projectUuid: UuidFactory;
   replicaUuid: UuidFactory;
@@ -315,7 +320,8 @@ export function createImportedProject(
 export function upgradeProjectCatalog(
   value: unknown,
   factories: ProjectIdFactories,
-  now: number = Date.now()
+  now: number = Date.now(),
+  options: CatalogUpgradeOptions = {}
 ): CatalogUpgradeResult {
   const input = Array.isArray(value) ? value : [];
   let changed = !Array.isArray(value);
@@ -358,21 +364,27 @@ export function upgradeProjectCatalog(
   }
 
   if (projects.length === 0) {
-    // An existing installation may have used the old shared workspace without
-    // ever persisting its implicit default project, so preserve that path.
-    projects.push(
-      migrateLegacyProject(
-        {
-          id: "default",
-          name: "Default",
-          description: "默认项目",
-          createdAt: now,
-          updatedAt: now,
-        },
-        factories,
-        now
-      )!
-    );
+    if (options.preserveImplicitLegacyDefault) {
+      // An existing installation may have used the old shared workspace
+      // without persisting its implicit default project. Keep it discoverable
+      // until the explicit legacy migration runs.
+      projects.push(
+        migrateLegacyProject(
+          {
+            id: "default",
+            name: "Default",
+            description: "默认项目",
+            createdAt: now,
+            updatedAt: now,
+          },
+          factories,
+          now
+        )!
+      );
+    } else {
+      // Fresh installs must not create the old special "default" directory.
+      projects.push(createProject("Default", factories, "默认项目", undefined, now));
+    }
     changed = true;
   }
 

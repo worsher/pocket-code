@@ -13,7 +13,7 @@ import {
 import { getModelConfig, getApiKeyField, MODELS } from "../services/modelConfig";
 import { updateSettings, type AppSettings } from "../store/settings";
 import { saveChatHistory, loadChatHistory } from "../store/chatHistory";
-import { executeLocalTool, writeLocalFile, getDefaultWorkspace } from "../services/localFileSystem";
+import { deleteLocalFile, executeLocalTool, writeLocalFile } from "../services/localFileSystem";
 import {
   enqueueMessage,
   getQueueForScope,
@@ -531,7 +531,12 @@ export function useAgent({
         onFileChangedRef.current?.(path, changeType);
         // local 模式:自动同步到本地(读取失败非致命,文件仍在远端)
         if (workspaceModeRef.current === "local" && projectIdRef.current && shouldSyncFile(path)) {
-          const localRoot = workspaceHandleRef.current?.worktreeRoot ?? workspaceRootRef.current;
+          const localTarget = workspaceHandleRef.current ?? workspaceRootRef.current;
+          if (!localTarget) return;
+          if (changeType === "deleted") {
+            void deleteLocalFile(path, localTarget);
+            return;
+          }
           connRef.current
             ?.readFile(path)
             .then((result: any) => {
@@ -540,7 +545,7 @@ export function useAgent({
                 result.content != null &&
                 result.content.length <= MAX_SYNC_FILE_SIZE
               ) {
-                writeLocalFile(path, result.content, localRoot);
+                void writeLocalFile(path, result.content, localTarget);
               }
             })
             .catch(() => {
@@ -591,11 +596,13 @@ export function useAgent({
   const executeTool = useCallback(
     async (toolName: string, args: Record<string, unknown>): Promise<unknown> => {
       if (workspaceModeRef.current !== "server") {
+        const localWorkspace = workspaceHandleRef.current ?? workspaceRootRef.current;
+        if (!localWorkspace) throw new Error("No catalog-resolved local workspace is available");
         const localResult = await executeLocalTool(
           toolName,
           args,
           settingsRef.current,
-          workspaceRootRef.current
+          localWorkspace
         );
         if (localResult !== null) return localResult;
       }
@@ -694,9 +701,10 @@ export function useAgent({
       // grep 命令字符串后,泄漏一个真实 shell 不认识的虚拟路径(详见
       // deviceBackend.ts 顶部注释)。
       const geekWorkspaceRoot =
-        workspaceHandleRef.current?.worktreeRoot ??
-        workspaceRootRef.current ??
-        getDefaultWorkspace();
+        workspaceHandleRef.current?.worktreeRoot ?? workspaceRootRef.current;
+      if (!geekWorkspaceRoot) {
+        throw new Error("No catalog-resolved local workspace is available");
+      }
 
       const abortController = new AbortController();
       abortRef.current = abortController;

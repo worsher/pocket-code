@@ -28,6 +28,7 @@ import {
 import { loadDevices, getDevices } from "./deviceStore.js";
 import { createMessageHandler, type MessageHandler } from "@pocket-code/server/messageHandler";
 import { initDb } from "@pocket-code/server/db";
+import { ensureServerStorageLayout } from "@pocket-code/server/tools";
 import { shutdownAll } from "@pocket-code/server/processRegistry";
 import { requireRelaySecret } from "./config.js";
 import type { DaemonInboundType, ServerOutboundType } from "@pocket-code/wire";
@@ -74,6 +75,7 @@ try {
 
 // Initialize database (required by messageHandler's session/auth logic)
 await initDb();
+ensureServerStorageLayout();
 
 // Load previously authorized devices
 loadDevices();

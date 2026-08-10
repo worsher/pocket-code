@@ -17,7 +17,7 @@ import {
   type WorkspaceImportSourceRecord,
   type WorkspaceProjectRecord,
 } from "./db.js";
-import { getWorkspaceHandle } from "./tools.js";
+import { getServerV2Root, getWorkspaceHandle } from "./tools.js";
 
 export interface LinkedDirectoryProbe extends ImportProbe {
   readonly importMode: "linked";
@@ -42,7 +42,7 @@ export type LinkedDirectoryImportResult = ImportPipelineResult<
 >;
 
 function dataRoot(): string {
-  return process.env.POCKET_CODE_DATA_ROOT || resolve(join(homedir(), ".pocket-code", "v2"));
+  return getServerV2Root();
 }
 
 function pathsOverlap(first: string, second: string): boolean {

@@ -3,6 +3,7 @@ import { existsSync, mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync 
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createNodeBackend } from "./nodeBackend.js";
+import type { WorkspaceHandle } from "@pocket-code/workspace-core";
 
 let ws: string;
 let externalDirectories: string[];
@@ -18,6 +19,12 @@ afterEach(() => {
 });
 
 describe("NodeBackend", () => {
+  it("accepts a catalog-resolved WorkspaceHandle", async () => {
+    writeFileSync(join(ws, "handle.txt"), "ok");
+    const be = createNodeBackend({ worktreeRoot: ws } as WorkspaceHandle);
+    await expect(be.readFile(join(ws, "handle.txt"))).resolves.toBe("ok");
+  });
+
   it("write/read/list round trip incl. dot entries and isNew", async () => {
     const be = createNodeBackend(ws);
     expect((await be.writeFile(join(ws, "a/b.ts"), "hi")).isNew).toBe(true);

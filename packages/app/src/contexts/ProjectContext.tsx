@@ -29,6 +29,7 @@ import {
 import {
   ensureMobileWorkspaceHandle,
   getLegacyMobileWorkspaceRoot,
+  hasLegacyMobileWorkspace,
 } from "../services/workspaceResolver";
 import {
   importMobileDirectory,
@@ -114,13 +115,15 @@ export function ProjectProvider({ children }: { children: React.ReactNode }) {
   projectsRef.current = projects;
 
   useEffect(() => {
-    loadProjects().then(async (loadedProjects) => {
-      const loadedId = await loadCurrentProjectId(loadedProjects);
-      setProjects(loadedProjects);
-      projectsRef.current = loadedProjects;
-      setCurrentProjectId(loadedId);
-      setLoaded(true);
-    });
+    loadProjects({ preserveImplicitLegacyDefault: hasLegacyMobileWorkspace() }).then(
+      async (loadedProjects) => {
+        const loadedId = await loadCurrentProjectId(loadedProjects);
+        setProjects(loadedProjects);
+        projectsRef.current = loadedProjects;
+        setCurrentProjectId(loadedId);
+        setLoaded(true);
+      }
+    );
   }, []);
 
   const currentProject = projects.find((p) => p.id === currentProjectId) || projects[0] || null;

@@ -8,6 +8,7 @@ import type { RuntimeBackend, ExecResult } from "@pocket-code/agent-core";
 import { isDockerEnabled, execInContainer } from "./docker.js";
 import { startManaged, stopManaged } from "./processRegistry.js";
 import { resolveWorkspaceRealPath } from "./workspaceRealPath.js";
+import type { WorkspaceHandle } from "@pocket-code/workspace-core";
 
 const execAsync = promisify(exec);
 
@@ -139,7 +140,12 @@ function errMessage(err: unknown): string {
   return err instanceof Error ? err.message : String(err);
 }
 
-export function createNodeBackend(workspace: string, containerId?: string): RuntimeBackend {
+export function createNodeBackend(
+  workspaceTarget: string | WorkspaceHandle,
+  containerId?: string
+): RuntimeBackend {
+  const workspace =
+    typeof workspaceTarget === "string" ? workspaceTarget : workspaceTarget.worktreeRoot;
   return {
     async readFile(path: string): Promise<string> {
       const target = await resolveWorkspaceRealPath(workspace, path, { allowMissing: false });

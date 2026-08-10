@@ -19,7 +19,14 @@ import { atomicWriteFileSync } from "./atomicFile.js";
 
 // ── Database setup ──────────────────────────────────────
 
-const DB_PATH = process.env.DB_PATH || resolve(join(homedir(), ".pocket-code", "pocket-code.db"));
+const legacyDbPath = resolve(join(homedir(), ".pocket-code", "pocket-code.db"));
+const v2DataRoot =
+  process.env.POCKET_CODE_DATA_ROOT || resolve(join(homedir(), ".pocket-code", "v2"));
+const DB_PATH =
+  process.env.DB_PATH ||
+  (existsSync(legacyDbPath)
+    ? legacyDbPath
+    : resolve(join(v2DataRoot, "catalog", "pocket-code.db")));
 const DB_BACKUP_PATH = `${DB_PATH}.backup`;
 
 // Ensure directory exists

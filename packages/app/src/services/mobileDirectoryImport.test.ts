@@ -133,6 +133,9 @@ vi.mock("expo-file-system", () => {
     write(content: Uint8Array | string) {
       fake.nodes.set(this.uri, { type: "file", content });
     }
+    create() {
+      fake.nodes.set(this.uri, { type: "file", content: "" });
+    }
     copy(destination: File) {
       const node = fake.nodes.get(this.uri);
       if (!node || node.type !== "file") throw new Error("source missing");
@@ -142,12 +145,18 @@ vi.mock("expo-file-system", () => {
 
   const Paths = {
     document: { uri: "file:///documents" },
+    cache: { uri: "file:///cache" },
     get availableDiskSpace() {
       return fake.availableDiskSpace;
     },
   };
   return { Directory, File, Paths };
 });
+
+vi.mock("expo-file-system/legacy", () => ({
+  EncodingType: { Base64: "base64" },
+  writeAsStringAsync: vi.fn(),
+}));
 
 vi.mock("expo-crypto", () => ({
   CryptoDigestAlgorithm: { SHA256: "SHA-256" },
@@ -160,10 +169,31 @@ vi.mock("expo-crypto", () => ({
   randomUUID: () => "550e8400-e29b-41d4-a716-446655440000",
 }));
 
+vi.mock("expo-modules-core", () => ({
+  requireNativeModule: () => ({
+    getNativeLibDir: () => "/native/lib",
+    resolveWorkspacePath: async (root: string, relative: string) =>
+      relative ? `${root}/${relative}` : root,
+  }),
+}));
+
+vi.mock("pocket-terminal-module", () => ({
+  extractTarGz: vi.fn(),
+}));
+
 vi.mock("./gitService", () => ({
   probeGitRemote: vi.fn(async (url: string) => ({ url, head: "a".repeat(40) })),
   cloneGitIntoWorkspaceRoot: vi.fn(async () => "a".repeat(40)),
   resolveGitWorkspaceHead: vi.fn(async () => "a".repeat(40)),
+}));
+
+vi.mock("./localExecutor", () => ({
+  exec: vi.fn(),
+  startBackgroundExec: vi.fn(),
+}));
+
+vi.mock("./processManager", () => ({
+  killProcess: vi.fn(),
 }));
 
 vi.mock("@react-native-async-storage/async-storage", () => ({
@@ -179,6 +209,8 @@ const { Directory, File } = await import("expo-file-system");
 const { importMobileDirectory } = await import("./mobileDirectoryImport");
 const { importMobileArchive, inspectZipArchive } = await import("./mobileArchiveImport");
 const { importMobileGit } = await import("./mobileGitImport");
+const { getMobileWorkspaceRoot, writeLocalFile } = await import("./localFileSystem");
+const { buildProotCommand } = await import("./runtimeManager");
 
 function sourceDirectory() {
   fake.nodes.set("content://picked", { type: "directory" });
@@ -348,5 +380,39 @@ describe("mobile Git import", () => {
         importedSnapshot: "a".repeat(40),
       },
     });
+  });
+});
+
+describe("catalog workspace consumers", () => {
+  it("writes through a WorkspaceHandle and rejects traversal", async () => {
+    const worktreeRoot =
+      "file:///documents/pocket-code/v2/projects/ws_550e8400e29b41d4a716446655440000/worktree";
+    const handle = { worktreeRoot };
+    fake.nodes.set(worktreeRoot, { type: "directory" });
+
+    expect(getMobileWorkspaceRoot(handle)).toBe(worktreeRoot);
+    await expect(writeLocalFile("../escape.ts", "bad", handle)).resolves.toMatchObject({
+      success: false,
+    });
+    await expect(writeLocalFile("src/index.ts", "ok", handle)).resolves.toMatchObject({
+      success: true,
+    });
+    expect(fake.nodes.get(`${worktreeRoot}/src/index.ts`)?.content).toBe("ok");
+  });
+
+  it("binds proot to the selected v2 worktree and keeps runtime outside it", () => {
+    const worktreeRoot =
+      "file:///documents/pocket-code/v2/projects/ws_550e8400e29b41d4a716446655440000/worktree";
+    const command = buildProotCommand(
+      "pwd",
+      `${worktreeRoot.slice("file://".length)}/src`,
+      worktreeRoot
+    );
+    expect(command).toContain(
+      '"--bind=/documents/pocket-code/v2/projects/ws_550e8400e29b41d4a716446655440000/worktree:/workspace"'
+    );
+    expect(command).toContain('--rootfs="/documents/pocket-code/v2/runtime/rootfs"');
+    expect(command).toContain('-w "/workspace/src"');
+    expect(command).not.toContain("/documents/workspace");
   });
 });

@@ -27,6 +27,12 @@
       "require": "./dist/processRegistry.js",
       "types": "./dist/processRegistry.d.ts",
       "default": "./src/processRegistry.ts"
+    },
+    "./tools": {
+      "import": "./dist/tools.js",
+      "require": "./dist/tools.js",
+      "types": "./dist/tools.d.ts",
+      "default": "./src/tools.ts"
     }
   },
   "scripts": {

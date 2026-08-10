@@ -44,6 +44,24 @@ class PocketTerminalModule : Module() {
       appContext.reactContext?.applicationInfo?.nativeLibraryDir
     }
 
+    /** Resolve existing symlinks and enforce canonical worktree containment. */
+    AsyncFunction("resolveWorkspacePath") {
+      rootPath: String, relativePath: String, allowMissing: Boolean ->
+      val root = File(rootPath).canonicalFile
+      if (!root.isDirectory) {
+        throw IllegalArgumentException("Workspace root is unavailable")
+      }
+      val target = File(root, relativePath).canonicalFile
+      val rootPrefix = root.path.trimEnd(File.separatorChar) + File.separator
+      if (target.path != root.path && !target.path.startsWith(rootPrefix)) {
+        throw IllegalArgumentException("Workspace path resolves outside the workspace")
+      }
+      if (!allowMissing && !target.exists()) {
+        throw IllegalArgumentException("Workspace path does not exist")
+      }
+      target.path
+    }
+
     /**
      * 纯 JVM tar.gz 解压，正确处理 Alpine Linux 的绝对路径软链接。
      * Android SELinux 禁止从 app 数据目录执行二进制，所以我们在 JVM 内完成解压。

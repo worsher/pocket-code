@@ -8,6 +8,7 @@ import type { FileItem } from "../../hooks/useFileTree";
 import type { WorkspaceMode, AppSettings } from "../../store/settings";
 import { syncRemoteToLocal } from "../../services/workspaceSync";
 import { listLocalFiles, readLocalFile } from "../../services/localFileSystem";
+import type { MobileWorkspaceTarget } from "../../services/localFileSystem";
 import { pullFromDevMachine } from "../../services/codeSync";
 import { useWorkspace } from "../../contexts/WorkspaceContext";
 import { useProject } from "../../contexts/ProjectContext";
@@ -24,7 +25,7 @@ interface Props {
   workspaceMode: WorkspaceMode;
   settings: AppSettings;
   projectId?: string;
-  localWorkspaceRoot?: string;
+  localWorkspaceTarget: MobileWorkspaceTarget;
 }
 
 /**
@@ -48,7 +49,7 @@ export default function FilesTab({
   workspaceMode,
   settings,
   projectId,
-  localWorkspaceRoot,
+  localWorkspaceTarget,
 }: Props) {
   const { currentProject, updateProject } = useProject();
   const [viewState, setViewState] = useState<"tree" | "viewer">("tree");
@@ -87,81 +88,90 @@ export default function FilesTab({
   // 浏览源:browseLocal(影子同步后)用手机本地副本,否则用传入的远端/本地函数。
   const effectiveRequestFileList = useCallback(
     (path: string) =>
-      browseLocal ? listLocalFiles(path, localWorkspaceRoot) : requestFileList(path),
-    [browseLocal, localWorkspaceRoot, requestFileList]
+      browseLocal ? listLocalFiles(path, localWorkspaceTarget) : requestFileList(path),
+    [browseLocal, localWorkspaceTarget, requestFileList]
   );
   const effectiveRequestFileContent = useCallback(
     (path: string) =>
-      browseLocal ? readLocalFile(path, localWorkspaceRoot) : requestFileContent(path),
-    [browseLocal, localWorkspaceRoot, requestFileContent]
+      browseLocal ? readLocalFile(path, localWorkspaceTarget) : requestFileContent(path),
+    [browseLocal, localWorkspaceTarget, requestFileContent]
   );
 
-  const doSync = useCallback(async (silent: boolean = false) => {
-    if (!projectId) return false;
-    setSyncing(true);
+  const doSync = useCallback(
+    async (silent: boolean = false) => {
+      if (!projectId) return false;
+      setSyncing(true);
 
-    try {
-      // ── 影子快照同步:server/relay 模式从开发机拉代码到手机本地工作区 ──
-      if (!isLocal && requestSyncPull && requestSyncFile) {
-        const result = await pullFromDevMachine({
-          requestSyncPull,
-          requestSyncFile,
-          projectId,
-          workspaceRoot: localWorkspaceRoot,
-          sinceCommit: currentProject?.lastSyncedCommit ?? null,
-          onProgress: (m) => setSyncMessage(m),
-        });
-        if (result.commit) {
-          updateProject(projectId, {
-            lastSyncedCommit: result.commit,
-            lastSyncTime: Date.now(),
+      try {
+        // ── 影子快照同步:server/relay 模式从开发机拉代码到手机本地工作区 ──
+        if (!isLocal && requestSyncPull && requestSyncFile) {
+          const result = await pullFromDevMachine({
+            requestSyncPull,
+            requestSyncFile,
+            projectId,
+            workspaceTarget: localWorkspaceTarget,
+            sinceCommit: currentProject?.lastSyncedCommit ?? null,
+            onProgress: (m) => setSyncMessage(m),
           });
-          setLastSyncTime(Date.now());
-          setBrowseLocal(true); // 同步后浏览本地副本
-          setRefreshKey((k) => k + 1);
+          if (result.commit) {
+            updateProject(projectId, {
+              lastSyncedCommit: result.commit,
+              lastSyncTime: Date.now(),
+            });
+            setLastSyncTime(Date.now());
+            setBrowseLocal(true); // 同步后浏览本地副本
+            setRefreshKey((k) => k + 1);
+          }
+          if (!silent) {
+            if (result.success || result.commit) {
+              const tail = result.failed.length ? `，失败 ${result.failed.length}` : "";
+              Alert.alert("同步成功", `写入 ${result.applied}，删除 ${result.deleted}${tail}`);
+            } else {
+              Alert.alert("同步失败", result.error || "未知错误");
+            }
+          }
+          return result.success;
         }
-        if (!silent) {
-          if (result.success || result.commit) {
-            const tail = result.failed.length ? `，失败 ${result.failed.length}` : "";
-            Alert.alert("同步成功", `写入 ${result.applied}，删除 ${result.deleted}${tail}`);
-          } else {
+
+        // ── geek+local 模式:原有远端→本地同步 ──
+        const result = await syncRemoteToLocal(settings, projectId, localWorkspaceTarget, (msg) =>
+          setSyncMessage(msg)
+        );
+
+        if (result.success) {
+          setLastSyncTime(Date.now());
+          setRefreshKey((k) => k + 1);
+          if (!silent) {
+            Alert.alert("同步成功", `已同步 ${result.fileCount || 0} 个文件`);
+          }
+          return true;
+        } else {
+          if (!silent) {
             Alert.alert("同步失败", result.error || "未知错误");
           }
+          return false;
         }
-        return result.success;
-      }
-
-      // ── geek+local 模式:原有远端→本地同步 ──
-      const result = await syncRemoteToLocal(
-        settings,
-        projectId,
-        localWorkspaceRoot,
-        (msg) => setSyncMessage(msg)
-      );
-
-      if (result.success) {
-        setLastSyncTime(Date.now());
-        setRefreshKey((k) => k + 1);
+      } catch (err: any) {
         if (!silent) {
-          Alert.alert("同步成功", `已同步 ${result.fileCount || 0} 个文件`);
-        }
-        return true;
-      } else {
-        if (!silent) {
-          Alert.alert("同步失败", result.error || "未知错误");
+          Alert.alert("同步失败", err.message);
         }
         return false;
+      } finally {
+        setSyncing(false);
+        setSyncMessage(undefined);
       }
-    } catch (err: any) {
-      if (!silent) {
-        Alert.alert("同步失败", err.message);
-      }
-      return false;
-    } finally {
-      setSyncing(false);
-      setSyncMessage(undefined);
-    }
-  }, [settings, projectId, localWorkspaceRoot, isLocal, requestSyncPull, requestSyncFile, currentProject, updateProject]);
+    },
+    [
+      settings,
+      projectId,
+      localWorkspaceTarget,
+      isLocal,
+      requestSyncPull,
+      requestSyncFile,
+      currentProject,
+      updateProject,
+    ]
+  );
 
   // Auto-sync: when entering local mode with sync available, check if workspace is empty
   useEffect(() => {
@@ -225,29 +235,35 @@ export default function FilesTab({
     });
   }, []);
 
-  const handleFilePress = useCallback((item: FileItem) => {
-    openFile(item);
-  }, [openFile]);
+  const handleFilePress = useCallback(
+    (item: FileItem) => {
+      openFile(item);
+    },
+    [openFile]
+  );
 
   const handleTabSelect = useCallback((file: FileItem) => {
     setSelectedFile(file);
   }, []);
 
-  const handleTabClose = useCallback((file: FileItem) => {
-    setOpenFiles((prev) => {
-      const updated = prev.filter((f) => f.path !== file.path);
-      // If closing the active file, switch to the previous tab or tree
-      if (selectedFile?.path === file.path) {
-        if (updated.length > 0) {
-          setSelectedFile(updated[updated.length - 1]);
-        } else {
-          setSelectedFile(null);
-          setViewState("tree");
+  const handleTabClose = useCallback(
+    (file: FileItem) => {
+      setOpenFiles((prev) => {
+        const updated = prev.filter((f) => f.path !== file.path);
+        // If closing the active file, switch to the previous tab or tree
+        if (selectedFile?.path === file.path) {
+          if (updated.length > 0) {
+            setSelectedFile(updated[updated.length - 1]);
+          } else {
+            setSelectedFile(null);
+            setViewState("tree");
+          }
         }
-      }
-      return updated;
-    });
-  }, [selectedFile]);
+        return updated;
+      });
+    },
+    [selectedFile]
+  );
 
   // Navigate to file when pendingFilePath is set (from chat file path click)
   useEffect(() => {

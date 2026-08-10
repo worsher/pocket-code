@@ -23,6 +23,44 @@ public class PocketTerminalModule: Module {
       return "Hello world! 👋"
     }
 
+    AsyncFunction("resolveWorkspacePath") {
+      (rootPath: String, relativePath: String, allowMissing: Bool) -> String in
+      let root = URL(fileURLWithPath: rootPath)
+        .resolvingSymlinksInPath()
+        .standardizedFileURL
+      var isDirectory: ObjCBool = false
+      guard FileManager.default.fileExists(atPath: root.path, isDirectory: &isDirectory),
+            isDirectory.boolValue else {
+        throw NSError(
+          domain: "PocketTerminalModule",
+          code: 1,
+          userInfo: [NSLocalizedDescriptionKey: "Workspace root is unavailable"]
+        )
+      }
+      let target = root
+        .appendingPathComponent(relativePath)
+        .resolvingSymlinksInPath()
+        .standardizedFileURL
+      let rootComponents = root.pathComponents
+      let targetComponents = target.pathComponents
+      guard targetComponents.count >= rootComponents.count,
+            Array(targetComponents.prefix(rootComponents.count)) == rootComponents else {
+        throw NSError(
+          domain: "PocketTerminalModule",
+          code: 2,
+          userInfo: [NSLocalizedDescriptionKey: "Workspace path resolves outside the workspace"]
+        )
+      }
+      if !allowMissing && !FileManager.default.fileExists(atPath: target.path) {
+        throw NSError(
+          domain: "PocketTerminalModule",
+          code: 3,
+          userInfo: [NSLocalizedDescriptionKey: "Workspace path does not exist"]
+        )
+      }
+      return target.path
+    }
+
     // Defines a JavaScript function that always returns a Promise and whose native code
     // is by default dispatched on the different thread than the JavaScript runtime runs on.
     AsyncFunction("setValueAsync") { (value: String) in

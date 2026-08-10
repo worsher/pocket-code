@@ -1,13 +1,14 @@
 // ── File Upload / Download ──────────────────────────────
 
 import type { IncomingMessage, ServerResponse } from "http";
-import { createReadStream, existsSync, statSync, readdirSync } from "fs";
+import { createReadStream, existsSync, readFileSync, readdirSync, statSync } from "fs";
 import { join, basename, extname, relative } from "path";
 import { mkdir, writeFile, readFile, stat as fsStat } from "fs/promises";
 import { verifyToken } from "./auth.js";
 import { getSession } from "./db.js";
-import { getWorkspaceRoot } from "./tools.js";
+import { getWorkspaceHandle, getWorkspaceRoot } from "./tools.js";
 import { resolveWorkspaceEntryChecked } from "./workspacePath.js";
+import { isUuid, type WorkspaceHandle } from "@pocket-code/workspace-core";
 
 const MAX_UPLOAD_SIZE = parseInt(process.env.MAX_UPLOAD_SIZE || "52428800", 10); // 50MB
 const MAX_SYNC_SIZE = 50 * 1024 * 1024; // 50MB total for workspace sync
@@ -26,8 +27,19 @@ function sendJson(res: ServerResponse, status: number, data: unknown) {
 }
 
 /** Resolve workspace path from session, using project-aware getWorkspaceRoot */
-function resolveWorkspace(sessionId: string, userId: string, projectId?: string): string {
+function resolveWorkspace(
+  sessionId: string,
+  userId: string,
+  projectId?: string
+): string | WorkspaceHandle {
+  if (projectId && isUuid(projectId)) {
+    return getWorkspaceHandle({ sessionId, userId, projectId });
+  }
   return getWorkspaceRoot({ sessionId, userId, projectId: projectId || undefined });
+}
+
+function worktreeRoot(target: string | WorkspaceHandle): string {
+  return typeof target === "string" ? target : target.worktreeRoot;
 }
 
 // ── Upload ───────────────────────────────────────────────
@@ -105,7 +117,7 @@ export async function handleFileUpload(req: IncomingMessage, res: ServerResponse
   }
 
   // Resolve workspace using project-aware path (consistent with tools.ts)
-  const workspace = resolveWorkspace(sessionId, auth.userId, session.projectId);
+  const workspace = worktreeRoot(resolveWorkspace(sessionId, auth.userId, session.projectId));
   let fullTarget: string;
   try {
     fullTarget = await resolveWorkspaceEntryChecked(
@@ -175,7 +187,7 @@ export async function handleFileDownload(
   }
 
   // Resolve workspace using project-aware path (consistent with tools.ts)
-  const workspace = resolveWorkspace(sessionId, auth.userId, session.projectId);
+  const workspace = worktreeRoot(resolveWorkspace(sessionId, auth.userId, session.projectId));
   let fullPath: string;
   try {
     fullPath = await resolveWorkspaceEntryChecked(workspace, filePath, { allowMissing: true });
@@ -309,7 +321,7 @@ function collectFiles(
       const isBinary = BINARY_EXTS.has(ext);
 
       try {
-        const raw = require("fs").readFileSync(fullPath);
+        const raw = readFileSync(fullPath);
         const content = isBinary ? raw.toString("base64") : raw.toString("utf8");
 
         sizeAccumulator.total += fileStat.size;
@@ -355,11 +367,7 @@ export async function handleWorkspaceSync(
   }
 
   // Use project-level workspace (sessionId empty since we want project root)
-  const workspace = getWorkspaceRoot({
-    sessionId: "",
-    projectId,
-    userId: auth.userId,
-  });
+  const workspace = worktreeRoot(resolveWorkspace("", auth.userId, projectId));
 
   if (!existsSync(workspace)) {
     sendJson(res, 404, { error: "Workspace not found" });

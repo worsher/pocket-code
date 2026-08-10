@@ -16,23 +16,23 @@ import { normalizeWorkspaceRelativePath } from "@pocket-code/workspace-core";
 // ── Types ─────────────────────────────────────────────────────────────────────
 
 export interface ExecResult {
-    success: boolean;
-    stdout: string;
-    stderr: string;
-    exitCode: number;
-    /** true if stdout was truncated due to length limit */
-    truncated: boolean;
+  success: boolean;
+  stdout: string;
+  stderr: string;
+  exitCode: number;
+  /** true if stdout was truncated due to length limit */
+  truncated: boolean;
 }
 
 export interface ExecOptions {
-    /** 超时毫秒数，默认 30000 */
-    timeout?: number;
-    /** 额外环境变量 */
-    env?: Record<string, string>;
-    /** stdout 字符数上限，超过则截断，默认 10000 */
-    maxStdoutLength?: number;
-    /** Catalog-resolved worktree URI/path. */
-    workspaceRoot?: string;
+  /** 超时毫秒数，默认 30000 */
+  timeout?: number;
+  /** 额外环境变量 */
+  env?: Record<string, string>;
+  /** stdout 字符数上限，超过则截断，默认 10000 */
+  maxStdoutLength?: number;
+  /** Catalog-resolved worktree URI/path. */
+  workspaceRoot?: string;
 }
 
 // ── Config ────────────────────────────────────────────────────────────────────
@@ -46,8 +46,8 @@ const DEFAULT_MAX_STDOUT = 10_000;
  * 获取 workspace 根目录（绝对路径，不带 file:// 前缀）。
  */
 export function getWorkspaceDir(workspaceRoot?: string): string {
-    const uri = workspaceRoot ?? new Directory(Paths.document.uri || "", "workspace").uri;
-    return decodeURIComponent(uri.replace(/^file:\/\//, ""));
+  const uri = workspaceRoot ?? new Directory(Paths.document.uri || "", "workspace").uri;
+  return decodeURIComponent(uri.replace(/^file:\/\//, ""));
 }
 
 /**
@@ -55,22 +55,20 @@ export function getWorkspaceDir(workspaceRoot?: string): string {
  * 相对路径相对于 workspace 根目录。
  */
 function resolveCwd(cwd?: string, workspaceRoot?: string): string {
-    // Strip trailing slash from workspace dir (Directory.uri may include one)
-    const workspace = getWorkspaceDir(workspaceRoot).replace(/\/$/, "");
-    if (!cwd || cwd === ".") return workspace;
-    if (cwd.startsWith("/")) {
-        const absolute = cwd.replace(/\/$/, "");
-        if (absolute === workspace) return workspace;
-        if (!absolute.startsWith(`${workspace}/`)) {
-            throw new Error("Command cwd is outside the workspace");
-        }
-        const safeSuffix = normalizeWorkspaceRelativePath(
-            absolute.slice(workspace.length + 1)
-        );
-        return safeSuffix === "." ? workspace : `${workspace}/${safeSuffix}`;
+  // Strip trailing slash from workspace dir (Directory.uri may include one)
+  const workspace = getWorkspaceDir(workspaceRoot).replace(/\/$/, "");
+  if (!cwd || cwd === ".") return workspace;
+  if (cwd.startsWith("/")) {
+    const absolute = cwd.replace(/\/$/, "");
+    if (absolute === workspace) return workspace;
+    if (!absolute.startsWith(`${workspace}/`)) {
+      throw new Error("Command cwd is outside the workspace");
     }
-    const safeCwd = normalizeWorkspaceRelativePath(cwd);
-    return safeCwd === "." ? workspace : `${workspace}/${safeCwd}`;
+    const safeSuffix = normalizeWorkspaceRelativePath(absolute.slice(workspace.length + 1));
+    return safeSuffix === "." ? workspace : `${workspace}/${safeSuffix}`;
+  }
+  const safeCwd = normalizeWorkspaceRelativePath(cwd);
+  return safeCwd === "." ? workspace : `${workspace}/${safeCwd}`;
 }
 
 // ── Public API ────────────────────────────────────────────────────────────────
@@ -87,65 +85,66 @@ function resolveCwd(cwd?: string, workspaceRoot?: string): string {
  * @param options  - 超时、环境变量、stdout 截断配置
  */
 export async function exec(
-    command: string,
-    cwd?: string,
-    options: ExecOptions = {}
+  command: string,
+  cwd?: string,
+  options: ExecOptions = {}
 ): Promise<ExecResult> {
-    const {
-        timeout = DEFAULT_TIMEOUT_MS,
-        maxStdoutLength = DEFAULT_MAX_STDOUT,
-        workspaceRoot,
-    } = options;
+  const {
+    timeout = DEFAULT_TIMEOUT_MS,
+    maxStdoutLength = DEFAULT_MAX_STDOUT,
+    workspaceRoot,
+  } = options;
 
-    const resolvedCwd = resolveCwd(cwd, workspaceRoot);
+  const resolvedCwd = resolveCwd(cwd, workspaceRoot);
 
-    // Check runtime availability
-    const status = await getRuntimeStatus();
-    const useProot = status.prootAvailable && status.rootfsInstalled;
+  // Check runtime availability
+  const status = await getRuntimeStatus();
+  const useProot = status.prootAvailable && status.rootfsInstalled;
 
-    // Build actual command
-    const actualCommand = useProot
-        ? buildProotCommand(command, resolvedCwd)
-        : command;
+  // Build actual command
+  const actualCommand = useProot ? buildProotCommand(command, resolvedCwd, workspaceRoot) : command;
 
-    const actualCwd = useProot ? "/" : resolvedCwd;
+  const actualCwd = useProot ? "/" : resolvedCwd;
 
-    // Execute via native module
-    const mod = requireNativeModule("PocketTerminalModule");
+  // Execute via native module
+  const mod = requireNativeModule("PocketTerminalModule");
 
-    let result: { success: boolean; stdout: string; stderr: string; exitCode: number };
+  let result: { success: boolean; stdout: string; stderr: string; exitCode: number };
 
-    // Wrap with a Promise.race for timeout enforcement
-    const execPromise = mod.runLocalCommand(actualCommand, actualCwd) as Promise<typeof result>;
-    const timeoutPromise = new Promise<never>((_, reject) =>
-        setTimeout(() => reject(new Error(`命令超时 (${timeout}ms): ${command}`)), timeout)
-    );
+  // Wrap with a Promise.race for timeout enforcement
+  const execPromise = mod.runLocalCommand(actualCommand, actualCwd) as Promise<typeof result>;
+  const timeoutPromise = new Promise<never>((_, reject) =>
+    setTimeout(() => reject(new Error(`命令超时 (${timeout}ms): ${command}`)), timeout)
+  );
 
-    try {
-        result = await Promise.race([execPromise, timeoutPromise]);
-    } catch (e: any) {
-        return {
-            success: false,
-            stdout: "",
-            stderr: e.message ?? String(e),
-            exitCode: -1,
-            truncated: false,
-        };
-    }
-
-    // Truncate stdout if too long
-    const truncated = result.stdout.length > maxStdoutLength;
-    const stdout = truncated
-        ? result.stdout.slice(0, maxStdoutLength) + "\n... [输出已截断，超过 " + maxStdoutLength + " 字符]"
-        : result.stdout;
-
+  try {
+    result = await Promise.race([execPromise, timeoutPromise]);
+  } catch (e: any) {
     return {
-        success: result.success,
-        stdout,
-        stderr: result.stderr,
-        exitCode: result.exitCode,
-        truncated,
+      success: false,
+      stdout: "",
+      stderr: e.message ?? String(e),
+      exitCode: -1,
+      truncated: false,
     };
+  }
+
+  // Truncate stdout if too long
+  const truncated = result.stdout.length > maxStdoutLength;
+  const stdout = truncated
+    ? result.stdout.slice(0, maxStdoutLength) +
+      "\n... [输出已截断，超过 " +
+      maxStdoutLength +
+      " 字符]"
+    : result.stdout;
+
+  return {
+    success: result.success,
+    stdout,
+    stderr: result.stderr,
+    exitCode: result.exitCode,
+    truncated,
+  };
 }
 
 /**
@@ -157,22 +156,20 @@ export async function exec(
  * @returns { success, processId?, error? }
  */
 export async function startBackgroundExec(
-    command: string,
-    cwd?: string,
-    workspaceRoot?: string,
+  command: string,
+  cwd?: string,
+  workspaceRoot?: string
 ): Promise<{ success: boolean; processId?: number; error?: string }> {
-    const resolvedCwd = resolveCwd(cwd, workspaceRoot);
+  const resolvedCwd = resolveCwd(cwd, workspaceRoot);
 
-    const status = await getRuntimeStatus();
-    const useProot = status.prootAvailable && status.rootfsInstalled;
+  const status = await getRuntimeStatus();
+  const useProot = status.prootAvailable && status.rootfsInstalled;
 
-    const actualCommand = useProot
-        ? buildProotCommand(command, resolvedCwd)
-        : command;
+  const actualCommand = useProot ? buildProotCommand(command, resolvedCwd, workspaceRoot) : command;
 
-    const actualCwd = useProot ? "/" : resolvedCwd;
+  const actualCwd = useProot ? "/" : resolvedCwd;
 
-    return startNativeProcess(actualCommand, actualCwd, command);
+  return startNativeProcess(actualCommand, actualCwd, command);
 }
 
 /**
@@ -182,13 +179,13 @@ export async function startBackgroundExec(
  *   "本地 Android Shell (仅基本命令，未安装 proot 环境)"
  */
 export async function getExecutionEnvironmentDescription(): Promise<string> {
-    const status = await getRuntimeStatus();
-    if (status.prootAvailable && status.rootfsInstalled) {
-        const pkgs =
-            status.installedPackages.length > 0
-                ? status.installedPackages.join(", ")
-                : "python3, nodejs, npm (建议安装)";
-        return `本地 Android Shell (proot + Alpine Linux ${status.rootfsVersion}，已安装: ${pkgs})`;
-    }
-    return "本地 Android Shell (仅基本命令；未配置 proot 执行环境，运行 Python/Node.js 需先安装)";
+  const status = await getRuntimeStatus();
+  if (status.prootAvailable && status.rootfsInstalled) {
+    const pkgs =
+      status.installedPackages.length > 0
+        ? status.installedPackages.join(", ")
+        : "python3, nodejs, npm (建议安装)";
+    return `本地 Android Shell (proot + Alpine Linux ${status.rootfsVersion}，已安装: ${pkgs})`;
+  }
+  return "本地 Android Shell (仅基本命令；未配置 proot 执行环境，运行 Python/Node.js 需先安装)";
 }

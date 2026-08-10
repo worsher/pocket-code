@@ -3,7 +3,7 @@
 // Used by both the direct WebSocket server (index.ts) and the relay daemon.
 
 import { createSession, runAgent, type AgentSession } from "./agent.js";
-import { getWorkspaceRoot } from "./tools.js";
+import { getServerV2Root, getWorkspaceRoot } from "./tools.js";
 import { buildToolRegistry } from "@pocket-code/agent-core";
 import { createNodeBackend } from "./nodeBackend.js";
 import { setupGitCredentials } from "./gitCredentials.js";
@@ -34,8 +34,7 @@ import { handleSyncPull, handleSyncFile } from "./sync/syncHandler.js";
 import { bindLinkedDirectory } from "./linkedImport.js";
 import { getSessionStream, type SessionEventStream } from "./eventBuffer.js";
 import { rm } from "fs/promises";
-import { homedir } from "os";
-import { join, resolve } from "path";
+import { join } from "path";
 import { getManagedWorkspaceRelativeRoots, isUuid } from "@pocket-code/workspace-core";
 
 // Shared session store — the same Map is used for all handlers
@@ -450,7 +449,7 @@ export function createMessageHandler(
             const { toolName, args } = msg;
             const callId = msg.callId ?? "";
             const registry = buildToolRegistry(
-              createNodeBackend(session.workspace, session.containerId),
+              createNodeBackend(session.workspaceHandle ?? session.workspace, session.containerId),
               session.workspace
             );
             if (!registry.has(toolName)) {
@@ -481,7 +480,7 @@ export function createMessageHandler(
               return;
             }
             const listRegistry = buildToolRegistry(
-              createNodeBackend(session.workspace, session.containerId),
+              createNodeBackend(session.workspaceHandle ?? session.workspace, session.containerId),
               session.workspace
             );
             try {
@@ -512,7 +511,7 @@ export function createMessageHandler(
               return;
             }
             const readRegistry = buildToolRegistry(
-              createNodeBackend(session.workspace, session.containerId),
+              createNodeBackend(session.workspaceHandle ?? session.workspace, session.containerId),
               session.workspace
             );
             try {
@@ -620,8 +619,7 @@ export function createMessageHandler(
               ? getWorkspaceProject(auth.userId, delProjectId)
               : null;
             if (catalogProject) {
-              const root =
-                process.env.POCKET_CODE_DATA_ROOT || resolve(join(homedir(), ".pocket-code", "v2"));
+              const root = getServerV2Root();
               const managed = getManagedWorkspaceRelativeRoots(catalogProject.storageKey);
               try {
                 // linked worktrees are external user data. Deleting a v2 project

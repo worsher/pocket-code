@@ -25,17 +25,17 @@
 - [x] 设计可版本化 catalog schema，Project 与 Replica 分表/分记录存储。
 - [x] 分别实现 mobile/server catalog repository，并加入用户作用域。
 - [x] 实现 `WorkspaceResolver`，受管理路径只接受 catalog 分配的 storage key。
-- [ ] 建立 `projects/<storage-key>/{worktree,state,cache}`、runtime、staging、trash。
-- [ ] 移除 default project 的特殊目录语义，新建项目全部进入 v2。
+- [x] 建立 `projects/<storage-key>/{worktree,state,cache}`、runtime、staging、trash。
+- [x] 移除 default project 的特殊目录语义；仅在探测到旧 workspace 时保留只读迁移入口，新安装全部进入 v2。
 - [x] 加入 catalog 原子写、损坏恢复和并发测试。
 
 ## 阶段 3：迁移路径消费者
 
-- [ ] 文件 API 改为接收 `WorkspaceHandle` 与已验证相对路径。
-- [ ] 命令执行、PTY/Terminal、Git、Preview 改为使用 handle 的能力和 root。
-- [ ] 移除各模块的 `getWorkspaceRoot(projectId)` 与 fallback 到共享 workspace 的逻辑。
-- [ ] 在适配层实现 realpath/文件句柄包含关系检查和 symlink 越界保护。（server realpath 已完成，file-handle/mobile 待补）
-- [ ] 加入跨项目读写、绝对路径、`..`、symlink 和 stale generation 测试。
+- [x] 文件 API 改为接收 `WorkspaceHandle` 与已验证相对路径。
+- [x] 命令执行、PTY/Terminal、Git、Preview 改为使用 handle 的能力和 root。
+- [x] 移除各模块按 projectId 拼路径和回退共享 workspace 的逻辑；旧布局只经兼容 resolver 访问。
+- [x] 在适配层实现 realpath/文件句柄包含关系检查和 symlink 越界保护（server realpath + Android/iOS canonical path）。
+- [x] 加入跨项目读写、绝对路径、`..`、symlink 和 stale generation 测试。
 
 ## 阶段 4：协议与异步作用域
 

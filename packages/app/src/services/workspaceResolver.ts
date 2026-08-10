@@ -26,6 +26,10 @@ export function getMobileV2Root(): Directory {
   return new Directory(Paths.document, "pocket-code", "v2");
 }
 
+export function hasLegacyMobileWorkspace(): boolean {
+  return new Directory(Paths.document, "workspace").exists;
+}
+
 export function ensureMobileStorageLayout(): Directory {
   const root = getMobileV2Root();
   ensureDirectory(root);

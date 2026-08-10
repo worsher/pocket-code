@@ -7,7 +7,7 @@
 import * as FileSystem from "expo-file-system/legacy";
 import { FileSystemUploadType } from "expo-file-system/legacy";
 import * as DocumentPicker from "expo-document-picker";
-import { writeLocalFile } from "./localFileSystem";
+import { writeLocalFile, type MobileWorkspaceTarget } from "./localFileSystem";
 
 export interface UploadResult {
   success: boolean;
@@ -65,9 +65,7 @@ export async function uploadFile(
   targetPath?: string,
   onProgress?: (progress: UploadProgress) => void
 ): Promise<UploadResult> {
-  const httpBase = serverBaseUrl
-    .replace(/^ws:\/\//, "http://")
-    .replace(/^wss:\/\//, "https://");
+  const httpBase = serverBaseUrl.replace(/^ws:\/\//, "http://").replace(/^wss:\/\//, "https://");
 
   let url = `${httpBase}/api/files/upload?sessionId=${encodeURIComponent(sessionId)}&fileName=${encodeURIComponent(fileName)}`;
   if (targetPath) {
@@ -117,9 +115,7 @@ export async function downloadFile(
   sessionId: string,
   filePath: string
 ): Promise<{ uri: string } | null> {
-  const httpBase = serverBaseUrl
-    .replace(/^ws:\/\//, "http://")
-    .replace(/^wss:\/\//, "https://");
+  const httpBase = serverBaseUrl.replace(/^ws:\/\//, "http://").replace(/^wss:\/\//, "https://");
 
   const url = `${httpBase}/api/files/download?sessionId=${encodeURIComponent(sessionId)}&path=${encodeURIComponent(filePath)}`;
   const fileName = filePath.split("/").pop() || "download";
@@ -166,11 +162,9 @@ export async function syncWorkspaceFromServer(
   serverBaseUrl: string,
   authToken: string,
   projectId: string,
-  workspaceRoot?: string
+  workspaceTarget: MobileWorkspaceTarget
 ): Promise<SyncResult> {
-  const httpBase = serverBaseUrl
-    .replace(/^ws:\/\//, "http://")
-    .replace(/^wss:\/\//, "https://");
+  const httpBase = serverBaseUrl.replace(/^ws:\/\//, "http://").replace(/^wss:\/\//, "https://");
 
   const url = `${httpBase}/api/workspace/sync?projectId=${encodeURIComponent(projectId)}`;
 
@@ -197,11 +191,8 @@ export async function syncWorkspaceFromServer(
     let written = 0;
     for (const file of files) {
       try {
-        const content =
-          file.encoding === "base64"
-            ? atob(file.content)
-            : file.content;
-        const result = await writeLocalFile(file.path, content, workspaceRoot);
+        const content = file.encoding === "base64" ? atob(file.content) : file.content;
+        const result = await writeLocalFile(file.path, content, workspaceTarget);
         if (result.success) written++;
       } catch {
         // Skip files that fail to write

@@ -1,6 +1,8 @@
-import { Paths, File, Directory } from "expo-file-system";
+import { File, Directory } from "expo-file-system";
 import * as LegacyFS from "expo-file-system/legacy";
+import { requireNativeModule } from "expo-modules-core";
 import { normalizeWorkspaceRelativePath } from "@pocket-code/workspace-core";
+import type { WorkspaceHandle } from "@pocket-code/workspace-core";
 import { exec as localExec, startBackgroundExec } from "./localExecutor";
 import { killProcess } from "./processManager";
 import type { AppSettings } from "../store/settings";
@@ -23,18 +25,15 @@ import {
  * Default workspace: Paths.document + "workspace/"
  */
 
-function getWorkspaceDir(workspaceRoot?: string): Directory {
-  if (workspaceRoot) {
-    return new Directory(workspaceRoot);
-  }
-  return new Directory(Paths.document, "workspace");
+export type MobileWorkspaceTarget = string | Pick<WorkspaceHandle, "worktreeRoot">;
+
+export function getMobileWorkspaceRoot(target: MobileWorkspaceTarget): string {
+  if (typeof target === "string") return target;
+  return target.worktreeRoot;
 }
 
-/** Get the project-specific workspace root URI. */
-export function getProjectWorkspaceRoot(projectId?: string): string | undefined {
-  if (!projectId || projectId === "default") return undefined;
-  const dir = new Directory(Paths.document, "workspace", projectId);
-  return dir.uri;
+function getWorkspaceDir(target: MobileWorkspaceTarget): Directory {
+  return new Directory(getMobileWorkspaceRoot(target));
 }
 
 /** Ensure workspace directory exists */
@@ -44,29 +43,56 @@ function ensureWorkspace(dir: Directory): void {
   }
 }
 
-/** Resolve a relative path against the workspace root directory */
-function resolveDir(root: Directory, relativePath: string): Directory {
-  const normalized = normalizeWorkspaceRelativePath(relativePath);
-  if (normalized === ".") return root;
-  return new Directory(root, normalized);
+function nativePathFromFileUri(uri: string): string {
+  if (!uri.startsWith("file://")) {
+    throw new Error("Workspace file access requires an app-private file URI");
+  }
+  return decodeURIComponent(uri.slice("file://".length)).replace(/\/$/, "");
 }
 
-function resolveFile(root: Directory, relativePath: string): File {
+async function resolveCanonicalWorkspaceUri(
+  root: Directory,
+  relativePath: string,
+  allowMissing: boolean
+): Promise<string> {
+  const normalized = normalizeWorkspaceRelativePath(relativePath);
+  const module = requireNativeModule("PocketTerminalModule");
+  const canonicalPath = await module.resolveWorkspacePath(
+    nativePathFromFileUri(root.uri),
+    normalized === "." ? "" : normalized,
+    allowMissing
+  );
+  if (typeof canonicalPath !== "string" || !canonicalPath.startsWith("/")) {
+    throw new Error("Native workspace path validation returned an invalid path");
+  }
+  return `file://${canonicalPath}`;
+}
+
+/** Resolve a relative path against the workspace root directory. */
+async function resolveDir(root: Directory, relativePath: string): Promise<Directory> {
+  return new Directory(await resolveCanonicalWorkspaceUri(root, relativePath, false));
+}
+
+async function resolveFile(
+  root: Directory,
+  relativePath: string,
+  allowMissing: boolean
+): Promise<File> {
   const normalized = normalizeWorkspaceRelativePath(relativePath);
   if (normalized === ".") throw new Error("A file path is required");
-  return new File(root, normalized);
+  return new File(await resolveCanonicalWorkspaceUri(root, normalized, allowMissing));
 }
 
 /** List files and directories at a given path */
 export async function listLocalFiles(
-  relativePath: string = ".",
-  workspaceRoot?: string
+  relativePath: string,
+  workspaceTarget: MobileWorkspaceTarget
 ): Promise<{ success: boolean; items?: { name: string; type: string }[]; error?: string }> {
   try {
-    const root = getWorkspaceDir(workspaceRoot);
+    const root = getWorkspaceDir(workspaceTarget);
     ensureWorkspace(root);
 
-    const targetDir = resolveDir(root, relativePath);
+    const targetDir = await resolveDir(root, relativePath);
     if (!targetDir.exists) {
       return { success: false, error: "Directory does not exist" };
     }
@@ -86,11 +112,11 @@ export async function listLocalFiles(
 /** Read file content at a given path */
 export async function readLocalFile(
   relativePath: string,
-  workspaceRoot?: string
+  workspaceTarget: MobileWorkspaceTarget
 ): Promise<{ success: boolean; content?: string; error?: string }> {
   try {
-    const root = getWorkspaceDir(workspaceRoot);
-    const file = resolveFile(root, relativePath);
+    const root = getWorkspaceDir(workspaceTarget);
+    const file = await resolveFile(root, relativePath, false);
 
     if (!file.exists) {
       return { success: false, error: "File does not exist" };
@@ -107,13 +133,13 @@ export async function readLocalFile(
 export async function writeLocalFile(
   relativePath: string,
   content: string,
-  workspaceRoot?: string
+  workspaceTarget: MobileWorkspaceTarget
 ): Promise<{ success: boolean; error?: string }> {
   try {
-    const root = getWorkspaceDir(workspaceRoot);
+    const root = getWorkspaceDir(workspaceTarget);
     ensureWorkspace(root);
 
-    const file = resolveFile(root, relativePath);
+    const file = await resolveFile(root, relativePath, true);
 
     // Ensure parent directory exists
     const parentDir = file.parentDirectory;
@@ -139,13 +165,13 @@ export async function writeLocalFile(
 export async function writeLocalFileBase64(
   relativePath: string,
   base64: string,
-  workspaceRoot?: string
+  workspaceTarget: MobileWorkspaceTarget
 ): Promise<{ success: boolean; error?: string }> {
   try {
-    const root = getWorkspaceDir(workspaceRoot);
+    const root = getWorkspaceDir(workspaceTarget);
     ensureWorkspace(root);
 
-    const file = resolveFile(root, relativePath);
+    const file = await resolveFile(root, relativePath, true);
     const parentDir = file.parentDirectory;
     if (!parentDir.exists) {
       parentDir.create({ idempotent: true });
@@ -159,14 +185,28 @@ export async function writeLocalFileBase64(
   }
 }
 
+export async function readLocalFileBase64(
+  relativePath: string,
+  workspaceTarget: MobileWorkspaceTarget
+): Promise<{ success: boolean; content?: string; error?: string }> {
+  try {
+    const root = getWorkspaceDir(workspaceTarget);
+    const file = await resolveFile(root, relativePath, false);
+    if (!file.exists) return { success: false, error: "File does not exist" };
+    return { success: true, content: await file.base64() };
+  } catch (err: any) {
+    return { success: false, error: err.message };
+  }
+}
+
 /** Delete a file at a given path (idempotent — missing file is a no-op). */
 export async function deleteLocalFile(
   relativePath: string,
-  workspaceRoot?: string
+  workspaceTarget: MobileWorkspaceTarget
 ): Promise<{ success: boolean; error?: string }> {
   try {
-    const root = getWorkspaceDir(workspaceRoot);
-    const file = resolveFile(root, relativePath);
+    const root = getWorkspaceDir(workspaceTarget);
+    const file = await resolveFile(root, relativePath, true);
     if (file.exists) {
       file.delete();
     }
@@ -184,9 +224,10 @@ export async function deleteLocalFile(
 export async function executeLocalTool(
   toolName: string,
   args: Record<string, unknown>,
-  settings?: AppSettings,
-  workspaceRoot?: string,
+  settings: AppSettings | undefined,
+  workspaceTarget: MobileWorkspaceTarget
 ): Promise<unknown | null> {
+  const workspaceRoot = getMobileWorkspaceRoot(workspaceTarget);
   switch (toolName) {
     case "listFiles":
       return listLocalFiles((args.path as string) || ".", workspaceRoot);
@@ -196,33 +237,20 @@ export async function executeLocalTool(
       return writeLocalFile(args.path as string, args.content as string, workspaceRoot);
     // ── Git tools ──
     case "gitClone":
-      return gitClone(
-        args.url as string,
-        args.dir as string | undefined,
-        settings!,
-        workspaceRoot,
-      );
+      return gitClone(args.url as string, args.dir as string | undefined, settings!, workspaceRoot);
     case "gitStatus":
       return gitStatus(args.path as string | undefined, workspaceRoot);
     case "gitAdd":
-      return gitAdd(
-        args.filepath as string,
-        args.path as string | undefined,
-        workspaceRoot,
-      );
+      return gitAdd(args.filepath as string, args.path as string | undefined, workspaceRoot);
     case "gitCommit":
-      return gitCommit(
-        args.message as string,
-        args.path as string | undefined,
-        workspaceRoot,
-      );
+      return gitCommit(args.message as string, args.path as string | undefined, workspaceRoot);
     case "gitPush":
       return gitPush(
         settings!,
         args.path as string | undefined,
         args.remote as string | undefined,
         args.branch as string | undefined,
-        workspaceRoot,
+        workspaceRoot
       );
     case "gitPull":
       return gitPull(
@@ -230,26 +258,22 @@ export async function executeLocalTool(
         args.path as string | undefined,
         args.remote as string | undefined,
         args.branch as string | undefined,
-        workspaceRoot,
+        workspaceRoot
       );
     case "gitLog":
       return gitLog(
         args.path as string | undefined,
         args.depth as number | undefined,
-        workspaceRoot,
+        workspaceRoot
       );
     case "gitBranch":
       return gitBranch(
         args.name as string | undefined,
         args.path as string | undefined,
-        workspaceRoot,
+        workspaceRoot
       );
     case "gitCheckout":
-      return gitCheckout(
-        args.ref as string,
-        args.path as string | undefined,
-        workspaceRoot,
-      );
+      return gitCheckout(args.ref as string, args.path as string | undefined, workspaceRoot);
     case "runCommand": {
       const cwd = (args.cwd as string | undefined) ?? undefined;
       const result = await localExec(args.command as string, cwd, {
@@ -277,10 +301,4 @@ export async function executeLocalTool(
     default:
       return null; // Not supported locally
   }
-}
-
-/** Get the default workspace path */
-export function getDefaultWorkspace(): string {
-  const dir = new Directory(Paths.document, "workspace");
-  return dir.uri;
 }

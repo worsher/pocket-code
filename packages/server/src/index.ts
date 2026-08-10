@@ -6,11 +6,13 @@ import { isPoolEnabled, initPool } from "./containerPool.js";
 import { initDb } from "./db.js";
 import { createMessageHandler } from "./messageHandler.js";
 import { shutdownAll } from "./processRegistry.js";
+import { ensureServerStorageLayout } from "./tools.js";
 
 const PORT = parseInt(process.env.PORT || "3100", 10);
 
 // Initialise DB before starting WebSocket server
 await initDb();
+ensureServerStorageLayout();
 
 // Initialize container pool if enabled
 if (isPoolEnabled()) {
@@ -99,6 +101,12 @@ function onExit() {
   shuttingDown = true;
   shutdownAll();
 }
-process.on("SIGTERM", () => { onExit(); process.exit(0); });
-process.on("SIGINT", () => { onExit(); process.exit(0); });
+process.on("SIGTERM", () => {
+  onExit();
+  process.exit(0);
+});
+process.on("SIGINT", () => {
+  onExit();
+  process.exit(0);
+});
 process.on("exit", onExit);

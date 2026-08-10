@@ -13,7 +13,7 @@ import { maybeRewriteToTunnel } from "./tunnelUrl";
 import { createBuildSession } from "../../services/previewBuilder/orchestrator";
 import { createExpoIo } from "../../services/previewBuilder/ioExpo";
 import { ensureBuilderAssets } from "../../services/previewBuilder/assets";
-import { getDefaultWorkspace } from "../../services/localFileSystem";
+import { getMobileWorkspaceRoot, type MobileWorkspaceTarget } from "../../services/localFileSystem";
 
 interface Props {
   /** URL to load initially, set externally when a dev server is detected */
@@ -21,10 +21,10 @@ interface Props {
   /** App 设置:relay 模式下用于构造中继隧道预览 URL */
   settings?: AppSettings;
   /** Catalog-resolved local worktree URI. */
-  workspaceRoot?: string;
+  workspaceTarget: MobileWorkspaceTarget;
 }
 
-export default function PreviewTab({ initialUrl, settings, workspaceRoot }: Props) {
+export default function PreviewTab({ initialUrl, settings, workspaceTarget }: Props) {
   const [url, setUrl] = useState(initialUrl || "http://localhost:3000");
   const [inputUrl, setInputUrl] = useState(url);
   const [loading, setLoading] = useState(false);
@@ -32,7 +32,10 @@ export default function PreviewTab({ initialUrl, settings, workspaceRoot }: Prop
   const [canGoBack, setCanGoBack] = useState(false);
   const [canGoForward, setCanGoForward] = useState(false);
   const webViewRef = useRef<WebView>(null);
-  const [tunnelInfo, setTunnelInfo] = useState<{ relayTunnelMode?: "subdomain" | "path"; relayTunnelBaseDomain?: string | null }>({});
+  const [tunnelInfo, setTunnelInfo] = useState<{
+    relayTunnelMode?: "subdomain" | "path";
+    relayTunnelBaseDomain?: string | null;
+  }>({});
 
   // Sync when initialUrl changes from outside
   React.useEffect(() => {
@@ -47,22 +50,37 @@ export default function PreviewTab({ initialUrl, settings, workspaceRoot }: Prop
   // 旧 relay 不返回这些字段 / 请求失败时静默回退 path 模式(buildTunnelUrl 的默认行为)。
   React.useEffect(() => {
     if (!settings || settings.workspaceMode !== "relay" || !settings.relayServerUrl) return;
-    const httpBase = settings.relayServerUrl.replace(/^ws:\/\//, "http://").replace(/^wss:\/\//, "https://").replace(/\/relay\/?$/, "");
+    const httpBase = settings.relayServerUrl
+      .replace(/^ws:\/\//, "http://")
+      .replace(/^wss:\/\//, "https://")
+      .replace(/\/relay\/?$/, "");
     let cancelled = false;
     fetch(`${httpBase}/health`)
       .then((r) => r.json())
-      .then((j) => { if (!cancelled && j && (j.tunnelMode === "subdomain" || j.tunnelMode === "path")) {
-        setTunnelInfo({ relayTunnelMode: j.tunnelMode, relayTunnelBaseDomain: j.tunnelBaseDomain ?? null });
-      }})
-      .catch(() => { /* 旧 relay / 拉取失败:静默,buildTunnelUrl 回退 path */ });
-    return () => { cancelled = true; };
+      .then((j) => {
+        if (!cancelled && j && (j.tunnelMode === "subdomain" || j.tunnelMode === "path")) {
+          setTunnelInfo({
+            relayTunnelMode: j.tunnelMode,
+            relayTunnelBaseDomain: j.tunnelBaseDomain ?? null,
+          });
+        }
+      })
+      .catch(() => {
+        /* 旧 relay / 拉取失败:静默,buildTunnelUrl 回退 path */
+      });
+    return () => {
+      cancelled = true;
+    };
   }, [settings?.relayServerUrl, settings?.workspaceMode]);
 
   const handleGo = useCallback(() => {
     let target = inputUrl.trim();
     if (!target) return;
     // relay 模式:把 localhost/裸端口改写为中继隧道 URL
-    const tunnel = maybeRewriteToTunnel(target, settings ? { ...settings, ...tunnelInfo } : undefined);
+    const tunnel = maybeRewriteToTunnel(
+      target,
+      settings ? { ...settings, ...tunnelInfo } : undefined
+    );
     if (tunnel) {
       target = tunnel;
     } else if (!target.startsWith("http://") && !target.startsWith("https://")) {
@@ -101,7 +119,10 @@ export default function PreviewTab({ initialUrl, settings, workspaceRoot }: Prop
   }, []);
 
   const handleLocalBuild = useCallback(async () => {
-    if (buildState !== "idle") { teardownBuilder(); return; } // 再点=取消
+    if (buildState !== "idle") {
+      teardownBuilder();
+      return;
+    } // 再点=取消
     setBuildMsg(null);
     initDoneRef.current = false;
     setBuildState("preparing");
@@ -116,7 +137,7 @@ export default function PreviewTab({ initialUrl, settings, workspaceRoot }: Prop
     setBuilderHtmlUri(assets.htmlUri);
     setBuilderDirUri(assets.dirUri);
 
-    const io = createExpoIo(workspaceRoot);
+    const io = createExpoIo(workspaceTarget);
     sessionRef.current = createBuildSession(io, {
       sendToWebView: (msg) => {
         const payload = JSON.stringify(JSON.stringify(msg));
@@ -129,7 +150,7 @@ export default function PreviewTab({ initialUrl, settings, workspaceRoot }: Prop
       onSuccess: () => {
         teardownBuilder();
         setBuildMsg(null);
-        const root = (workspaceRoot ?? getDefaultWorkspace()).replace(/\/$/, "");
+        const root = getMobileWorkspaceRoot(workspaceTarget).replace(/\/$/, "");
         const distUrl = `${root}/dist/index.html`;
         setUrl(distUrl);
         setInputUrl(distUrl);
@@ -141,7 +162,7 @@ export default function PreviewTab({ initialUrl, settings, workspaceRoot }: Prop
       },
     });
     setBuildState("building"); // builder WebView 由 building 状态触发挂载,onMessage 驱动 session
-  }, [buildState, teardownBuilder, workspaceRoot]);
+  }, [buildState, teardownBuilder, workspaceTarget]);
 
   // 初始化超时守卫:15s 内未收到 builder ready(首个 onStatus)才判初始化失败;构建中(已 ready)不受此限
   React.useEffect(() => {
@@ -199,7 +220,13 @@ export default function PreviewTab({ initialUrl, settings, workspaceRoot }: Prop
             <Text style={styles.errorIcon}>!</Text>
             <Text style={styles.errorTitle}>无法加载页面</Text>
             <Text style={styles.errorText}>{error}</Text>
-            <TouchableOpacity style={styles.retryBtn} onPress={() => { setError(null); handleRefresh(); }}>
+            <TouchableOpacity
+              style={styles.retryBtn}
+              onPress={() => {
+                setError(null);
+                handleRefresh();
+              }}
+            >
               <Text style={styles.retryText}>重试</Text>
             </TouchableOpacity>
           </View>
@@ -232,7 +259,7 @@ export default function PreviewTab({ initialUrl, settings, workspaceRoot }: Prop
             originWhitelist={["http://*", "https://*", "file://*"]}
             allowFileAccess
             allowFileAccessFromFileURLs
-            allowingReadAccessToURL={workspaceRoot ?? getDefaultWorkspace()}
+            allowingReadAccessToURL={getMobileWorkspaceRoot(workspaceTarget)}
           />
         )}
         {buildState === "building" && builderHtmlUri && builderDirUri && (
@@ -245,8 +272,13 @@ export default function PreviewTab({ initialUrl, settings, workspaceRoot }: Prop
             allowFileAccess
             allowFileAccessFromFileURLs
             allowingReadAccessToURL={builderDirUri}
-            onMessage={(e) => { sessionRef.current?.handleBuilderMessage(e.nativeEvent.data); }}
-            onError={() => { teardownBuilder(); setBuildMsg("构建器初始化失败"); }}
+            onMessage={(e) => {
+              sessionRef.current?.handleBuilderMessage(e.nativeEvent.data);
+            }}
+            onError={() => {
+              teardownBuilder();
+              setBuildMsg("构建器初始化失败");
+            }}
           />
         )}
         {loading && (
@@ -263,9 +295,7 @@ export default function PreviewTab({ initialUrl, settings, workspaceRoot }: Prop
           onPress={handleGoBack}
           disabled={!canGoBack}
         >
-          <Text style={[styles.toolBtnText, !canGoBack && styles.toolBtnTextDisabled]}>
-            {"<"}
-          </Text>
+          <Text style={[styles.toolBtnText, !canGoBack && styles.toolBtnTextDisabled]}>{"<"}</Text>
         </TouchableOpacity>
         <TouchableOpacity
           style={[styles.toolBtn, !canGoForward && styles.toolBtnDisabled]}

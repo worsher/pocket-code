@@ -49,12 +49,23 @@ describe("mobile project catalog v2", () => {
   });
 
   it("keeps the implicit default workspace discoverable during migration", () => {
-    const result = upgradeProjectCatalog(null, factories(), 100);
+    const result = upgradeProjectCatalog(null, factories(), 100, {
+      preserveImplicitLegacyDefault: true,
+    });
     expect(result.changed).toBe(true);
     expect(result.projects[0]).toMatchObject({
       id: "default",
       legacyId: "default",
       localReplica: { layout: "legacy-default" },
+    });
+  });
+
+  it("creates a normal v2 project for a fresh installation", () => {
+    const result = upgradeProjectCatalog(null, factories(), 100);
+    expect(result.projects[0]).toMatchObject({
+      id: "018f00d2-8931-7bc0-aad1-1ec83b13f982",
+      name: "Default",
+      localReplica: { layout: "v2" },
     });
   });
 

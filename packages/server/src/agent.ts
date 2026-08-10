@@ -23,7 +23,15 @@ import { createNodeModelClient } from "./nodeModelClient.js";
 import { createNodeBackend } from "./nodeBackend.js";
 import { isUuid, type WorkspaceHandle } from "@pocket-code/workspace-core";
 
-export type ModelProvider = "anthropic" | "openai" | "google" | "siliconflow" | "iflow" | "cli-claude" | "cli-gemini" | "cli-codex";
+export type ModelProvider =
+  | "anthropic"
+  | "openai"
+  | "google"
+  | "siliconflow"
+  | "iflow"
+  | "cli-claude"
+  | "cli-gemini"
+  | "cli-codex";
 
 interface ModelConfig {
   provider: ModelProvider;
@@ -60,7 +68,7 @@ const MODEL_MAP: Record<string, ModelConfig> = {
   // CLI providers — use server-side installed CLI tools with Pro subscription
   "claude-code": { provider: "cli-claude", modelId: "claude-code" },
   "gemini-cli": { provider: "cli-gemini", modelId: "gemini-cli" },
-  "codex": { provider: "cli-codex", modelId: "codex" },
+  codex: { provider: "cli-codex", modelId: "codex" },
 };
 
 /** SiliconFlow uses OpenAI-compatible API */
@@ -131,7 +139,7 @@ export interface AgentSession {
 export async function createSession(
   sessionId: string,
   userId: string,
-  projectId: string = ''
+  projectId: string = ""
 ): Promise<AgentSession> {
   // Restore ownership/project identity before resolving the physical path. The
   // old order could restore project B while retaining project A's workspace.
@@ -143,15 +151,24 @@ export async function createSession(
     throw new Error("Session does not belong to this project.");
   }
   const effectiveProjectId = saved?.projectId || projectId;
-  const workspaceHandle = effectiveProjectId && isUuid(effectiveProjectId)
-    ? getWorkspaceHandle({ sessionId, projectId: effectiveProjectId, userId })
-    : undefined;
-  const workspace = workspaceHandle?.worktreeRoot ?? getWorkspaceRoot({
-    sessionId,
-    projectId: effectiveProjectId || undefined,
-    userId,
-  });
+  const workspaceHandle =
+    effectiveProjectId && isUuid(effectiveProjectId)
+      ? getWorkspaceHandle({ sessionId, projectId: effectiveProjectId, userId })
+      : undefined;
+  const workspace =
+    workspaceHandle?.worktreeRoot ??
+    getWorkspaceRoot({
+      sessionId,
+      projectId: effectiveProjectId || undefined,
+      userId,
+    });
   await mkdir(workspace, { recursive: true });
+  if (workspaceHandle) {
+    await Promise.all([
+      mkdir(workspaceHandle.stateRoot, { recursive: true }),
+      mkdir(workspaceHandle.cacheRoot, { recursive: true }),
+    ]);
+  }
 
   if (saved) {
     const session: AgentSession = {
@@ -218,7 +235,13 @@ export async function runAgent(
   if (cliAdapter) {
     session.messages.push({ role: "user", content: userMessage });
     await runCliSession(cliAdapter, session, userMessage, onEvent, signal);
-    saveSession(session.sessionId, session.userId, session.messages, session.modelKey, session.projectId);
+    saveSession(
+      session.sessionId,
+      session.userId,
+      session.messages,
+      session.modelKey,
+      session.projectId
+    );
     return undefined;
   }
 
@@ -243,7 +266,10 @@ export async function runAgent(
   let effectiveHistory = history;
 
   try {
-    const backend = createNodeBackend(session.workspace, session.containerId);
+    const backend = createNodeBackend(
+      session.workspaceHandle ?? session.workspace,
+      session.containerId
+    );
     // D-P15-2:modelClient 提升,压缩与 loop 共用
     const modelClient = createNodeModelClient(effectiveModelKey);
 
@@ -259,9 +285,17 @@ export async function runAgent(
       effectiveHistory = compacted;
       // D-P15-4:压缩形态先落库,turn 中途出错也不退回未压缩形态
       session.messages = compacted;
-      saveSession(session.sessionId, session.userId, session.messages, session.modelKey, session.projectId);
+      saveSession(
+        session.sessionId,
+        session.userId,
+        session.messages,
+        session.modelKey,
+        session.projectId
+      );
       onEvent({ type: "history-compacted", ...compaction });
-      console.log(`[Agent] Compacted history: ${compaction.tokensBefore} → ${compaction.tokensAfter} tokens (${compaction.compactedMessages} messages)`);
+      console.log(
+        `[Agent] Compacted history: ${compaction.tokensBefore} → ${compaction.tokensAfter} tokens (${compaction.compactedMessages} messages)`
+      );
     }
 
     // P16 C16-7/8:goal 注入与 updateGoalStatus 工具仅 goal turn 存在;
@@ -302,7 +336,13 @@ export async function runAgent(
     session.messages = result.messages;
 
     // Persist to database
-    saveSession(session.sessionId, session.userId, session.messages, session.modelKey, session.projectId);
+    saveSession(
+      session.sessionId,
+      session.userId,
+      session.messages,
+      session.modelKey,
+      session.projectId
+    );
 
     onEvent({ type: "done", stopReason: result.stopReason, usage: result.usage });
     return { stopReason: result.stopReason, usage: result.usage };
@@ -312,10 +352,19 @@ export async function runAgent(
     console.error("[Agent] Error:", err.message);
     const userContent =
       images && images.length > 0
-        ? [{ type: "text" as const, text: userMessage }, ...images.map((img) => ({ type: "image" as const, ...img }))]
+        ? [
+            { type: "text" as const, text: userMessage },
+            ...images.map((img) => ({ type: "image" as const, ...img })),
+          ]
         : userMessage;
     session.messages = [...effectiveHistory, { role: "user", content: userContent }];
-    saveSession(session.sessionId, session.userId, session.messages, session.modelKey, session.projectId);
+    saveSession(
+      session.sessionId,
+      session.userId,
+      session.messages,
+      session.modelKey,
+      session.projectId
+    );
     onEvent({ type: "done", stopReason: "error" });
     return { stopReason: "error", usage: { inputTokens: 0, outputTokens: 0 } };
   }

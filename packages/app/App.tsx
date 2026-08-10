@@ -267,6 +267,7 @@ function MainScreen() {
 
   // Project-specific local workspace root resolved from the catalog.
   const localWorkspaceRoot = currentWorkspaceRoot;
+  const localWorkspaceTarget = (currentWorkspaceHandle ?? currentWorkspaceRoot)!;
 
   // Don't render until settings loaded
   if (!settingsLoaded) {
@@ -441,7 +442,7 @@ function MainScreen() {
             behavior="padding"
             keyboardVerticalOffset={insets.top}
           >
-            <TerminalScreen workspaceRoot={localWorkspaceRoot} />
+            <TerminalScreen workspaceTarget={localWorkspaceTarget} />
           </KeyboardAvoidingView>
         )}
 
@@ -450,18 +451,18 @@ function MainScreen() {
           <FilesTab
             requestFileList={
               isGeek && settings.workspaceMode === "local"
-                ? (path: string) => listLocalFiles(path, localWorkspaceRoot)
+                ? (path: string) => listLocalFiles(path, localWorkspaceTarget)
                 : requestFileList
             }
             requestFileContent={
               isGeek && settings.workspaceMode === "local"
-                ? (path: string) => readLocalFile(path, localWorkspaceRoot)
+                ? (path: string) => readLocalFile(path, localWorkspaceTarget)
                 : requestFileContent
             }
             writeFile={
               isGeek && settings.workspaceMode === "local"
                 ? (path: string, content: string) =>
-                    writeLocalFile(path, content, localWorkspaceRoot)
+                    writeLocalFile(path, content, localWorkspaceTarget)
                 : undefined
             }
             requestSyncPull={requestSyncPull}
@@ -470,7 +471,7 @@ function MainScreen() {
             workspaceMode={settings.workspaceMode}
             settings={settings}
             projectId={currentProject?.id}
-            localWorkspaceRoot={localWorkspaceRoot}
+            localWorkspaceTarget={localWorkspaceTarget}
           />
         </View>
 
@@ -479,7 +480,7 @@ function MainScreen() {
           <PreviewTab
             initialUrl={previewUrl}
             settings={settings}
-            workspaceRoot={localWorkspaceRoot}
+            workspaceTarget={localWorkspaceTarget}
           />
         </View>
       </View>
@@ -516,12 +517,12 @@ function MainScreen() {
         onClose={() => setShowFileExplorer(false)}
         requestFileList={
           isGeek && settings.workspaceMode === "local"
-            ? (path: string) => listLocalFiles(path, localWorkspaceRoot)
+            ? (path: string) => listLocalFiles(path, localWorkspaceTarget)
             : requestFileList
         }
         requestFileContent={
           isGeek && settings.workspaceMode === "local"
-            ? (path: string) => readLocalFile(path, localWorkspaceRoot)
+            ? (path: string) => readLocalFile(path, localWorkspaceTarget)
             : requestFileContent
         }
       />

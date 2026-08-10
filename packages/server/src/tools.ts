@@ -1,7 +1,7 @@
 import { homedir } from "os";
 import { isAbsolute, join, relative, resolve } from "path";
 import { pathToFileURL } from "url";
-import { realpathSync, statSync } from "fs";
+import { mkdirSync, realpathSync, statSync } from "fs";
 import {
   getManagedWorkspaceRelativeRoots,
   isUuid,
@@ -21,6 +21,19 @@ export interface WorkspaceRootRequest {
 export interface V2WorkspaceRequest extends WorkspaceRootRequest {
   projectId: string;
   userId: string;
+}
+
+export function getServerV2Root(): string {
+  return process.env.POCKET_CODE_DATA_ROOT || resolve(join(homedir(), ".pocket-code", "v2"));
+}
+
+export function ensureServerStorageLayout(): string {
+  const root = getServerV2Root();
+  mkdirSync(root, { recursive: true });
+  for (const name of ["catalog", "projects", "runtime", "staging", "trash"]) {
+    mkdirSync(join(root, name), { recursive: true });
+  }
+  return root;
 }
 
 function assertContained(root: string, target: string): string {
@@ -56,8 +69,7 @@ export function getWorkspaceRoot(request: WorkspaceRootRequest): string {
 export function getWorkspaceHandle(request: V2WorkspaceRequest): WorkspaceHandle {
   const projectId = parseProjectId(request.projectId);
   const catalogEntry = ensureWorkspaceProject(request.userId, projectId);
-  const dataRoot =
-    process.env.POCKET_CODE_DATA_ROOT || resolve(join(homedir(), ".pocket-code", "v2"));
+  const dataRoot = getServerV2Root();
   const roots = getManagedWorkspaceRelativeRoots(catalogEntry.storageKey);
   const stateRoot = assertContained(dataRoot, join(dataRoot, roots.stateRoot));
   const cacheRoot = assertContained(dataRoot, join(dataRoot, roots.cacheRoot));

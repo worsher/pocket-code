@@ -49,6 +49,12 @@ beforeEach(() => {
 });
 
 describe("project catalog persistence", () => {
+  it("creates a v2 default project when no legacy workspace is present", async () => {
+    const loaded = await loadProjects();
+    expect(loaded[0]).toMatchObject({ name: "Default", localReplica: { layout: "v2" } });
+    expect(loaded[0].id).not.toBe("default");
+  });
+
   it("serializes overlapping catalog and current-project writes", async () => {
     const first = [project("018f00d2-8931-7bc0-aad1-1ec83b13f982", "First")];
     const second = [project("018f00d2-8931-7bc0-aad1-1ec83b13f982", "Second")];
