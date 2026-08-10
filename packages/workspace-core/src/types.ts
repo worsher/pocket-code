@@ -6,6 +6,7 @@ declare const storageKeyBrand: unique symbol;
 export type ProjectId = string & { readonly [projectIdBrand]: true };
 export type ReplicaId = string & { readonly [replicaIdBrand]: true };
 export type LegacyProjectId = string & { readonly [legacyProjectIdBrand]: true };
+export type CatalogProjectKey = ProjectId | LegacyProjectId;
 export type StorageKey = string & { readonly [storageKeyBrand]: true };
 
 export type ReplicaKind = "mobile" | "cloud" | "dev-binding";
@@ -43,7 +44,7 @@ export interface WorkspaceHandle {
 }
 
 export interface WorkspaceScope {
-  readonly projectId: ProjectId;
+  readonly projectId: CatalogProjectKey;
   readonly replicaId: ReplicaId;
   readonly sessionId: string;
   readonly workspaceGeneration: number;

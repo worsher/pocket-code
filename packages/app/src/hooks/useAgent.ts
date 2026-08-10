@@ -3,12 +3,22 @@
 // /phaseFor)。云端与 geek 共用同一 reducer,对外 API 面保持不变。
 import { useState, useRef, useCallback, useEffect } from "react";
 import { AppState } from "react-native";
-import type { WorkspaceHandle } from "@pocket-code/workspace-core";
+import { randomUUID } from "expo-crypto";
+import {
+  createWorkspaceScope,
+  isSameWorkspaceScope,
+  type WorkspaceHandle,
+  type WorkspaceScope,
+} from "@pocket-code/workspace-core";
 import { getModelConfig, getApiKeyField, MODELS } from "../services/modelConfig";
 import { updateSettings, type AppSettings } from "../store/settings";
 import { saveChatHistory, loadChatHistory } from "../store/chatHistory";
 import { executeLocalTool, writeLocalFile, getDefaultWorkspace } from "../services/localFileSystem";
-import { enqueueMessage, getQueue, dequeueMessage } from "../services/offlineQueue";
+import {
+  enqueueMessage,
+  getQueueForScope,
+  dequeueMessage,
+} from "../services/offlineQueue";
 import { sendLocalNotification } from "../services/notifications";
 import {
   ServerConnection,
@@ -42,6 +52,8 @@ interface UseAgentOptions {
   model?: string;
   customPrompt?: string;
   projectId?: string;
+  workspaceReplicaId?: string;
+  workspaceGeneration?: number;
   workspaceHandle?: WorkspaceHandle | null;
   workspaceRoot?: string;
   /** Called when AI modifies a file (writeFile/editFile). Used by WorkspaceContext for auto-refresh. */
@@ -85,6 +97,8 @@ export function useAgent({
   model = "deepseek-v4-flash",
   customPrompt,
   projectId,
+  workspaceReplicaId,
+  workspaceGeneration,
   workspaceHandle,
   workspaceRoot,
   onFileChanged,
@@ -117,6 +131,10 @@ export function useAgent({
   const modelRef = useRef(model); modelRef.current = model;
   const customPromptRef = useRef(customPrompt); customPromptRef.current = customPrompt;
   const projectIdRef = useRef(projectId); projectIdRef.current = projectId;
+  const workspaceReplicaIdRef = useRef(workspaceReplicaId);
+  workspaceReplicaIdRef.current = workspaceReplicaId;
+  const workspaceGenerationRef = useRef(workspaceGeneration);
+  workspaceGenerationRef.current = workspaceGeneration;
   const workspaceHandleRef = useRef(workspaceHandle); workspaceHandleRef.current = workspaceHandle;
   const workspaceRootRef = useRef(workspaceRoot); workspaceRootRef.current = workspaceRoot;
   const onFileChangedRef = useRef(onFileChanged); onFileChangedRef.current = onFileChanged;
@@ -132,6 +150,31 @@ export function useAgent({
   const modeRef = useRef(settings.mode); modeRef.current = settings.mode;
   const authTokenRef = useRef(settings.authToken); authTokenRef.current = settings.authToken;
   const deviceIdRef = useRef(settings.deviceId); deviceIdRef.current = settings.deviceId;
+
+  const getCurrentWorkspaceScope = (): WorkspaceScope | null => {
+    const currentProjectId = projectIdRef.current;
+    const currentReplicaId = workspaceReplicaIdRef.current;
+    const currentSessionId = sessionIdRef.current;
+    const currentGeneration = workspaceGenerationRef.current;
+    if (
+      !currentProjectId ||
+      !currentReplicaId ||
+      !currentSessionId ||
+      currentGeneration === undefined
+    ) {
+      return null;
+    }
+    try {
+      return createWorkspaceScope({
+        projectId: currentProjectId,
+        replicaId: currentReplicaId,
+        sessionId: currentSessionId,
+        workspaceGeneration: currentGeneration,
+      });
+    } catch {
+      return null;
+    }
+  };
   // callId → toolName(runCommand 后台通知需知道工具名)
   const callNamesRef = useRef(new Map<string, string>());
   // geek 会话的 CoreMessage 史(与 UI messages 并行维护,供 runAgentLoop 使用)。
@@ -307,12 +350,15 @@ export function useAgent({
         updateSettings({ authToken: token, userId });
         authTokenRef.current = token;
       },
-      onSession: (sid: string) => setSessionId(sid),
+      onSession: (sid: string) => {
+        sessionIdRef.current = sid;
+        setSessionId(sid);
+        void replayOfflineQueue();
+      },
       onConnected: () => {
         setIsConnected(true);
         setAuthError(null);
         setStreamNotice(null);
-        replayOfflineQueue();
       },
       onDisconnected: () => {
         setIsConnected(false);
@@ -349,9 +395,13 @@ export function useAgent({
 
   // ── Offline queue replay(连接建立后) ─────────────────
   const replayOfflineQueue = useCallback(async () => {
-    const queue = await getQueue();
+    const replayScope = getCurrentWorkspaceScope();
+    if (!replayScope) return;
+    const queue = await getQueueForScope(replayScope);
     for (const msg of queue) {
       if (!conn.isOpen) break;
+      const currentScope = getCurrentWorkspaceScope();
+      if (!currentScope || !isSameWorkspaceScope(replayScope, currentScope)) break;
       conn.sendRaw({ type: "message", content: msg.content, model: modelRef.current });
       await dequeueMessage(msg.id);
       await new Promise((r) => setTimeout(r, 500));
@@ -530,7 +580,14 @@ export function useAgent({
       if (settings.mode === "cloud") {
         if (!conn.isOpen) {
           // 未连接:入队待重放,并本地插入 pending 用户消息以可见
-          await enqueueMessage(sessionIdRef.current || "", content);
+          if (!sessionIdRef.current) {
+            const offlineSessionId = `offline_session_${randomUUID()}`;
+            sessionIdRef.current = offlineSessionId;
+            setSessionId(offlineSessionId);
+          }
+          const scope = getCurrentWorkspaceScope();
+          if (!scope) throw new Error("Current workspace scope is unavailable");
+          await enqueueMessage(scope, content);
           setMessages((prev) => [...prev, { ...mkUserMsg(content, images), pending: true }]);
           return;
         }
@@ -624,6 +681,7 @@ export function useAgent({
     setMessages([]);
     coreHistoryRef.current = [];
     setSessionId(null);
+    sessionIdRef.current = null;
     setIsStreaming(false);
     setLastStopReason(null);
     setStreamNotice(null);

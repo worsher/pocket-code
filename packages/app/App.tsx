@@ -145,6 +145,8 @@ function MainScreen() {
     model: currentModel,
     customPrompt: currentProject?.customPrompt,
     projectId: currentProject?.id,
+    workspaceReplicaId: currentProject?.localReplica.id,
+    workspaceGeneration: currentProject?.localReplica.generation,
     workspaceHandle: currentWorkspaceHandle,
     workspaceRoot: currentWorkspaceRoot,
     onFileChanged: handleFileChanged,

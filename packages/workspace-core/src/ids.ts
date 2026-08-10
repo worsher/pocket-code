@@ -24,6 +24,10 @@ export function parseReplicaId(value: string): ReplicaId {
   return value.toLowerCase() as ReplicaId;
 }
 
+export function parseCatalogProjectKey(value: string): ProjectId | LegacyProjectId {
+  return isUuid(value) ? parseProjectId(value) : parseLegacyProjectId(value);
+}
+
 export function createProjectId(uuidFactory: UuidFactory): ProjectId {
   return parseProjectId(uuidFactory());
 }

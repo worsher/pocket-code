@@ -1,29 +1,85 @@
 // ── Offline Message Queue ─────────────────────────────────
-// Queues messages when the device is offline and replays them
-// when connectivity is restored.
+// Queues messages when the device is offline and replays them only into the
+// exact project/replica/session/generation that created them.
 
 import AsyncStorage from "@react-native-async-storage/async-storage";
+import { randomUUID } from "expo-crypto";
+import {
+  createWorkspaceScope,
+  isSameWorkspaceScope,
+  type WorkspaceScope,
+  type WorkspaceScopeInput,
+} from "@pocket-code/workspace-core";
 
 const QUEUE_KEY = "pocket-code:offline-queue";
+const QUARANTINE_KEY = "pocket-code:offline-queue:quarantine";
 
 export interface QueuedMessage {
   id: string;
-  sessionId: string;
+  scope: WorkspaceScope;
   content: string;
   timestamp: number;
   retries: number;
 }
 
-/**
- * Add a message to the offline queue.
- */
+function parseQueuedMessage(value: unknown): QueuedMessage | null {
+  if (!value || typeof value !== "object") return null;
+  const candidate = value as Record<string, unknown>;
+  const rawScope = candidate.scope;
+  if (!rawScope || typeof rawScope !== "object") return null;
+  const scopeValue = rawScope as Record<string, unknown>;
+
+  try {
+    const scope = createWorkspaceScope({
+      projectId: String(scopeValue.projectId ?? ""),
+      replicaId: String(scopeValue.replicaId ?? ""),
+      sessionId: String(scopeValue.sessionId ?? ""),
+      workspaceGeneration: Number(scopeValue.workspaceGeneration),
+    });
+    if (
+      typeof candidate.id !== "string" ||
+      typeof candidate.content !== "string" ||
+      typeof candidate.timestamp !== "number" ||
+      typeof candidate.retries !== "number"
+    ) {
+      return null;
+    }
+    return {
+      id: candidate.id,
+      scope,
+      content: candidate.content,
+      timestamp: candidate.timestamp,
+      retries: candidate.retries,
+    };
+  } catch {
+    return null;
+  }
+}
+
+async function quarantine(values: unknown[]): Promise<void> {
+  if (values.length === 0) return;
+  let existing: unknown[] = [];
+  try {
+    const raw = await AsyncStorage.getItem(QUARANTINE_KEY);
+    const parsed = raw ? JSON.parse(raw) : [];
+    if (Array.isArray(parsed)) existing = parsed;
+  } catch {
+    // A corrupt quarantine must not make unsafe queue records replayable.
+  }
+  await AsyncStorage.setItem(
+    QUARANTINE_KEY,
+    JSON.stringify([...existing, ...values.map((value) => ({ value, quarantinedAt: Date.now() }))]),
+  );
+}
+
+/** Add a fully scoped message to the offline queue. */
 export async function enqueueMessage(
-  sessionId: string,
-  content: string
+  scopeInput: WorkspaceScopeInput,
+  content: string,
 ): Promise<QueuedMessage> {
   const msg: QueuedMessage = {
-    id: `offline_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`,
-    sessionId,
+    id: `offline_${randomUUID()}`,
+    scope: createWorkspaceScope(scopeInput),
     content,
     timestamp: Date.now(),
     retries: 0,
@@ -36,62 +92,82 @@ export async function enqueueMessage(
 }
 
 /**
- * Get all queued messages.
+ * Get valid queue entries. Legacy/unscoped or corrupt entries are moved to a
+ * quarantine key instead of being replayed into whichever project is active.
  */
 export async function getQueue(): Promise<QueuedMessage[]> {
   try {
     const raw = await AsyncStorage.getItem(QUEUE_KEY);
     if (!raw) return [];
-    return JSON.parse(raw) as QueuedMessage[];
+    const parsed: unknown = JSON.parse(raw);
+    if (!Array.isArray(parsed)) {
+      await quarantine([parsed]);
+      await saveQueue([]);
+      return [];
+    }
+
+    const queue: QueuedMessage[] = [];
+    const invalid: unknown[] = [];
+    for (const value of parsed) {
+      const message = parseQueuedMessage(value);
+      if (message) queue.push(message);
+      else invalid.push(value);
+    }
+    if (invalid.length > 0) {
+      await quarantine(invalid);
+      await saveQueue(queue);
+    }
+    return queue;
   } catch {
     return [];
   }
 }
 
-/**
- * Remove a message from the queue (after successful send).
- */
+export async function getQueueForScope(scope: WorkspaceScope): Promise<QueuedMessage[]> {
+  return (await getQueue()).filter((message) => isSameWorkspaceScope(scope, message.scope));
+}
+
+/** Remove a message from the queue after successful send. */
 export async function dequeueMessage(id: string): Promise<void> {
   const queue = await getQueue();
-  const filtered = queue.filter((m) => m.id !== id);
+  const filtered = queue.filter((message) => message.id !== id);
   await saveQueue(filtered);
 }
 
-/**
- * Mark a message as retried (increment retry count).
- */
+/** Mark a message as retried (increment retry count). */
 export async function markRetried(id: string): Promise<void> {
   const queue = await getQueue();
-  const updated = queue.map((m) =>
-    m.id === id ? { ...m, retries: m.retries + 1 } : m
+  const updated = queue.map((message) =>
+    message.id === id ? { ...message, retries: message.retries + 1 } : message,
   );
   await saveQueue(updated);
 }
 
-/**
- * Remove messages that have exceeded max retries.
- */
+/** Remove messages that have exceeded max retries. */
 export async function pruneFailedMessages(maxRetries: number = 3): Promise<QueuedMessage[]> {
   const queue = await getQueue();
-  const failed = queue.filter((m) => m.retries >= maxRetries);
-  const remaining = queue.filter((m) => m.retries < maxRetries);
+  const failed = queue.filter((message) => message.retries >= maxRetries);
+  const remaining = queue.filter((message) => message.retries < maxRetries);
   await saveQueue(remaining);
   return failed;
 }
 
-/**
- * Clear the entire queue.
- */
 export async function clearQueue(): Promise<void> {
   await AsyncStorage.removeItem(QUEUE_KEY);
 }
 
-/**
- * Get queue size.
- */
 export async function getQueueSize(): Promise<number> {
-  const queue = await getQueue();
-  return queue.length;
+  return (await getQueue()).length;
+}
+
+export async function getQuarantinedMessages(): Promise<unknown[]> {
+  try {
+    const raw = await AsyncStorage.getItem(QUARANTINE_KEY);
+    const parsed = raw ? JSON.parse(raw) : [];
+    return Array.isArray(parsed) ? parsed : [];
+  } catch {
+    return [];
+  }
 }
 
 async function saveQueue(queue: QueuedMessage[]): Promise<void> {
