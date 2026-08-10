@@ -21,6 +21,7 @@ import ProjectDrawer from "../ProjectDrawer";
 import type { AppSettings } from "../../store/settings";
 import type {
   LinkedWorkspaceImportResponse,
+  WorkspaceLegacyCleanupResponse,
   WorkspaceSourceStatusResponse,
 } from "@pocket-code/client-core";
 
@@ -43,6 +44,10 @@ interface Props {
     allowWeakDuplicate?: boolean;
   }) => Promise<LinkedWorkspaceImportResponse>;
   onInspectLinkedSource: (projectId: string) => Promise<WorkspaceSourceStatusResponse>;
+  onCleanupLegacyWorkspace: (
+    projectId: string,
+    legacyProjectId: string
+  ) => Promise<WorkspaceLegacyCleanupResponse>;
 }
 
 export default function SessionDrawer({
@@ -56,6 +61,7 @@ export default function SessionDrawer({
   settings,
   onBindLinkedWorkspace,
   onInspectLinkedSource,
+  onCleanupLegacyWorkspace,
 }: Props) {
   const [sessions, setSessions] = useState<SessionInfo[]>([]);
   const slideAnim = useRef(new Animated.Value(-DRAWER_WIDTH)).current;
@@ -174,6 +180,7 @@ export default function SessionDrawer({
             settings={settings}
             onBindLinkedWorkspace={onBindLinkedWorkspace}
             onInspectLinkedSource={onInspectLinkedSource}
+            onCleanupLegacyWorkspace={onCleanupLegacyWorkspace}
           />
 
           {/* Divider */}

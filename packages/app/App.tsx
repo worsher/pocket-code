@@ -177,6 +177,7 @@ function MainScreen() {
     requestSyncFile,
     releaseWorkspaceWriter,
     inspectWorkspaceSource,
+    cleanupLegacyWorkspace,
     bindLinkedWorkspace,
     deleteProjectWorkspace,
   } = useAgent({
@@ -184,6 +185,7 @@ function MainScreen() {
     model: currentModel,
     customPrompt: currentProject?.customPrompt,
     projectId: currentProject?.id,
+    legacyProjectId: currentProject?.legacyId,
     projectName: currentProject?.name,
     workspaceReplicaId: currentProject?.localReplica.id,
     workspaceGeneration: currentProject?.localReplica.generation,
@@ -579,6 +581,7 @@ function MainScreen() {
         settings={settings}
         onBindLinkedWorkspace={bindLinkedWorkspace}
         onInspectLinkedSource={inspectWorkspaceSource}
+        onCleanupLegacyWorkspace={cleanupLegacyWorkspace}
       />
 
       {/* Project Prompt Editor */}

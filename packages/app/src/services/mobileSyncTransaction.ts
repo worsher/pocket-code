@@ -10,6 +10,7 @@ import {
 import type { ProjectSyncEdge, RemoteReplicaCatalogEntry } from "../store/projectCatalog";
 import { deleteLocalFile, writeLocalFileBase64 } from "./localFileSystem";
 import { getMobileV2Root } from "./workspaceResolver";
+import { recordWorkspaceMetric } from "./workspaceTelemetry";
 
 const SYNC_IGNORED_DIRECTORIES = new Set([
   "node_modules",
@@ -265,6 +266,7 @@ async function recoverJournalIfNeeded(
   const backup = transactionBackup(journal.transactionId);
   const current = await scanMobileSyncDirectory(worktree);
   if (current.snapshot === journal.expectedSnapshot) {
+    await recordWorkspaceMetric("recovery-succeeded").catch(() => undefined);
     return {
       ...stored,
       journal: {
@@ -280,6 +282,7 @@ async function recoverJournalIfNeeded(
     staging.move(worktree);
     const applied = await scanMobileSyncDirectory(worktree);
     if (applied.snapshot === journal.expectedSnapshot) {
+      await recordWorkspaceMetric("recovery-succeeded").catch(() => undefined);
       return {
         ...stored,
         journal: {
@@ -304,6 +307,10 @@ export async function pullMobileReplicaTransaction(
   ensureDirectory(worktree);
   let existingStored = await readStoredJournal(handle, remoteReplica.id);
   if (existingStored) {
+    const needsRecovery = ["recovery-required", "applying"].includes(existingStored.journal.phase);
+    if (needsRecovery) {
+      await recordWorkspaceMetric("recovery-attempted").catch(() => undefined);
+    }
     existingStored = await recoverJournalIfNeeded(existingStored, handle);
   }
 
@@ -352,6 +359,7 @@ export async function pullMobileReplicaTransaction(
     }
 
     if (!deps.forceRemote && localChanged && (remoteChanged || !!effectiveBase)) {
+      await recordWorkspaceMetric("directory-conflict").catch(() => undefined);
       const conflict = {
         baseSnapshot: effectiveBase,
         localSnapshot: localBefore.snapshot,

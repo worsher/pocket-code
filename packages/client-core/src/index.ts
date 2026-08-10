@@ -14,5 +14,6 @@ export type {
   ConnectionHandlers,
   LinkedWorkspaceImportResponse,
   WorkspaceSourceStatusResponse,
+  WorkspaceLegacyCleanupResponse,
   WorkspaceWriterReleaseResponse,
 } from "./serverConnection";

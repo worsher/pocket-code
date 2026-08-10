@@ -9,6 +9,7 @@ import {
   upsertProjectSyncEdge,
   getProjectSyncEdge,
   handoffProjectWriterLease,
+  promoteLegacyProjectToV2,
   type ProjectIdFactories,
 } from "./projectCatalog";
 
@@ -107,6 +108,29 @@ describe("mobile project catalog v2", () => {
     expect(resolveStoredCurrentProjectId(result.projects, "../../escape")).toBe(
       "018f00d2-8931-7bc0-aad1-1ec83b13f982"
     );
+  });
+
+  it("promotes a legacy project without reusing its ID as a storage path", () => {
+    const legacy = upgradeProjectCatalog(
+      [{ id: "old-project", name: "Old", description: "" }],
+      factories(),
+      100
+    ).projects[0];
+    const promoted = promoteLegacyProjectToV2(
+      legacy,
+      () => "10ed836e-ae48-4d67-9e26-a74cbf55a52e",
+      200
+    );
+    expect(promoted).toMatchObject({
+      id: "10ed836e-ae48-4d67-9e26-a74cbf55a52e",
+      legacyId: "old-project",
+      localReplica: {
+        layout: "v2",
+        storageKey: legacy.localReplica.storageKey,
+        id: legacy.localReplica.id,
+      },
+      updatedAt: 200,
+    });
   });
 
   it("does not rewrite a valid v2 catalog record", () => {

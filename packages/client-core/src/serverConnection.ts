@@ -46,6 +46,16 @@ export interface WorkspaceSourceStatusResponse {
   _reqId: string;
 }
 
+export interface WorkspaceLegacyCleanupResponse {
+  type: "workspace-legacy-cleaned";
+  projectId: string;
+  legacyProjectId: string;
+  success: boolean;
+  cleaned: boolean;
+  error?: string;
+  _reqId: string;
+}
+
 export interface ConnectionConfig {
   getServerUrl(): string;
   isRelayMode(): boolean;
@@ -79,6 +89,7 @@ export interface ConnectionHandlers {
   ): void;
   /** P14:server 指示全量重建(epoch 变化/缓冲覆盖不足/连续缺口)。宿主应走 loadSession。 */
   onResyncRequired?(reason: string): void;
+  onWorkspaceEventDropped?(reason: "invalid-or-stale-scope"): void;
 }
 
 /** 归一化流式事件类型集合(据此路由到 onAgentEvent)。
@@ -337,7 +348,8 @@ export class ServerConnection {
         data.type === "sync-file-content" ||
         data.type === "workspace-import-result" ||
         data.type === "workspace-writer-released" ||
-        data.type === "workspace-source-status": {
+        data.type === "workspace-source-status" ||
+        data.type === "workspace-legacy-cleaned": {
         const resolver = data._reqId && this.resolvers.get(data._reqId);
         if (resolver) {
           resolver(data);
@@ -358,6 +370,12 @@ export class ServerConnection {
         return;
       }
       case data.type === "error": {
+        const resolver = data._reqId && this.resolvers.get(data._reqId);
+        if (resolver) {
+          resolver(data);
+          this.resolvers.delete(data._reqId);
+          return;
+        }
         // D-P14-6 分流:AgentEvent 形态({message})原样进事件流,不再被
         // 控制错误路径改写成 "unknown";控制错误({error})走原逻辑。
         if (typeof data.message === "string") {
@@ -384,7 +402,10 @@ export class ServerConnection {
       case AGENT_EVENT_TYPES.has(data.type): {
         // Scope check must precede seq admission: a stale replica event must
         // never advance the active session's event cursor.
-        if (data.type === "file-changed" && !this.admitWorkspaceEvent(data)) return;
+        if (data.type === "file-changed" && !this.admitWorkspaceEvent(data)) {
+          this.handlers.onWorkspaceEventDropped?.("invalid-or-stale-scope");
+          return;
+        }
         if (!this.admitSeq(data)) return;
         if (data.type === "file-changed") {
           this.handlers.onFileChanged(data.path, data.changeType, data.workspaceScope);
@@ -490,6 +511,19 @@ export class ServerConnection {
       reqId,
       10_000,
       "Workspace source inspection"
+    );
+  }
+
+  cleanupLegacyWorkspace(
+    projectId: string,
+    legacyProjectId: string
+  ): Promise<WorkspaceLegacyCleanupResponse> {
+    const reqId = `legacy_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+    return this.request(
+      { type: "workspace-legacy-cleanup", projectId, legacyProjectId, _reqId: reqId },
+      reqId,
+      30_000,
+      "Legacy workspace cleanup"
     );
   }
 

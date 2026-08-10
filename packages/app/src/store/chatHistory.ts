@@ -95,6 +95,24 @@ export async function clearAllHistory(): Promise<void> {
     await AsyncStorage.multiRemove(keys);
 }
 
+/** Idempotently moves locally archived sessions when a legacy project gets a UUID. */
+export async function reassignSessionsProjectId(
+    previousProjectId: string,
+    replacementProjectId: string
+): Promise<number> {
+    const sessions = await listSessions();
+    let changed = 0;
+    for (const session of sessions) {
+        if (session.projectId !== previousProjectId) continue;
+        session.projectId = replacementProjectId;
+        changed++;
+    }
+    if (changed > 0) {
+        await AsyncStorage.setItem(SESSIONS_KEY, JSON.stringify(sessions));
+    }
+    return changed;
+}
+
 // ── Search ────────────────────────────────────────────
 
 export interface SearchResult {

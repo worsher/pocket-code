@@ -379,6 +379,31 @@ describe("ServerConnection", () => {
     conn.disconnect();
   });
 
+  it("correlates explicit legacy cleanup responses", async () => {
+    const conn = new ServerConnection(makeConfig(), makeHandlers());
+    conn.connect();
+    const ws = FakeWebSocket.instances[0];
+    ws.open();
+    const projectId = "10ed836e-ae48-4d67-9e26-a74cbf55a52e";
+    const pending = conn.cleanupLegacyWorkspace(projectId, "old-project");
+    const sent = JSON.parse(ws.sent.at(-1)!);
+    expect(sent).toMatchObject({
+      type: "workspace-legacy-cleanup",
+      projectId,
+      legacyProjectId: "old-project",
+    });
+    ws.receive({
+      type: "workspace-legacy-cleaned",
+      _reqId: sent._reqId,
+      projectId,
+      legacyProjectId: "old-project",
+      success: true,
+      cleaned: true,
+    });
+    await expect(pending).resolves.toMatchObject({ success: true, cleaned: true });
+    conn.disconnect();
+  });
+
   it("routes normalized agent events to onAgentEvent", () => {
     const events: string[] = [];
     const conn = new ServerConnection(
@@ -397,6 +422,7 @@ describe("ServerConnection", () => {
   it("accepts only file events from the acknowledged workspace scope", () => {
     const files: string[] = [];
     const events: string[] = [];
+    const dropped: string[] = [];
     const scope = {
       projectId: "10ed836e-ae48-4d67-9e26-a74cbf55a52e",
       replicaId: "0f3d985e-0a3a-458e-932d-c89dbbf671c6",
@@ -410,6 +436,7 @@ describe("ServerConnection", () => {
       makeHandlers({
         onAgentEvent: (event) => events.push(event.type),
         onFileChanged: (path) => files.push(path),
+        onWorkspaceEventDropped: (reason) => dropped.push(reason),
       })
     );
     conn.connect();
@@ -441,6 +468,7 @@ describe("ServerConnection", () => {
     });
     expect(files).toEqual(["current.ts"]);
     expect(events).toEqual(["file-changed"]);
+    expect(dropped).toEqual(["invalid-or-stale-scope"]);
     conn.disconnect();
   });
 

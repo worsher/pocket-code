@@ -7,6 +7,7 @@ import type { CoreMessage } from "@pocket-code/agent-core";
 import {
   createReplicaId,
   createStorageKey,
+  parseLegacyProjectId,
   parseProjectId,
   parseReplicaId,
   parseStorageKey,
@@ -530,6 +531,69 @@ export function ensureWorkspaceProject(
   const created = getWorkspaceProject(userId, safeProjectId);
   if (!created) throw new Error("Failed to create workspace project catalog entry");
   return created;
+}
+
+/**
+ * Atomically registers a pre-staged v2 replica and moves the user's legacy
+ * sessions to its UUID. The explicit replica/storage IDs come from the durable
+ * migration journal, making retries idempotent after a process crash.
+ */
+export function commitLegacyWorkspaceMigration(args: {
+  userId: string;
+  legacyProjectId: string;
+  projectId: string;
+  replicaId: string;
+  storageKey: string;
+  displayName?: string;
+}): WorkspaceProjectRecord {
+  if (!args.userId) throw new Error("User ID is required for workspace migration");
+  const legacyProjectId = parseLegacyProjectId(args.legacyProjectId);
+  const projectId = parseProjectId(args.projectId);
+  const replicaId = parseReplicaId(args.replicaId);
+  const storageKey = parseStorageKey(args.storageKey);
+  const existing = getWorkspaceProject(args.userId, projectId);
+  if (existing && (existing.replicaId !== replicaId || existing.storageKey !== storageKey)) {
+    throw new Error("Workspace migration target is already registered with different storage");
+  }
+
+  const now = Date.now();
+  db.run("BEGIN");
+  try {
+    if (!existing) {
+      db.run(
+        `INSERT INTO workspace_projects
+           (user_id, project_id, replica_id, storage_key, display_name,
+            generation, created_at, updated_at)
+         VALUES (?, ?, ?, ?, ?, 1, ?, ?)`,
+        [
+          args.userId,
+          projectId,
+          replicaId,
+          storageKey,
+          args.displayName?.trim().slice(0, 256) ?? "",
+          now,
+          now,
+        ]
+      );
+    }
+    db.run(
+      `UPDATE sessions SET project_id = ?, updated_at = ?
+       WHERE user_id = ? AND project_id = ?`,
+      [projectId, now, args.userId, legacyProjectId]
+    );
+    db.run("COMMIT");
+  } catch (error) {
+    try {
+      db.run("ROLLBACK");
+    } catch {
+      // Preserve the original failure.
+    }
+    throw error;
+  }
+  persist();
+  const committed = getWorkspaceProject(args.userId, projectId);
+  if (!committed) throw new Error("Workspace migration catalog commit failed");
+  return committed;
 }
 
 export function bindLinkedWorkspaceProject(

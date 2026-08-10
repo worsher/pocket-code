@@ -55,6 +55,14 @@ import {
   type CopySourcePreview,
 } from "../services/copySourceSync";
 import { gitAdd, gitCommit, gitPush, resolveGitWorkspaceHead } from "../services/gitService";
+import { WORKSPACE_FEATURE_FLAGS } from "../services/workspaceFeatureFlags";
+import {
+  cleanupMigratedLegacyMobileStorage,
+  hasLegacyMobileCleanupCandidate,
+  migrateLegacyMobileProject,
+  reconcileMobileWorkspaceMigrations,
+} from "../services/mobileWorkspaceMigration";
+import { reassignSessionsProjectId } from "../store/chatHistory";
 
 interface ProjectContextValue {
   projects: Project[];
@@ -103,6 +111,8 @@ interface ProjectContextValue {
     importSource: ProjectImportSource;
     remoteReplica: RemoteReplicaCatalogEntry;
   }) => Promise<Project>;
+  legacyCleanupAvailable: boolean;
+  cleanupLegacyStorage: (projectId?: string) => Promise<number>;
 }
 
 const ProjectContext = createContext<ProjectContextValue>({
@@ -139,6 +149,8 @@ const ProjectContext = createContext<ProjectContextValue>({
   registerLinkedProject: async () => {
     throw new Error("Project provider is unavailable");
   },
+  legacyCleanupAvailable: false,
+  cleanupLegacyStorage: async () => 0,
 });
 
 export function useProject() {
@@ -149,7 +161,9 @@ export function ProjectProvider({ children }: { children: React.ReactNode }) {
   const [projects, setProjects] = useState<Project[]>([]);
   const [currentProjectId, setCurrentProjectId] = useState<string>("default");
   const [loaded, setLoaded] = useState(false);
+  const [legacyCleanupAvailable, setLegacyCleanupAvailable] = useState(false);
   const projectsRef = useRef<Project[]>([]);
+  const migratingLegacyProjectIdsRef = useRef(new Set<string>());
   const pendingImportSourceRef = useRef<Awaited<
     ReturnType<typeof pickMobileProjectDirectory>
   > | null>(null);
@@ -162,6 +176,9 @@ export function ProjectProvider({ children }: { children: React.ReactNode }) {
   useEffect(() => {
     loadProjects({ preserveImplicitLegacyDefault: hasLegacyMobileWorkspace() }).then(
       async (loadedProjects) => {
+        await reconcileMobileWorkspaceMigrations(loadedProjects).catch((error) => {
+          console.error("[Projects] Failed to reconcile migration journals:", error);
+        });
         const loadedId = await loadCurrentProjectId(loadedProjects);
         setProjects(loadedProjects);
         projectsRef.current = loadedProjects;
@@ -172,6 +189,48 @@ export function ProjectProvider({ children }: { children: React.ReactNode }) {
   }, []);
 
   const currentProject = projects.find((p) => p.id === currentProjectId) || projects[0] || null;
+
+  useEffect(() => {
+    if (
+      !loaded ||
+      !currentProject ||
+      currentProject.localReplica.layout === "v2" ||
+      !WORKSPACE_FEATURE_FLAGS.catalogV2 ||
+      !WORKSPACE_FEATURE_FLAGS.resolverV2 ||
+      migratingLegacyProjectIdsRef.current.has(currentProject.id)
+    ) {
+      return;
+    }
+    const previousProjectId = currentProject.id;
+    migratingLegacyProjectIdsRef.current.add(previousProjectId);
+    void migrateLegacyMobileProject({
+      project: currentProject,
+      persistProject: async (legacyProjectId, replacement) => {
+        const withoutPrevious = projectsRef.current.filter(
+          (project) => project.id !== legacyProjectId && project.id !== replacement.id
+        );
+        const updated = [...withoutPrevious, replacement];
+        await reassignSessionsProjectId(legacyProjectId, replacement.id);
+        await saveProjects(updated);
+        await saveCurrentProjectId(replacement.id);
+        projectsRef.current = updated;
+        setProjects(updated);
+        setCurrentProjectId(replacement.id);
+      },
+    })
+      .then(async () => setLegacyCleanupAvailable(await hasLegacyMobileCleanupCandidate()))
+      .catch((error) => {
+        migratingLegacyProjectIdsRef.current.delete(previousProjectId);
+        console.error("[Projects] Legacy workspace migration failed:", error);
+      });
+  }, [loaded, currentProject]);
+
+  useEffect(() => {
+    if (!loaded) return;
+    void hasLegacyMobileCleanupCandidate()
+      .then(setLegacyCleanupAvailable)
+      .catch(() => setLegacyCleanupAvailable(false));
+  }, [loaded, projects]);
   const currentWorkspace = useMemo(() => {
     if (!currentProject) return { handle: null, root: undefined };
     if (currentProject.localReplica.layout === "v2") {
@@ -414,6 +473,7 @@ export function ProjectProvider({ children }: { children: React.ReactNode }) {
 
   const importDirectoryProject = useCallback(
     async (allowWeakDuplicate: boolean = false): Promise<MobileDirectoryImportResult | null> => {
+      if (!WORKSPACE_FEATURE_FLAGS.importV2) throw new Error("Workspace v2 import is disabled");
       const source =
         allowWeakDuplicate && pendingImportSourceRef.current
           ? pendingImportSourceRef.current
@@ -439,6 +499,7 @@ export function ProjectProvider({ children }: { children: React.ReactNode }) {
 
   const importArchiveProject = useCallback(
     async (allowWeakDuplicate: boolean = false): Promise<MobileArchiveImportResult | null> => {
+      if (!WORKSPACE_FEATURE_FLAGS.importV2) throw new Error("Workspace v2 import is disabled");
       const asset =
         allowWeakDuplicate && pendingArchiveRef.current
           ? pendingArchiveRef.current
@@ -469,6 +530,7 @@ export function ProjectProvider({ children }: { children: React.ReactNode }) {
       settings: AppSettings,
       allowWeakDuplicate: boolean = false
     ): Promise<MobileGitImportResult> => {
+      if (!WORKSPACE_FEATURE_FLAGS.importV2) throw new Error("Workspace v2 import is disabled");
       const sourceUrl =
         allowWeakDuplicate && pendingGitUrlRef.current ? pendingGitUrlRef.current : url;
       pendingGitUrlRef.current = sourceUrl;
@@ -510,6 +572,15 @@ export function ProjectProvider({ children }: { children: React.ReactNode }) {
     [commitImportedProject, switchProject]
   );
 
+  const cleanupLegacyStorage = useCallback(async (projectId?: string): Promise<number> => {
+    if (projectsRef.current.some((project) => project.localReplica.layout !== "v2")) {
+      throw new Error("请先逐个打开并完成所有旧项目迁移，再清理旧目录");
+    }
+    const cleaned = await cleanupMigratedLegacyMobileStorage(projectId);
+    setLegacyCleanupAvailable(await hasLegacyMobileCleanupCandidate());
+    return cleaned;
+  }, []);
+
   if (!loaded) return null;
 
   return (
@@ -534,6 +605,8 @@ export function ProjectProvider({ children }: { children: React.ReactNode }) {
         importArchiveProject,
         importGitProject,
         registerLinkedProject,
+        legacyCleanupAvailable,
+        cleanupLegacyStorage,
       }}
     >
       {children}

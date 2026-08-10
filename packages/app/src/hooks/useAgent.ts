@@ -7,9 +7,12 @@ import { randomUUID } from "expo-crypto";
 import {
   createWorkspaceScope,
   isSameWorkspaceScope,
+  parseLegacyProjectId,
   type WorkspaceHandle,
   type WorkspaceScope,
 } from "@pocket-code/workspace-core";
+import { WORKSPACE_FEATURE_FLAGS } from "../services/workspaceFeatureFlags";
+import { recordWorkspaceMetric } from "../services/workspaceTelemetry";
 import { getModelConfig, getApiKeyField, MODELS } from "../services/modelConfig";
 import { updateSettings, type AppSettings } from "../store/settings";
 import { saveChatHistory, loadChatHistory } from "../store/chatHistory";
@@ -74,6 +77,7 @@ interface UseAgentOptions {
   model?: string;
   customPrompt?: string;
   projectId?: string;
+  legacyProjectId?: string;
   projectName?: string;
   workspaceReplicaId?: string;
   workspaceGeneration?: number;
@@ -106,6 +110,15 @@ const SYNC_IGNORE_DIRS = [
 const SYNC_IGNORE_EXTENSIONS = [".lock", ".log"];
 const SYNC_IGNORE_FILES = [".gitconfig", ".git-credentials"];
 const MAX_SYNC_FILE_SIZE = 512 * 1024; // 512KB
+
+function migrationSafeLegacyProjectId(value: string | undefined): string | undefined {
+  if (!value) return undefined;
+  try {
+    return parseLegacyProjectId(value);
+  } catch {
+    return undefined;
+  }
+}
 
 function shouldSyncFile(filePath: string): boolean {
   const parts = filePath.split("/");
@@ -152,6 +165,7 @@ export function useAgent({
   model = "deepseek-v4-flash",
   customPrompt,
   projectId,
+  legacyProjectId,
   projectName,
   workspaceReplicaId,
   workspaceGeneration,
@@ -192,6 +206,8 @@ export function useAgent({
   customPromptRef.current = customPrompt;
   const projectIdRef = useRef(projectId);
   projectIdRef.current = projectId;
+  const legacyProjectIdRef = useRef(legacyProjectId);
+  legacyProjectIdRef.current = legacyProjectId;
   const projectNameRef = useRef(projectName);
   projectNameRef.current = projectName;
   const workspaceReplicaIdRef = useRef(workspaceReplicaId);
@@ -398,9 +414,10 @@ export function useAgent({
       getAuthToken: () => authTokenRef.current,
       getDeviceId,
       buildInitPayload: () => ({
-        workspaceProtocolVersion: 2,
+        ...(WORKSPACE_FEATURE_FLAGS.protocolV2 ? { workspaceProtocolVersion: 2 as const } : {}),
         sessionId: sessionIdRef.current,
         projectId: projectIdRef.current || undefined,
+        legacyProjectId: migrationSafeLegacyProjectId(legacyProjectIdRef.current),
         projectName: projectNameRef.current || undefined,
         model: modelRef.current,
         gitCredentials: gitCredentialsRef.current?.filter((c) => c.token) || [],
@@ -527,6 +544,9 @@ export function useAgent({
         const sid = sessionIdRef.current;
         if (sid) loadSessionRef.current?.(sid);
       },
+      onWorkspaceEventDropped: () => {
+        void recordWorkspaceMetric("stale-event").catch(() => undefined);
+      },
       onFileChanged: (path: string, changeType: "created" | "modified" | "deleted") => {
         onFileChangedRef.current?.(path, changeType);
         // local 模式:自动同步到本地(读取失败非致命,文件仍在远端)
@@ -628,6 +648,11 @@ export function useAgent({
   );
   const inspectWorkspaceSource = useCallback(
     (projectId: string) => conn.inspectWorkspaceSource(projectId),
+    [conn]
+  );
+  const cleanupLegacyWorkspace = useCallback(
+    (projectId: string, legacyProjectId: string) =>
+      conn.cleanupLegacyWorkspace(projectId, legacyProjectId),
     [conn]
   );
   const bindLinkedWorkspace = useCallback(
@@ -950,6 +975,7 @@ export function useAgent({
     requestSyncFile,
     releaseWorkspaceWriter,
     inspectWorkspaceSource,
+    cleanupLegacyWorkspace,
     bindLinkedWorkspace,
     deleteProjectWorkspace,
   };

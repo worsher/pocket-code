@@ -70,8 +70,16 @@
 
 ## 阶段 8：旧布局迁移与发布
 
-- [ ] 实现旧 mobile/server 目录探测和只读迁移 journal。
-- [ ] 复制到 staging、校验、原子登记；迁移失败保留旧目录可继续打开。
-- [ ] 通过 feature flag 分阶段启用 v2 catalog、resolver、protocol、import 和 sync。
-- [ ] 观测目录冲突、stale event、同步失败、权限丢失和恢复成功率。
-- [ ] 观察期后提供显式旧目录清理，不自动删除用户数据。
+- [x] 实现旧 mobile/server 目录探测和只读迁移 journal。
+- [x] 复制到 staging、校验、原子登记；迁移失败保留旧目录可继续打开。
+- [x] 通过 feature flag 分阶段启用 v2 catalog、resolver、protocol、import 和 sync。
+- [x] 观测目录冲突、stale event、同步失败、权限丢失和恢复成功率。
+- [x] 观察期后提供显式旧目录清理，不自动删除用户数据。
+
+### 发布控制与恢复边界
+
+- App 使用 `EXPO_PUBLIC_POCKET_CODE_WS_V2_{CATALOG,RESOLVER,PROTOCOL,IMPORT,SYNC}`；server/daemon 使用 `POCKET_CODE_WS_V2_{CATALOG,RESOLVER,PROTOCOL,IMPORT,SYNC}`。默认启用，值为 `0`、`false`、`off` 或 `disabled` 时关闭；关闭 catalog/resolver 会级联关闭依赖能力。
+- mobile journal 位于 `pocket-code/v2/catalog/migrations`；server journal 位于 `${POCKET_CODE_DATA_ROOT}/catalog/migrations`。journal 保存随机 target ID/storage key 和各阶段快照，重试不重新分配目录。
+- catalog 已提交但 journal 最终写入中断时，App 冷启动只根据 project ID + storage key 对账并补写 `committed`，不重新复制或删除目录。
+- `workspace-legacy-cleanup` 是鉴权、按 project/user 隔离的显式 RPC；移动端也只在所有已知旧项目迁移完成后显示清理入口。任何迁移和恢复路径都不自动删除旧目录。
+- App 在 AsyncStorage 的 `pocket-code:workspace-v2:metrics` 中累计目录冲突、stale event、同步失败、权限丢失、恢复尝试/成功，并派生恢复成功率。

@@ -15,6 +15,7 @@ import { useProject } from "../../contexts/ProjectContext";
 import type { WorkspaceHandle } from "@pocket-code/workspace-core";
 import { getProjectSyncEdge, type RemoteReplicaCatalogEntry } from "../../store/projectCatalog";
 import { getWorkspaceConnectionKey } from "../../services/workspaceConnection";
+import { WORKSPACE_FEATURE_FLAGS } from "../../services/workspaceFeatureFlags";
 
 interface Props {
   requestFileList: (path: string) => Promise<any>;
@@ -104,6 +105,7 @@ export default function FilesTab({
     !!localWorkspaceHandle &&
     !!remoteReplica;
   const syncAvailable =
+    WORKSPACE_FEATURE_FLAGS.syncV2 &&
     currentProject?.importSource?.mode !== "git" &&
     ((isLocal && !!projectId && canSyncRemote(settings)) || shadowSyncAvailable);
 

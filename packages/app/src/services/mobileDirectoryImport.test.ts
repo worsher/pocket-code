@@ -243,6 +243,15 @@ const { pullMobileReplicaTransaction, scanMobileSyncDirectory } =
   await import("./mobileSyncTransaction");
 const { applyCopySourceOperation, previewCopySourceOperation } = await import("./copySourceSync");
 const { ensureMobileWorkspaceHandle } = await import("./workspaceResolver");
+const { getWorkspaceMetrics, recordWorkspaceMetric } = await import("./workspaceTelemetry");
+const {
+  cleanupMigratedLegacyMobileStorage,
+  hasLegacyMobileCleanupCandidate,
+  listMobileWorkspaceMigrations,
+  migrateLegacyMobileProject,
+  reconcileMobileWorkspaceMigrations,
+} = await import("./mobileWorkspaceMigration");
+const { reassignSessionsProjectId } = await import("../store/chatHistory");
 
 function sourceDirectory() {
   fake.nodes.set("content://picked", { type: "directory" });
@@ -485,6 +494,140 @@ describe("copy source reconciliation", () => {
     });
     const archive = await inspectZipArchive(await new File(archiveUri).bytes());
     expect(archive.snapshot).toBe(preview.workspaceSnapshot);
+  });
+});
+
+describe("workspace v2 telemetry", () => {
+  it("persists recovery and failure counters for rollout observation", async () => {
+    await recordWorkspaceMetric("sync-failed");
+    await recordWorkspaceMetric("sync-failed");
+    await recordWorkspaceMetric("recovery-attempted");
+    await recordWorkspaceMetric("recovery-succeeded");
+    await expect(getWorkspaceMetrics()).resolves.toMatchObject({
+      version: 1,
+      counters: {
+        "sync-failed": 2,
+        "recovery-attempted": 1,
+        "recovery-succeeded": 1,
+      },
+      recoverySuccessRate: 1,
+    });
+  });
+});
+
+describe("legacy mobile workspace migration", () => {
+  function legacyProject(): Project {
+    return {
+      catalogVersion: 2,
+      id: "old-project",
+      legacyId: "old-project",
+      name: "Old project",
+      description: "",
+      localReplica: {
+        id: "3ca2e8bb-4fe5-4e16-a6ca-99840d666870",
+        storageKey: "ws_74f1d64fbf5946a9aa0b7dcf42b95cab",
+        generation: 1,
+        layout: "legacy-project",
+      },
+      createdAt: 1,
+      updatedAt: 1,
+    };
+  }
+
+  function createLegacyWorkspace() {
+    new Directory("file:///documents/workspace/old-project/src").create({ intermediates: true });
+    new File("file:///documents/workspace/old-project/src/index.ts").write("legacy content");
+  }
+
+  it("copies and verifies before catalog commit and keeps the old root until explicit cleanup", async () => {
+    createLegacyWorkspace();
+    let persisted: Project | undefined;
+    const migrated = await migrateLegacyMobileProject({
+      project: legacyProject(),
+      persistProject: async (_previous, replacement) => {
+        persisted = replacement;
+      },
+    });
+    expect(migrated).toMatchObject({
+      id: "550e8400-e29b-41d4-a716-446655440000",
+      legacyId: "old-project",
+      localReplica: { layout: "v2" },
+    });
+    expect(persisted).toEqual(migrated);
+    expect(new File("file:///documents/workspace/old-project/src/index.ts").exists).toBe(true);
+    expect(
+      new File(
+        "file:///documents/pocket-code/v2/projects/ws_74f1d64fbf5946a9aa0b7dcf42b95cab/worktree/src/index.ts"
+      ).exists
+    ).toBe(true);
+    expect((await listMobileWorkspaceMigrations())[0].phase).toBe("committed");
+    await expect(hasLegacyMobileCleanupCandidate()).resolves.toBe(true);
+    await expect(cleanupMigratedLegacyMobileStorage(migrated.id)).resolves.toBe(1);
+    expect(new Directory("file:///documents/workspace/old-project").exists).toBe(false);
+    await expect(cleanupMigratedLegacyMobileStorage(migrated.id)).resolves.toBe(0);
+  });
+
+  it("resumes an applied migration after catalog persistence fails", async () => {
+    createLegacyWorkspace();
+    let fail = true;
+    await expect(
+      migrateLegacyMobileProject({
+        project: legacyProject(),
+        persistProject: async () => {
+          if (fail) throw new Error("catalog unavailable");
+        },
+      })
+    ).rejects.toThrow("catalog unavailable");
+    fail = false;
+    await expect(
+      migrateLegacyMobileProject({
+        project: legacyProject(),
+        persistProject: async () => undefined,
+      })
+    ).resolves.toMatchObject({ localReplica: { layout: "v2" } });
+    expect(new File("file:///documents/workspace/old-project/src/index.ts").exists).toBe(true);
+    await expect(getWorkspaceMetrics()).resolves.toMatchObject({
+      counters: { "recovery-attempted": 1, "recovery-succeeded": 1 },
+      recoverySuccessRate: 1,
+    });
+  });
+
+  it("repairs an applied journal when the catalog commit already persisted", async () => {
+    createLegacyWorkspace();
+    const migrated = await migrateLegacyMobileProject({
+      project: legacyProject(),
+      persistProject: async () => undefined,
+    });
+    const journalUri = [...fake.nodes.keys()].find((key) =>
+      key.endsWith("/catalog/migrations/mobile_ws_74f1d64fbf5946a9aa0b7dcf42b95cab.json")
+    );
+    if (!journalUri) throw new Error("migration journal missing");
+    const journal = JSON.parse(String(fake.nodes.get(journalUri)?.content));
+    new File(journalUri).write(JSON.stringify({ ...journal, phase: "applied" }));
+    await expect(reconcileMobileWorkspaceMigrations([migrated])).resolves.toBe(1);
+    expect((await listMobileWorkspaceMigrations())[0].phase).toBe("committed");
+  });
+
+  it("reassigns archived sessions idempotently when the project ID changes", async () => {
+    fake.storage.set(
+      "pocket-code:sessions",
+      JSON.stringify([
+        { id: "s1", projectId: "old-project", title: "Old", lastUpdated: 2, messageCount: 1 },
+        { id: "s2", projectId: "other", title: "Other", lastUpdated: 1, messageCount: 1 },
+      ])
+    );
+    await expect(
+      reassignSessionsProjectId("old-project", "550e8400-e29b-41d4-a716-446655440000")
+    ).resolves.toBe(1);
+    await expect(
+      reassignSessionsProjectId("old-project", "550e8400-e29b-41d4-a716-446655440000")
+    ).resolves.toBe(0);
+    expect(JSON.parse(fake.storage.get("pocket-code:sessions")!)).toContainEqual(
+      expect.objectContaining({
+        id: "s1",
+        projectId: "550e8400-e29b-41d4-a716-446655440000",
+      })
+    );
   });
 });
 

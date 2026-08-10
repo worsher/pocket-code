@@ -1,7 +1,7 @@
 // ── Project Drawer ───────────────────────────────────────
 // A slide-out drawer for switching between projects.
 
-import React, { useEffect, useState } from "react";
+import React, { useEffect, useRef, useState } from "react";
 import { View, Text, TouchableOpacity, FlatList, TextInput, StyleSheet, Alert } from "react-native";
 import { randomUUID } from "expo-crypto";
 import { useProject } from "../../contexts/ProjectContext";
@@ -10,8 +10,10 @@ import type { AppSettings } from "../../store/settings";
 import { getWorkspaceConnectionKey } from "../../services/workspaceConnection";
 import type {
   LinkedWorkspaceImportResponse,
+  WorkspaceLegacyCleanupResponse,
   WorkspaceSourceStatusResponse,
 } from "@pocket-code/client-core";
+import { recordWorkspaceMetric } from "../../services/workspaceTelemetry";
 
 interface Props {
   monitoringEnabled: boolean;
@@ -26,6 +28,10 @@ interface Props {
     allowWeakDuplicate?: boolean;
   }) => Promise<LinkedWorkspaceImportResponse>;
   onInspectLinkedSource: (projectId: string) => Promise<WorkspaceSourceStatusResponse>;
+  onCleanupLegacyWorkspace: (
+    projectId: string,
+    legacyProjectId: string
+  ) => Promise<WorkspaceLegacyCleanupResponse>;
 }
 
 type ProjectImportUiResult =
@@ -41,6 +47,7 @@ export default function ProjectDrawer({
   settings,
   onBindLinkedWorkspace,
   onInspectLinkedSource,
+  onCleanupLegacyWorkspace,
 }: Props) {
   const {
     projects,
@@ -55,6 +62,8 @@ export default function ProjectDrawer({
     previewCopySource,
     applyCopySource,
     commitAndPushGitProject,
+    legacyCleanupAvailable,
+    cleanupLegacyStorage,
   } = useProject();
 
   const [showCreate, setShowCreate] = useState(false);
@@ -70,6 +79,9 @@ export default function ProjectDrawer({
   const [linkedSourceStatus, setLinkedSourceStatus] = useState<
     WorkspaceSourceStatusResponse | undefined
   >();
+  const linkedStatusStateRef = useRef<WorkspaceSourceStatusResponse["state"] | undefined>(
+    undefined
+  );
 
   useEffect(() => {
     if (
@@ -77,14 +89,25 @@ export default function ProjectDrawer({
       currentProject?.importSource?.mode !== "linked" ||
       settings.workspaceMode !== "relay"
     ) {
+      linkedStatusStateRef.current = undefined;
       setLinkedSourceStatus(undefined);
       return;
     }
+    linkedStatusStateRef.current = undefined;
     let active = true;
     const inspect = async () => {
       try {
         const status = await onInspectLinkedSource(currentProject.id);
-        if (active) setLinkedSourceStatus(status);
+        if (active) {
+          if (
+            status.state === "permission-lost" &&
+            linkedStatusStateRef.current !== "permission-lost"
+          ) {
+            void recordWorkspaceMetric("permission-lost").catch(() => undefined);
+          }
+          linkedStatusStateRef.current = status.state;
+          setLinkedSourceStatus(status);
+        }
       } catch (error) {
         if (!active) return;
         setLinkedSourceStatus({
@@ -375,6 +398,40 @@ export default function ProjectDrawer({
     );
   };
 
+  const handleLegacyCleanup = (project: Project) => {
+    const legacyProjectId = project.legacyId;
+    if (!legacyProjectId) return;
+    Alert.alert(
+      "清理旧项目目录",
+      "仅删除已完成迁移且已通过快照校验的旧目录；v2 受管目录和原始导入来源不会删除。此操作不可撤销。",
+      [
+        { text: "取消", style: "cancel" },
+        {
+          text: "确认清理",
+          style: "destructive",
+          onPress: () => {
+            setIsImporting(true);
+            void (async () => {
+              const localCleaned = await cleanupLegacyStorage(project.id);
+              const remoteNotice = await onCleanupLegacyWorkspace(project.id, legacyProjectId)
+                .then((remote) => {
+                  if (!remote.success) throw new Error(remote.error || "远端清理失败");
+                  return remote.cleaned ? "，远端旧目录也已清理" : "，远端无待清理目录";
+                })
+                .catch(
+                  (error) =>
+                    `；远端旧目录保留：${error instanceof Error ? error.message : String(error)}`
+                );
+              Alert.alert("旧目录清理完成", `本机清理 ${localCleaned} 个迁移目录${remoteNotice}`);
+            })()
+              .catch(showImportError)
+              .finally(() => setIsImporting(false));
+          },
+        },
+      ]
+    );
+  };
+
   const renderItem = ({ item }: { item: Project }) => {
     const isActive = currentProject?.id === item.id;
     return (
@@ -458,6 +515,15 @@ export default function ProjectDrawer({
                 <Text style={styles.sourceActionText}>提交并推送</Text>
               </TouchableOpacity>
             </View>
+          ) : null}
+          {isActive && item.legacyId && legacyCleanupAvailable ? (
+            <TouchableOpacity
+              style={styles.legacyCleanupBtn}
+              onPress={() => handleLegacyCleanup(item)}
+              disabled={isImporting}
+            >
+              <Text style={styles.legacyCleanupText}>清理已迁移旧目录</Text>
+            </TouchableOpacity>
           ) : null}
         </View>
         {isActive && <Text style={styles.checkmark}>✓</Text>}
@@ -609,6 +675,20 @@ const styles = StyleSheet.create({
     color: "#007AFF",
     fontSize: 14,
     fontWeight: "500",
+  },
+  legacyCleanupBtn: {
+    alignSelf: "flex-start",
+    marginTop: 8,
+    paddingHorizontal: 10,
+    paddingVertical: 6,
+    borderRadius: 6,
+    borderWidth: StyleSheet.hairlineWidth,
+    borderColor: "#FF453A",
+  },
+  legacyCleanupText: {
+    color: "#FF453A",
+    fontSize: 12,
+    fontWeight: "600",
   },
   createForm: {
     paddingHorizontal: 16,

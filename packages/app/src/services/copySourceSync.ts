@@ -17,6 +17,7 @@ import {
 import { inspectZipArchive, writeArchiveToDirectory } from "./mobileArchiveImport";
 import { getMobileV2Root } from "./workspaceResolver";
 import type { Project, ProjectImportSource } from "../store/projectCatalog";
+import { recordWorkspaceMetric } from "./workspaceTelemetry";
 
 export type CopySourceDirection = "reimport" | "write-back";
 
@@ -143,7 +144,11 @@ export async function previewCopySourceOperation(
   handle: WorkspaceHandle,
   direction: CopySourceDirection
 ): Promise<CopySourcePreview> {
-  return (await loadPreview(project, handle, direction)).preview;
+  const preview = (await loadPreview(project, handle, direction)).preview;
+  if (preview.decision === "conflict") {
+    await recordWorkspaceMetric("directory-conflict").catch(() => undefined);
+  }
+  return preview;
 }
 
 function clearDirectoryContents(directory: Directory): void {

@@ -21,6 +21,7 @@ export {
   ReleaseWorkspaceWriterMessage,
   BindLinkedWorkspaceMessage,
   InspectWorkspaceSourceMessage,
+  CleanupLegacyWorkspaceMessage,
   WsMessage,
   type WsMessageType,
 } from "./messages.js";
@@ -138,6 +139,7 @@ export {
   WorkspaceImportResultMsg,
   WorkspaceWriterReleasedMsg,
   WorkspaceSourceStatusMsg,
+  WorkspaceLegacyCleanedMsg,
   ServerErrorMsg,
   ResyncRequiredMsg,
   ServerOutbound,

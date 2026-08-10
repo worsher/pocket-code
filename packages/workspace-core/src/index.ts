@@ -2,6 +2,7 @@ export * from "./types.js";
 export * from "./ids.js";
 export * from "./safeRelativePath.js";
 export * from "./managedLayout.js";
+export * from "./featureFlags.js";
 export * from "./sourceIdentity.js";
 export * from "./sourceReconciliation.js";
 export * from "./syncState.js";

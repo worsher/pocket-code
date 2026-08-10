@@ -29,6 +29,8 @@ export const InitMessage = z.object({
   token: optStr(),
   sessionId: optStr(128),
   projectId: optStr(128),
+  /** Legacy catalog key used only by the authenticated migration entrypoint. */
+  legacyProjectId: optStr(128),
   projectName: optStr(256),
   model: optStr(64),
   customPrompt: optStr(10000),
@@ -191,6 +193,13 @@ export const InspectWorkspaceSourceMessage = z.object({
   _reqId: z.string().min(1).max(128),
 });
 
+export const CleanupLegacyWorkspaceMessage = z.object({
+  type: z.literal("workspace-legacy-cleanup"),
+  projectId: z.string().uuid(),
+  legacyProjectId: z.string().min(1).max(128),
+  _reqId: z.string().min(1).max(128),
+});
+
 /** Discriminated union of all valid business messages */
 export const WsMessage = z.discriminatedUnion("type", [
   RegisterMessage,
@@ -211,6 +220,7 @@ export const WsMessage = z.discriminatedUnion("type", [
   ReleaseWorkspaceWriterMessage,
   BindLinkedWorkspaceMessage,
   InspectWorkspaceSourceMessage,
+  CleanupLegacyWorkspaceMessage,
 ]);
 
 export type WsMessageType = z.infer<typeof WsMessage>;

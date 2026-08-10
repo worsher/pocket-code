@@ -10,6 +10,7 @@ import {
   type MobileSyncFileContent as SyncFileContent,
   type MobileSyncManifest as SyncManifest,
 } from "./mobileSyncTransaction";
+import { recordWorkspaceMetric } from "./workspaceTelemetry";
 
 export type { SyncFileContent, SyncManifest };
 
@@ -49,6 +50,7 @@ export async function pullFromDevMachine(deps: PullDeps): Promise<PullResult> {
   try {
     return await pullMobileReplicaTransaction(deps);
   } catch (err: any) {
+    await recordWorkspaceMetric("sync-failed").catch(() => undefined);
     return {
       success: false,
       applied: 0,

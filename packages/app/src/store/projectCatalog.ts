@@ -535,6 +535,27 @@ export function createImportedProject(
   };
 }
 
+/**
+ * Assigns a real v2 project ID while retaining the randomly generated replica
+ * and storage keys created during catalog upgrade. The legacy ID remains a
+ * lookup/cleanup key only and is never reused as a path segment.
+ */
+export function promoteLegacyProjectToV2(
+  project: Project,
+  projectUuid: UuidFactory,
+  now: number = Date.now()
+): Project {
+  if (project.localReplica.layout === "v2") return project;
+  return {
+    ...project,
+    id: createProjectId(projectUuid),
+    legacyId: project.legacyId ?? project.id,
+    lastSessionId: undefined,
+    localReplica: { ...project.localReplica, layout: "v2" },
+    updatedAt: now,
+  };
+}
+
 export function upgradeProjectCatalog(
   value: unknown,
   factories: ProjectIdFactories,

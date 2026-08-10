@@ -25,6 +25,19 @@ describe("wire — WsMessage validation", () => {
     expect(WsMessage.safeParse({ type: "init", workspaceProtocolVersion: 3 }).success).toBe(false);
   });
 
+  it("carries a legacy lookup key only as optional migration metadata", () => {
+    expect(
+      WsMessage.safeParse({
+        type: "init",
+        projectId: "10ed836e-ae48-4d67-9e26-a74cbf55a52e",
+        legacyProjectId: "old-project",
+      }).success
+    ).toBe(true);
+    expect(WsMessage.safeParse({ type: "init", legacyProjectId: "x".repeat(129) }).success).toBe(
+      false
+    );
+  });
+
   it("goal-create / goal-control round-trip (P16)", () => {
     const create = WsMessage.safeParse({
       type: "goal-create",
@@ -206,6 +219,25 @@ describe("wire — WsMessage validation", () => {
         type: "workspace-source-inspect",
         projectId: "legacy-project-name",
         _reqId: "source_1",
+      }).success
+    ).toBe(false);
+  });
+
+  it("validates explicit legacy cleanup requests", () => {
+    expect(
+      WsMessage.safeParse({
+        type: "workspace-legacy-cleanup",
+        projectId: "10ed836e-ae48-4d67-9e26-a74cbf55a52e",
+        legacyProjectId: "old-project",
+        _reqId: "legacy_1",
+      }).success
+    ).toBe(true);
+    expect(
+      WsMessage.safeParse({
+        type: "workspace-legacy-cleanup",
+        projectId: "old-project",
+        legacyProjectId: "old-project",
+        _reqId: "legacy_1",
       }).success
     ).toBe(false);
   });

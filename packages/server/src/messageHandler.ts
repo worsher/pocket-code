@@ -38,6 +38,11 @@ import { getSessionStream, type SessionEventStream } from "./eventBuffer.js";
 import { rm } from "fs/promises";
 import { join } from "path";
 import { getManagedWorkspaceRelativeRoots, isUuid } from "@pocket-code/workspace-core";
+import { getServerWorkspaceFeatureFlags } from "./workspaceFeatureFlags.js";
+import {
+  cleanupLegacyServerWorkspace,
+  migrateLegacyServerWorkspace,
+} from "./workspaceMigration.js";
 
 // Shared session store — the same Map is used for all handlers
 const sessions = new Map<string, AgentSession>();
@@ -91,6 +96,7 @@ export function createMessageHandler(
   let stream: SessionEventStream | null = null;
   let unsubscribe: (() => void) | null = null;
   const replicaKind = options?.replicaKind ?? "cloud";
+  const workspaceFlags = getServerWorkspaceFeatureFlags();
   let workspaceAuthorityId: string | null = null;
   const getAuthorityId = () => (workspaceAuthorityId ??= getWorkspaceAuthorityId());
 
@@ -189,6 +195,31 @@ export function createMessageHandler(
 
             const sessionId = msg.sessionId || crypto.randomUUID();
             const projectId: string = msg.projectId || "";
+            if (
+              workspaceFlags.catalogV2 &&
+              workspaceFlags.resolverV2 &&
+              projectId &&
+              isUuid(projectId) &&
+              msg.legacyProjectId
+            ) {
+              try {
+                await migrateLegacyServerWorkspace({
+                  userId: auth.userId,
+                  legacyProjectId: msg.legacyProjectId,
+                  projectId,
+                  displayName: msg.projectName,
+                });
+                const cached = sessions.get(sessionId);
+                if (cached?.projectId === msg.legacyProjectId) sessions.delete(sessionId);
+              } catch (error: any) {
+                send({
+                  type: "error",
+                  error: error?.message ?? "Failed to migrate legacy workspace.",
+                });
+                session = null;
+                return;
+              }
+            }
             if (sessions.has(sessionId)) {
               session = sessions.get(sessionId)!;
               if (session.userId !== auth.userId) {
@@ -253,7 +284,7 @@ export function createMessageHandler(
             unsubscribe = stream.subscribe(send);
             const workspaceScope = scopeForSession(session);
             const workspaceCatalog =
-              msg.workspaceProtocolVersion === 2
+              workspaceFlags.protocolV2 && msg.workspaceProtocolVersion === 2
                 ? listWorkspaceProjects(auth.userId).map((project) => ({
                     projectId: project.projectId,
                     displayName: project.displayName,
@@ -277,7 +308,7 @@ export function createMessageHandler(
                 : undefined;
             send({
               type: "session",
-              ...(msg.workspaceProtocolVersion === 2
+              ...(workspaceFlags.protocolV2 && msg.workspaceProtocolVersion === 2
                 ? {
                     workspaceProtocolVersion: 2 as const,
                     workspaceCatalog,
@@ -394,7 +425,11 @@ export function createMessageHandler(
               });
               return;
             }
-            if (!options?.allowLinkedWorkspaceBinding || replicaKind !== "dev-binding") {
+            if (
+              !workspaceFlags.importV2 ||
+              !options?.allowLinkedWorkspaceBinding ||
+              replicaKind !== "dev-binding"
+            ) {
               send({
                 type: "workspace-import-result",
                 _reqId: msg._reqId,
@@ -461,7 +496,12 @@ export function createMessageHandler(
           }
 
           case "workspace-source-inspect": {
-            if (!auth || !options?.allowLinkedWorkspaceBinding || replicaKind !== "dev-binding") {
+            if (
+              !auth ||
+              !workspaceFlags.importV2 ||
+              !options?.allowLinkedWorkspaceBinding ||
+              replicaKind !== "dev-binding"
+            ) {
               send({
                 type: "workspace-source-status",
                 _reqId: msg._reqId,
@@ -489,6 +529,47 @@ export function createMessageHandler(
               _reqId: msg._reqId,
               ...(await inspectLinkedDirectorySource(project)),
             } satisfies ServerOutboundType);
+            break;
+          }
+
+          case "workspace-legacy-cleanup": {
+            if (!auth || !workspaceFlags.catalogV2 || !workspaceFlags.resolverV2) {
+              send({
+                type: "workspace-legacy-cleaned",
+                _reqId: msg._reqId,
+                projectId: msg.projectId,
+                legacyProjectId: msg.legacyProjectId,
+                success: false,
+                cleaned: false,
+                error: "Workspace v2 migration is disabled on this authority.",
+              } satisfies ServerOutboundType);
+              break;
+            }
+            try {
+              const cleaned = await cleanupLegacyServerWorkspace({
+                userId: auth.userId,
+                projectId: msg.projectId,
+                legacyProjectId: msg.legacyProjectId,
+              });
+              send({
+                type: "workspace-legacy-cleaned",
+                _reqId: msg._reqId,
+                projectId: msg.projectId,
+                legacyProjectId: msg.legacyProjectId,
+                success: true,
+                cleaned,
+              } satisfies ServerOutboundType);
+            } catch (error: any) {
+              send({
+                type: "workspace-legacy-cleaned",
+                _reqId: msg._reqId,
+                projectId: msg.projectId,
+                legacyProjectId: msg.legacyProjectId,
+                success: false,
+                cleaned: false,
+                error: error?.message ?? "Legacy workspace cleanup failed.",
+              } satisfies ServerOutboundType);
+            }
             break;
           }
 
@@ -666,6 +747,14 @@ export function createMessageHandler(
 
           // ── Code sync (shadow snapshot) ──
           case "sync-pull": {
+            if (!workspaceFlags.syncV2) {
+              send({
+                type: "error",
+                error: "Workspace v2 sync is disabled on this authority.",
+                _reqId: msg._reqId,
+              });
+              break;
+            }
             if (!session) {
               send({ type: "error", error: "No session. Send init first." });
               return;
@@ -679,12 +768,24 @@ export function createMessageHandler(
                 session.workspaceHandle?.stateRoot
               );
             } catch (err: any) {
-              send({ type: "error", error: `sync-pull failed: ${err.message}` });
+              send({
+                type: "error",
+                error: `sync-pull failed: ${err.message}`,
+                _reqId: msg._reqId,
+              });
             }
             break;
           }
 
           case "sync-file": {
+            if (!workspaceFlags.syncV2) {
+              send({
+                type: "error",
+                error: "Workspace v2 sync is disabled on this authority.",
+                _reqId: msg._reqId,
+              });
+              break;
+            }
             if (!session) {
               send({ type: "error", error: "No session. Send init first." });
               return;
@@ -699,7 +800,11 @@ export function createMessageHandler(
                 session.workspaceHandle?.stateRoot
               );
             } catch (err: any) {
-              send({ type: "error", error: `sync-file failed: ${err.message}` });
+              send({
+                type: "error",
+                error: `sync-file failed: ${err.message}`,
+                _reqId: msg._reqId,
+              });
             }
             break;
           }

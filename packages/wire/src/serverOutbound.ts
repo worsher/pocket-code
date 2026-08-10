@@ -146,9 +146,20 @@ export const WorkspaceSourceStatusMsg = z.object({
   error: z.string().optional(),
 });
 
+export const WorkspaceLegacyCleanedMsg = z.object({
+  type: z.literal("workspace-legacy-cleaned"),
+  _reqId: z.string(),
+  projectId: z.string().uuid(),
+  legacyProjectId: z.string(),
+  success: z.boolean(),
+  cleaned: z.boolean(),
+  error: z.string().optional(),
+});
+
 export const ServerErrorMsg = z.object({
   type: z.literal("error"),
   error: z.string(),
+  _reqId: z.string().optional(),
 });
 
 /** server → App 的一切出站消息(流式 AgentEvent ∪ 控制响应) */
@@ -167,6 +178,7 @@ export const ServerOutbound = z.union([
   ProjectWorkspaceDeletedMsg,
   WorkspaceImportResultMsg,
   WorkspaceSourceStatusMsg,
+  WorkspaceLegacyCleanedMsg,
   ServerErrorMsg,
   ResyncRequiredMsg,
 ]);
