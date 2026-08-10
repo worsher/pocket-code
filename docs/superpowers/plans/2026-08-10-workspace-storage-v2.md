@@ -55,11 +55,11 @@
 
 ## 阶段 6：事务同步与 writer handoff
 
-- [ ] 以 replica edge 存储 base/local/remote snapshot。
-- [ ] 实现 prepare/transfer/verify/apply/commit journal；失败不得推进 base。
-- [ ] 支持删除传播、崩溃恢复、幂等重试和 staging 回收。
-- [ ] 实现 writer lease 与模式切换 handoff，切换时递增 generation。
-- [ ] 冲突时冻结自动写入并提供保留本地/远端/另存副本入口。
+- [x] 以 replica edge 存储 base/local/remote snapshot。
+- [x] 实现 prepare/transfer/verify/apply/commit journal；失败不得推进 base。
+- [x] 支持删除传播、崩溃恢复、幂等重试和 staging 回收。
+- [x] 实现 writer lease 与模式切换 handoff，切换时递增 generation。
+- [x] 冲突时冻结自动写入并提供保留本地/远端/另存副本入口。
 
 ## 阶段 7：来源重导入与写回
 

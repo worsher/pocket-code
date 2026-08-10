@@ -164,3 +164,24 @@ export interface SyncEdge {
   readonly phase: SyncPhase;
   readonly updatedAt: string;
 }
+
+export interface SyncTransactionJournal {
+  readonly version: 1;
+  readonly transactionId: string;
+  readonly edgeId: string;
+  readonly phase: SyncPhase;
+  readonly baseSnapshot: SnapshotId | null;
+  readonly expectedSnapshot: SnapshotId;
+  readonly verifiedSnapshot: SnapshotId | null;
+  readonly appliedSnapshot: SnapshotId | null;
+  readonly startedAt: string;
+  readonly updatedAt: string;
+  readonly error?: string;
+}
+
+export interface WriterLease {
+  readonly holderReplicaId: ReplicaId;
+  readonly generation: number;
+  readonly acquiredAt: string;
+  readonly expiresAt?: string;
+}

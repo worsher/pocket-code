@@ -466,6 +466,46 @@ export function updateWorkspaceProjectDisplayName(
   if (db.getRowsModified() > 0) persist();
 }
 
+/**
+ * Generation-guarded release used before a client hands the writer role to its
+ * mobile replica. Bumping the server replica generation invalidates every
+ * session that was created under the previous writer lease.
+ */
+export function releaseWorkspaceProjectWriter(args: {
+  userId: string;
+  projectId: string;
+  replicaId: string;
+  expectedGeneration: number;
+}): WorkspaceProjectRecord {
+  const projectId = parseProjectId(args.projectId);
+  const replicaId = parseReplicaId(args.replicaId);
+  db.run(
+    `UPDATE workspace_projects
+     SET generation = generation + 1, updated_at = ?
+     WHERE user_id = ? AND project_id = ? AND replica_id = ? AND generation = ?`,
+    [Date.now(), args.userId, projectId, replicaId, args.expectedGeneration]
+  );
+  if (db.getRowsModified() !== 1) {
+    throw new Error("Writer release rejected because the workspace generation is stale");
+  }
+  persist();
+  const updated = getWorkspaceProject(args.userId, projectId);
+  if (!updated) throw new Error("Workspace project disappeared during writer release");
+  return updated;
+}
+
+export function isWorkspaceSessionGenerationCurrent(args: {
+  userId: string;
+  projectId: string;
+  replicaId: string;
+  generation: number;
+}): boolean {
+  const project = getWorkspaceProject(args.userId, args.projectId);
+  return (
+    !!project && project.replicaId === args.replicaId && project.generation === args.generation
+  );
+}
+
 export function ensureWorkspaceProject(
   userId: string,
   projectId: string,

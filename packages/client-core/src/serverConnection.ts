@@ -24,6 +24,16 @@ export interface LinkedWorkspaceImportResponse {
   _reqId: string;
 }
 
+export interface WorkspaceWriterReleaseResponse {
+  type: "workspace-writer-released";
+  projectId: string;
+  replicaId: string;
+  success: boolean;
+  workspaceGeneration?: number;
+  error?: string;
+  _reqId: string;
+}
+
 export interface ConnectionConfig {
   getServerUrl(): string;
   isRelayMode(): boolean;
@@ -313,7 +323,8 @@ export class ServerConnection {
         data.type === "file-content" ||
         data.type === "sync-manifest" ||
         data.type === "sync-file-content" ||
-        data.type === "workspace-import-result": {
+        data.type === "workspace-import-result" ||
+        data.type === "workspace-writer-released": {
         const resolver = data._reqId && this.resolvers.get(data._reqId);
         if (resolver) {
           resolver(data);
@@ -423,6 +434,20 @@ export class ServerConnection {
       reqId,
       30000,
       "Sync pull"
+    );
+  }
+
+  releaseWorkspaceWriter(args: {
+    projectId: string;
+    replicaId: string;
+    workspaceGeneration: number;
+  }): Promise<WorkspaceWriterReleaseResponse> {
+    const reqId = `wr_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+    return this.request(
+      { type: "workspace-writer-release", _reqId: reqId, ...args },
+      reqId,
+      10_000,
+      "Workspace writer release"
     );
   }
 

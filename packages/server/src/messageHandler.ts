@@ -19,6 +19,8 @@ import {
   deleteWorkspaceProject,
   listWorkspaceProjects,
   updateWorkspaceProjectDisplayName,
+  releaseWorkspaceProjectWriter,
+  isWorkspaceSessionGenerationCurrent,
 } from "./db.js";
 import { createGoal, goalUpdatedEvent, clearedEvent, type GoalState } from "./goal/types.js";
 import { runGoalDriver } from "./goal/driver.js";
@@ -109,6 +111,17 @@ export function createMessageHandler(
     if (event.type !== "file-changed") return event;
     const workspaceScope = scopeForSession(value);
     return workspaceScope ? { ...event, workspaceScope } : event;
+  };
+
+  const hasCurrentWriterGeneration = (value: AgentSession): boolean => {
+    const handle = value.workspaceHandle;
+    if (!handle) return true;
+    return isWorkspaceSessionGenerationCurrent({
+      userId: value.userId,
+      projectId: handle.projectId,
+      replicaId: handle.replicaId,
+      generation: handle.generation,
+    });
   };
 
   return {
@@ -307,6 +320,13 @@ export function createMessageHandler(
               send({ type: "error", error: "No session. Send init first." });
               return;
             }
+            if (!hasCurrentWriterGeneration(session)) {
+              send({
+                type: "error",
+                error: "Workspace writer generation is stale; reconnect before writing.",
+              });
+              return;
+            }
             session.lastActivity = Date.now();
             if (auth) {
               const quotaCheck = checkQuota(auth.userId, "api_call");
@@ -440,10 +460,86 @@ export function createMessageHandler(
             break;
           }
 
+          case "workspace-writer-release": {
+            if (!auth || !session?.workspaceHandle) {
+              send({
+                type: "workspace-writer-released",
+                projectId: msg.projectId,
+                replicaId: msg.replicaId,
+                success: false,
+                error: "A v2 workspace session is required.",
+                _reqId: msg._reqId,
+              });
+              return;
+            }
+            const handle = session.workspaceHandle;
+            if (
+              handle.projectId !== msg.projectId ||
+              handle.replicaId !== msg.replicaId ||
+              handle.generation !== msg.workspaceGeneration
+            ) {
+              send({
+                type: "workspace-writer-released",
+                projectId: msg.projectId,
+                replicaId: msg.replicaId,
+                success: false,
+                error: "Writer release does not match the active session.",
+                _reqId: msg._reqId,
+              });
+              return;
+            }
+            try {
+              const released = releaseWorkspaceProjectWriter({
+                userId: auth.userId,
+                projectId: msg.projectId,
+                replicaId: msg.replicaId,
+                expectedGeneration: msg.workspaceGeneration,
+              });
+              for (const candidate of sessions.values()) {
+                if (
+                  candidate.userId === auth.userId &&
+                  candidate.projectId === msg.projectId &&
+                  candidate.workspaceHandle?.generation === msg.workspaceGeneration
+                ) {
+                  candidate.currentAbort?.abort();
+                }
+              }
+              send({
+                type: "workspace-writer-released",
+                projectId: released.projectId,
+                replicaId: released.replicaId,
+                success: true,
+                workspaceGeneration: released.generation,
+                _reqId: msg._reqId,
+              });
+            } catch (error) {
+              send({
+                type: "workspace-writer-released",
+                projectId: msg.projectId,
+                replicaId: msg.replicaId,
+                success: false,
+                error: error instanceof Error ? error.message : "Writer release failed.",
+                _reqId: msg._reqId,
+              });
+            }
+            break;
+          }
+
           // ── Geek mode: execute a single tool on demand ──
           case "tool-exec": {
             if (!session) {
               send({ type: "error", error: "No session. Send init first." });
+              return;
+            }
+            if (!hasCurrentWriterGeneration(session)) {
+              send({
+                type: "tool-result",
+                callId: msg.callId ?? "",
+                result: {
+                  success: false,
+                  error: "Workspace writer generation is stale; reconnect before writing.",
+                },
+              } satisfies ServerOutboundType);
               return;
             }
             const { toolName, args } = msg;

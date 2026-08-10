@@ -116,6 +116,12 @@ vi.mock("expo-file-system", () => {
         typeof content === "string" ? new TextEncoder().encode(content) : content
       );
     }
+    async text() {
+      const content = fake.nodes.get(this.uri)?.content;
+      if (typeof content === "string") return content;
+      if (content instanceof Uint8Array) return new TextDecoder().decode(content);
+      throw new Error("source missing");
+    }
     info() {
       const node = fake.nodes.get(this.uri);
       const bytes =
@@ -125,6 +131,7 @@ vi.mock("expo-file-system", () => {
             .reduce((sum, byte) => (sum + byte) % 256, 0)
             .toString(16)
             .padStart(2, "0")
+            .repeat(16)
         : undefined;
       return node?.type === "file"
         ? { exists: true, size: node.content?.length ?? 0, md5: node.md5 ?? digest }
@@ -135,6 +142,16 @@ vi.mock("expo-file-system", () => {
     }
     create() {
       fake.nodes.set(this.uri, { type: "file", content: "" });
+    }
+    delete() {
+      fake.nodes.delete(this.uri);
+    }
+    move(destination: File) {
+      const node = fake.nodes.get(this.uri);
+      if (!node || node.type !== "file") throw new Error("source missing");
+      fake.nodes.delete(this.uri);
+      fake.nodes.set(destination.uri, node);
+      this.uri = destination.uri;
     }
     copy(destination: File) {
       const node = fake.nodes.get(this.uri);
@@ -155,7 +172,12 @@ vi.mock("expo-file-system", () => {
 
 vi.mock("expo-file-system/legacy", () => ({
   EncodingType: { Base64: "base64" },
-  writeAsStringAsync: vi.fn(),
+  writeAsStringAsync: vi.fn(async (uri: string, content: string) => {
+    fake.nodes.set(normalizeUri(uri), {
+      type: "file",
+      content: Uint8Array.from(atob(content), (value) => value.charCodeAt(0)),
+    });
+  }),
 }));
 
 vi.mock("expo-crypto", () => ({
@@ -163,9 +185,15 @@ vi.mock("expo-crypto", () => ({
   digest: vi.fn(async (_algorithm: string, input: ArrayBuffer | Uint8Array) => {
     const bytes = input instanceof Uint8Array ? input : new Uint8Array(input);
     const sum = [...bytes].reduce((value, byte) => (value + byte) % 256, 0);
-    return new Uint8Array([sum]).buffer;
+    return new Uint8Array(16).fill(sum).buffer;
   }),
-  digestStringAsync: vi.fn(async (_algorithm: string, input: string) => input),
+  digestStringAsync: vi.fn(async (_algorithm: string, input: string) => {
+    const sum = [...new TextEncoder().encode(input)].reduce(
+      (value, byte) => (value + byte) % 256,
+      0
+    );
+    return sum.toString(16).padStart(64, "0");
+  }),
   randomUUID: () => "550e8400-e29b-41d4-a716-446655440000",
 }));
 
@@ -211,6 +239,8 @@ const { importMobileArchive, inspectZipArchive } = await import("./mobileArchive
 const { importMobileGit } = await import("./mobileGitImport");
 const { getMobileWorkspaceRoot, writeLocalFile } = await import("./localFileSystem");
 const { buildProotCommand } = await import("./runtimeManager");
+const { pullMobileReplicaTransaction, scanMobileSyncDirectory } =
+  await import("./mobileSyncTransaction");
 
 function sourceDirectory() {
   fake.nodes.set("content://picked", { type: "directory" });
@@ -400,6 +430,21 @@ describe("catalog workspace consumers", () => {
     expect(fake.nodes.get(`${worktreeRoot}/src/index.ts`)?.content).toBe("ok");
   });
 
+  it("rejects writes when the local replica no longer holds the writer lease", async () => {
+    const worktreeRoot =
+      "file:///documents/pocket-code/v2/projects/ws_550e8400e29b41d4a716446655440000/worktree";
+    fake.nodes.set(worktreeRoot, { type: "directory" });
+    const mirrorHandle = {
+      worktreeRoot,
+      capabilities: { read: true, write: false, execute: false, syncBack: true },
+    };
+    await expect(writeLocalFile("src/index.ts", "blocked", mirrorHandle)).resolves.toMatchObject({
+      success: false,
+      error: expect.stringContaining("write capability"),
+    });
+    expect(fake.nodes.has(`${worktreeRoot}/src/index.ts`)).toBe(false);
+  });
+
   it("binds proot to the selected v2 worktree and keeps runtime outside it", () => {
     const worktreeRoot =
       "file:///documents/pocket-code/v2/projects/ws_550e8400e29b41d4a716446655440000/worktree";
@@ -414,5 +459,244 @@ describe("catalog workspace consumers", () => {
     expect(command).toContain('--rootfs="/documents/pocket-code/v2/runtime/rootfs"');
     expect(command).toContain('-w "/workspace/src"');
     expect(command).not.toContain("/documents/workspace");
+  });
+});
+
+describe("mobile replica sync transaction", () => {
+  const worktreeRoot =
+    "file:///documents/pocket-code/v2/projects/ws_550e8400e29b41d4a716446655440000/worktree";
+  const stateRoot =
+    "file:///documents/pocket-code/v2/projects/ws_550e8400e29b41d4a716446655440000/state";
+  const handle = {
+    projectId: "550e8400-e29b-41d4-a716-446655440000",
+    replicaId: "550e8400-e29b-41d4-a716-446655440001",
+    generation: 1,
+    storageUri: worktreeRoot,
+    worktreeRoot,
+    stateRoot,
+    cacheRoot:
+      "file:///documents/pocket-code/v2/projects/ws_550e8400e29b41d4a716446655440000/cache",
+    capabilities: { read: true, write: true, execute: true, syncBack: true },
+  } as const;
+  const remoteReplica = {
+    id: "3ca2e8bb-4fe5-4e16-a6ca-99840d666870",
+    generation: 1,
+    kind: "dev-binding" as const,
+    authorityId: "9d2b456e-6477-4c51-bf25-7680cf9f98d4",
+    connectionKey: "relay:test",
+    updatedAt: 1,
+  };
+
+  async function remoteFileSnapshot(content: string) {
+    const root = new Directory("file:///remote");
+    root.create({ intermediates: true });
+    new File(root, "a.txt").write(content);
+    const scanned = await scanMobileSyncDirectory(root);
+    const file = scanned.files[0];
+    root.delete();
+    return { snapshot: scanned.snapshot, file };
+  }
+
+  it("verifies staging before atomically advancing the replica edge", async () => {
+    new Directory(worktreeRoot).create({ intermediates: true });
+    const remote = await remoteFileSnapshot("new");
+    const persisted: any[] = [];
+    const result = await pullMobileReplicaTransaction({
+      workspaceHandle: handle as any,
+      remoteReplica,
+      requestSyncPull: async () => ({
+        commit: "a".repeat(40),
+        snapshot: remote.snapshot,
+        parent: null,
+        full: true,
+        files: [{ ...remote.file, status: "A" }],
+      }),
+      requestSyncFile: async () => ({
+        path: "a.txt",
+        encoding: "base64",
+        content: btoa("new"),
+      }),
+      persistEdge: async (edge) => {
+        persisted.push(edge);
+      },
+    });
+
+    expect(result.success).toBe(true);
+    expect(await new File(worktreeRoot, "a.txt").text()).toBe("new");
+    expect(result.edge).toMatchObject({
+      baseSnapshot: remote.snapshot,
+      localSnapshot: remote.snapshot,
+      remoteSnapshot: remote.snapshot,
+      baseRemoteRef: "a".repeat(40),
+      phase: "committed",
+    });
+    expect(persisted.some((edge) => edge.phase === "verifying")).toBe(true);
+    expect([...fake.nodes.keys()].some((key) => key.includes("/staging/sync_"))).toBe(false);
+    expect([...fake.nodes.keys()].some((key) => key.endsWith(".journal.json"))).toBe(false);
+  });
+
+  it("propagates deletions and does not advance base after integrity failure", async () => {
+    new Directory(worktreeRoot).create({ intermediates: true });
+    new File(worktreeRoot, "a.txt").write("old");
+    const local = await scanMobileSyncDirectory(new Directory(worktreeRoot));
+    const emptyRoot = new Directory("file:///empty");
+    emptyRoot.create({ intermediates: true });
+    const empty = await scanMobileSyncDirectory(emptyRoot);
+    emptyRoot.delete();
+    const edge = {
+      localReplicaId: handle.replicaId,
+      remoteReplicaId: remoteReplica.id,
+      remoteAuthorityId: remoteReplica.authorityId,
+      baseSnapshot: local.snapshot,
+      localSnapshot: local.snapshot,
+      remoteSnapshot: local.snapshot,
+      baseRemoteRef: "a".repeat(40),
+      phase: "committed" as const,
+      updatedAt: 1,
+    };
+    const deleted = await pullMobileReplicaTransaction({
+      workspaceHandle: handle as any,
+      remoteReplica,
+      edge,
+      requestSyncPull: async () => ({
+        commit: "b".repeat(40),
+        snapshot: empty.snapshot,
+        parent: "a".repeat(40),
+        full: false,
+        files: [{ path: "a.txt", status: "D" }],
+      }),
+      requestSyncFile: async () => {
+        throw new Error("deleted files are not downloaded");
+      },
+      persistEdge: async () => undefined,
+    });
+    expect(deleted.deleted).toBe(1);
+    expect(new File(worktreeRoot, "a.txt").exists).toBe(false);
+
+    const remote = await remoteFileSnapshot("good");
+    const phases: any[] = [];
+    await expect(
+      pullMobileReplicaTransaction({
+        workspaceHandle: handle as any,
+        remoteReplica,
+        edge: deleted.edge,
+        requestSyncPull: async () => ({
+          commit: "c".repeat(40),
+          snapshot: remote.snapshot,
+          parent: "b".repeat(40),
+          full: false,
+          files: [{ ...remote.file, status: "A" }],
+        }),
+        requestSyncFile: async () => ({ path: "a.txt", content: btoa("bad") }),
+        persistEdge: async (next) => {
+          phases.push(next);
+        },
+      })
+    ).rejects.toThrow("integrity check");
+    expect(phases.at(-1)).toMatchObject({
+      phase: "failed",
+      baseSnapshot: empty.snapshot,
+    });
+
+    const retried = await pullMobileReplicaTransaction({
+      workspaceHandle: handle as any,
+      remoteReplica,
+      edge: deleted.edge,
+      requestSyncPull: async () => ({
+        commit: "c".repeat(40),
+        snapshot: remote.snapshot,
+        parent: "b".repeat(40),
+        full: false,
+        files: [{ ...remote.file, status: "A" }],
+      }),
+      requestSyncFile: async () => ({ path: "a.txt", content: btoa("good") }),
+      persistEdge: async () => undefined,
+    });
+    expect(retried.success).toBe(true);
+    expect(await new File(worktreeRoot, "a.txt").text()).toBe("good");
+    expect([...fake.nodes.keys()].some((key) => key.includes("/staging/sync_"))).toBe(false);
+  });
+
+  it("recovers when the workspace was applied before catalog commit", async () => {
+    new Directory(worktreeRoot).create({ intermediates: true });
+    const remote = await remoteFileSnapshot("recovered");
+    let failCatalogCommit = true;
+    await expect(
+      pullMobileReplicaTransaction({
+        workspaceHandle: handle as any,
+        remoteReplica,
+        requestSyncPull: async () => ({
+          commit: "d".repeat(40),
+          snapshot: remote.snapshot,
+          parent: null,
+          full: true,
+          files: [{ ...remote.file, status: "A" }],
+        }),
+        requestSyncFile: async () => ({ path: "a.txt", content: btoa("recovered") }),
+        persistEdge: async (edge) => {
+          if (failCatalogCommit && edge.baseSnapshot === remote.snapshot) {
+            throw new Error("catalog unavailable");
+          }
+        },
+      })
+    ).rejects.toThrow("catalog unavailable");
+    expect(await new File(worktreeRoot, "a.txt").text()).toBe("recovered");
+    expect([...fake.nodes.keys()].some((key) => key.endsWith(".journal.json"))).toBe(true);
+
+    failCatalogCommit = false;
+    const recovered = await pullMobileReplicaTransaction({
+      workspaceHandle: handle as any,
+      remoteReplica,
+      requestSyncPull: async () => {
+        throw new Error("committed recovery must not refetch");
+      },
+      requestSyncFile: async () => {
+        throw new Error("committed recovery must not redownload");
+      },
+      persistEdge: async () => undefined,
+    });
+    expect(recovered.success).toBe(true);
+    expect(recovered.edge.baseSnapshot).toBe(remote.snapshot);
+    expect([...fake.nodes.keys()].some((key) => key.endsWith(".journal.json"))).toBe(false);
+  });
+
+  it("freezes automatic apply when both edge sides diverge", async () => {
+    new Directory(worktreeRoot).create({ intermediates: true });
+    new File(worktreeRoot, "a.txt").write("local change");
+    const base = await remoteFileSnapshot("base");
+    const remote = await remoteFileSnapshot("remote change");
+    let persisted: any;
+    const result = await pullMobileReplicaTransaction({
+      workspaceHandle: handle as any,
+      remoteReplica,
+      edge: {
+        localReplicaId: handle.replicaId,
+        remoteReplicaId: remoteReplica.id,
+        remoteAuthorityId: remoteReplica.authorityId,
+        baseSnapshot: base.snapshot,
+        localSnapshot: base.snapshot,
+        remoteSnapshot: base.snapshot,
+        baseRemoteRef: "a".repeat(40),
+        phase: "committed",
+        updatedAt: 1,
+      },
+      requestSyncPull: async () => ({
+        commit: "b".repeat(40),
+        snapshot: remote.snapshot,
+        parent: "a".repeat(40),
+        full: false,
+        files: [{ ...remote.file, status: "M" }],
+      }),
+      requestSyncFile: async () => {
+        throw new Error("conflicts must not transfer");
+      },
+      persistEdge: async (edge) => {
+        persisted = edge;
+      },
+    });
+    expect(result.success).toBe(false);
+    expect(result.conflict).toBeTruthy();
+    expect(persisted.phase).toBe("conflict");
+    expect(await new File(worktreeRoot, "a.txt").text()).toBe("local change");
   });
 });

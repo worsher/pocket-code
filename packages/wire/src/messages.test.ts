@@ -70,6 +70,27 @@ describe("wire — WsMessage validation", () => {
     expect(result.success).toBe(true);
   });
 
+  it("validates a generation-guarded writer release", () => {
+    expect(
+      WsMessage.safeParse({
+        type: "workspace-writer-release",
+        projectId: "550e8400-e29b-41d4-a716-446655440000",
+        replicaId: "3ca2e8bb-4fe5-4e16-a6ca-99840d666870",
+        workspaceGeneration: 2,
+        _reqId: "release-1",
+      }).success
+    ).toBe(true);
+    expect(
+      WsMessage.safeParse({
+        type: "workspace-writer-release",
+        projectId: "550e8400-e29b-41d4-a716-446655440000",
+        replicaId: "3ca2e8bb-4fe5-4e16-a6ca-99840d666870",
+        workspaceGeneration: 0,
+        _reqId: "release-1",
+      }).success
+    ).toBe(false);
+  });
+
   it("should accept valid tool-exec message", () => {
     const result = WsMessage.safeParse({
       type: "tool-exec",

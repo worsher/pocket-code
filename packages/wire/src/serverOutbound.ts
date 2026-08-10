@@ -72,8 +72,18 @@ export const FileContentMsg = z
 export const SyncManifestMsg = z.object({
   type: z.literal("sync-manifest"),
   commit: z.string(),
+  /** Canonical cross-platform content snapshot (not a Git commit ID). */
+  snapshot: z.string().length(64),
   parent: z.string().nullable().optional(),
-  files: z.array(z.object({ path: z.string(), status: z.enum(["A", "M", "D"]) })),
+  full: z.boolean(),
+  files: z.array(
+    z.object({
+      path: z.string(),
+      status: z.enum(["A", "M", "D"]),
+      size: z.number().int().nonnegative().optional(),
+      digest: z.string().length(32).optional(),
+    })
+  ),
   _reqId: z.string().optional(),
 });
 
@@ -84,6 +94,16 @@ export const SyncFileContentMsg = z.object({
   content: z.string().optional(),
   error: z.string().optional(),
   _reqId: z.string().optional(),
+});
+
+export const WorkspaceWriterReleasedMsg = z.object({
+  type: z.literal("workspace-writer-released"),
+  projectId: z.string().uuid(),
+  replicaId: z.string().uuid(),
+  success: z.boolean(),
+  workspaceGeneration: z.number().int().positive().optional(),
+  error: z.string().optional(),
+  _reqId: z.string(),
 });
 
 export const SessionsListMsg = z.object({
@@ -129,6 +149,7 @@ export const ServerOutbound = z.union([
   FileContentMsg,
   SyncManifestMsg,
   SyncFileContentMsg,
+  WorkspaceWriterReleasedMsg,
   SessionsListMsg,
   SessionDeletedMsg,
   ProjectWorkspaceDeletedMsg,

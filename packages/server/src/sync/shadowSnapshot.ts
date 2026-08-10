@@ -8,6 +8,7 @@ import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import { mkdir, rm, readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
+import { createHash } from "node:crypto";
 
 const exec = promisify(execFile);
 const SNAP_REF = "refs/pocket-code/worktree";
@@ -102,6 +103,18 @@ export type ChangeStatus = "A" | "M" | "D";
 export interface ChangedFile {
   path: string;
   status: ChangeStatus;
+}
+
+export interface SnapshotManifestFile {
+  path: string;
+  size: number;
+  /** Lower-case MD5 used only for transfer integrity, never for security. */
+  digest: string;
+}
+
+export interface SnapshotContentManifest {
+  snapshot: string;
+  files: SnapshotManifestFile[];
 }
 
 /**
@@ -205,6 +218,41 @@ export async function readSnapshotFile(
     }
   );
   return stdout as Buffer;
+}
+
+/**
+ * Builds a platform-neutral content snapshot for replica comparison. Git commit
+ * IDs cannot be recomputed by the mobile filesystem, so synchronization uses a
+ * sorted path/size/MD5 manifest and hashes that manifest with SHA-256.
+ */
+export async function describeSnapshot(
+  repoDir: string,
+  commit: string,
+  stateRoot?: string
+): Promise<SnapshotContentManifest> {
+  const output = await git(
+    repoDir,
+    ["ls-tree", "-r", "-z", "--name-only", commit],
+    undefined,
+    stateRoot
+  );
+  const paths = output
+    .split("\0")
+    .filter(Boolean)
+    .sort((a, b) => (a < b ? -1 : a > b ? 1 : 0));
+  const files: SnapshotManifestFile[] = [];
+  for (const path of paths) {
+    const content = await readSnapshotFile(repoDir, commit, path, stateRoot);
+    files.push({
+      path,
+      size: content.byteLength,
+      digest: createHash("md5").update(content).digest("hex"),
+    });
+  }
+  return {
+    snapshot: createHash("sha256").update(JSON.stringify(files)).digest("hex"),
+    files,
+  };
 }
 
 /** 删除私有快照 ref(清理同步痕迹,不影响用户分支)。 */

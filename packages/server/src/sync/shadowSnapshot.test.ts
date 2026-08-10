@@ -7,6 +7,7 @@ import {
   createSnapshot,
   changedFiles,
   readSnapshotFile,
+  describeSnapshot,
   clearSnapshots,
 } from "./shadowSnapshot.js";
 
@@ -67,9 +68,9 @@ describe("shadowSnapshot", () => {
   it("computes incremental changes between two snapshots", async () => {
     const s1 = await createSnapshot(repo);
 
-    writeFileSync(join(repo, "a.txt"), "changed\n");     // modify
-    writeFileSync(join(repo, "new.txt"), "added\n");      // add
-    rmSync(join(repo, "sub", "b.txt"));                   // delete
+    writeFileSync(join(repo, "a.txt"), "changed\n"); // modify
+    writeFileSync(join(repo, "new.txt"), "added\n"); // add
+    rmSync(join(repo, "sub", "b.txt")); // delete
     const s2 = await createSnapshot(repo);
 
     expect(s2.parent).toBe(s1.commit);
@@ -133,6 +134,19 @@ describe("shadowSnapshot", () => {
 
     const back = await readSnapshotFile(repo, snap.commit, "blob.bin");
     expect(Buffer.compare(back, bin)).toBe(0);
+  });
+
+  it("describes a snapshot with stable cross-platform content digests", async () => {
+    const snap = await createSnapshot(repo);
+    const first = await describeSnapshot(repo, snap.commit);
+    const second = await describeSnapshot(repo, snap.commit);
+
+    expect(first).toEqual(second);
+    expect(first.snapshot).toMatch(/^[0-9a-f]{64}$/);
+    expect(first.files.find((file) => file.path === "a.txt")).toMatchObject({
+      size: 3,
+      digest: "4f98f59e877ecb84ff75ef0fab45bac5",
+    });
   });
 
   it("clearSnapshots removes the private ref and leaves the repo pristine", async () => {

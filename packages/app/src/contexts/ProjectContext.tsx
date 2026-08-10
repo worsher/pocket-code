@@ -24,7 +24,10 @@ import {
 import {
   upsertRemoteReplica as upsertRemoteReplicaRecord,
   type ProjectImportSource,
+  type ProjectSyncEdge,
   type RemoteReplicaCatalogEntry,
+  upsertProjectSyncEdge,
+  handoffProjectWriterLease,
 } from "../store/projectCatalog";
 import {
   ensureMobileWorkspaceHandle,
@@ -43,6 +46,8 @@ import {
 } from "../services/mobileArchiveImport";
 import { importMobileGit, type MobileGitImportResult } from "../services/mobileGitImport";
 import type { AppSettings } from "../store/settings";
+import { cloneMobileWorkspace } from "../services/mobileSyncTransaction";
+import { Directory } from "expo-file-system";
 
 interface ProjectContextValue {
   projects: Project[];
@@ -52,7 +57,10 @@ interface ProjectContextValue {
   switchProject: (projectId: string) => void;
   createProject: (name: string, description?: string, gitUrl?: string) => void;
   deleteProject: (projectId: string) => void;
-  updateProject: (projectId: string, updates: Partial<Project>) => void;
+  updateProject: (projectId: string, updates: Partial<Project>) => Promise<void>;
+  updateSyncEdge: (projectId: string, edge: ProjectSyncEdge) => Promise<void>;
+  saveLocalReplicaCopy: (projectId: string) => Promise<Project>;
+  handoffWriter: (projectId: string, targetReplicaId: string) => Promise<Project>;
   registerRemoteReplica: (
     projectId: string,
     replica: RemoteReplicaCatalogEntry,
@@ -84,7 +92,14 @@ const ProjectContext = createContext<ProjectContextValue>({
   switchProject: () => {},
   createProject: () => {},
   deleteProject: () => {},
-  updateProject: () => {},
+  updateProject: async () => {},
+  updateSyncEdge: async () => {},
+  saveLocalReplicaCopy: async () => {
+    throw new Error("Project provider is unavailable");
+  },
+  handoffWriter: async () => {
+    throw new Error("Project provider is unavailable");
+  },
   registerRemoteReplica: () => {},
   importDirectoryProject: async () => null,
   importArchiveProject: async () => null,
@@ -177,18 +192,69 @@ export function ProjectProvider({ children }: { children: React.ReactNode }) {
     [currentProjectId, switchProject]
   );
 
-  const updateProject = useCallback((projectId: string, updates: Partial<Project>) => {
-    setProjects((prev) => {
-      const updated = prev.map((p) =>
-        p.id === projectId ? { ...p, ...updates, updatedAt: Date.now() } : p
-      );
-      projectsRef.current = updated;
-      void saveProjects(updated).catch((error) => {
-        console.error("[Projects] Failed to persist project update:", error);
-      });
-      return updated;
-    });
+  const updateProject = useCallback(async (projectId: string, updates: Partial<Project>) => {
+    const updated = projectsRef.current.map((project) =>
+      project.id === projectId ? { ...project, ...updates, updatedAt: Date.now() } : project
+    );
+    projectsRef.current = updated;
+    setProjects(updated);
+    await saveProjects(updated);
   }, []);
+
+  const updateSyncEdge = useCallback(async (projectId: string, edge: ProjectSyncEdge) => {
+    const existing = projectsRef.current.find((project) => project.id === projectId);
+    if (!existing) throw new Error("Project no longer exists");
+    const replacement = { ...upsertProjectSyncEdge(existing, edge), updatedAt: Date.now() };
+    const updated = projectsRef.current.map((project) =>
+      project.id === projectId ? replacement : project
+    );
+    projectsRef.current = updated;
+    setProjects(updated);
+    await saveProjects(updated);
+  }, []);
+
+  const saveLocalReplicaCopy = useCallback(async (projectId: string): Promise<Project> => {
+    const source = projectsRef.current.find((project) => project.id === projectId);
+    if (!source || source.localReplica.layout !== "v2") {
+      throw new Error("Only a managed v2 project can be saved as a local copy");
+    }
+    const copy = createProjectRecord(
+      `${source.name} (本地副本)`,
+      source.description,
+      source.gitUrl
+    );
+    const sourceHandle = ensureMobileWorkspaceHandle(source);
+    const copyHandle = ensureMobileWorkspaceHandle(copy);
+    try {
+      cloneMobileWorkspace(sourceHandle, copyHandle);
+      const updated = [...projectsRef.current, copy];
+      await saveProjects(updated);
+      projectsRef.current = updated;
+      setProjects(updated);
+      return copy;
+    } catch (error) {
+      const projectRoot = new Directory(copyHandle.worktreeRoot).parentDirectory;
+      if (projectRoot.exists) projectRoot.delete();
+      throw error;
+    }
+  }, []);
+
+  const handoffWriter = useCallback(
+    async (projectId: string, targetReplicaId: string): Promise<Project> => {
+      const current = projectsRef.current.find((project) => project.id === projectId);
+      if (!current) throw new Error("Project no longer exists");
+      const replacement = handoffProjectWriterLease(current, targetReplicaId);
+      if (replacement === current) return current;
+      const updated = projectsRef.current.map((project) =>
+        project.id === projectId ? replacement : project
+      );
+      await saveProjects(updated);
+      projectsRef.current = updated;
+      setProjects(updated);
+      return replacement;
+    },
+    []
+  );
 
   const registerRemoteReplica = useCallback(
     (
@@ -340,6 +406,9 @@ export function ProjectProvider({ children }: { children: React.ReactNode }) {
         createProject,
         deleteProject,
         updateProject,
+        updateSyncEdge,
+        saveLocalReplicaCopy,
+        handoffWriter,
         registerRemoteReplica,
         importDirectoryProject,
         importArchiveProject,

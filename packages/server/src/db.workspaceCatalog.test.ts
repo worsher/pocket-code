@@ -5,6 +5,8 @@ import {
   getWorkspaceAuthorityId,
   listWorkspaceProjects,
   updateWorkspaceProjectDisplayName,
+  releaseWorkspaceProjectWriter,
+  isWorkspaceSessionGenerationCurrent,
   initDb,
 } from "./db.js";
 
@@ -24,10 +26,7 @@ describe("workspace project catalog", () => {
     const first = ensureWorkspaceProject(
       "catalog-user-a",
       PROJECT_ID,
-      uuidFactory([
-        "550e8400-e29b-41d4-a716-446655440000",
-        "74f1d64f-bf59-46a9-aa0b-7dcf42b95cab",
-      ]),
+      uuidFactory(["550e8400-e29b-41d4-a716-446655440000", "74f1d64f-bf59-46a9-aa0b-7dcf42b95cab"])
     );
     const repeated = ensureWorkspaceProject("catalog-user-a", PROJECT_ID, () => {
       throw new Error("existing catalog entry must not allocate another UUID");
@@ -35,10 +34,7 @@ describe("workspace project catalog", () => {
     const otherUser = ensureWorkspaceProject(
       "catalog-user-b",
       PROJECT_ID,
-      uuidFactory([
-        "151d02d2-93b0-4a26-a50e-9f28eeb323b1",
-        "8bb713d6-3408-4f21-8df3-730fd2900c93",
-      ]),
+      uuidFactory(["151d02d2-93b0-4a26-a50e-9f28eeb323b1", "8bb713d6-3408-4f21-8df3-730fd2900c93"])
     );
 
     expect(repeated).toEqual(first);
@@ -72,5 +68,44 @@ describe("workspace project catalog", () => {
       }),
     ]);
     expect(listWorkspaceProjects("catalog-user-b")[0].displayName).toBe("");
+  });
+
+  it("releases a writer with compare-and-swap generation semantics", () => {
+    const record = ensureWorkspaceProject(
+      "catalog-user-release",
+      PROJECT_ID,
+      uuidFactory(["0f3d985e-0a3a-458e-932d-c89dbbf671c6", "ce393574-d077-4ddf-a34a-bd9746277f97"])
+    );
+    expect(
+      isWorkspaceSessionGenerationCurrent({
+        userId: record.userId,
+        projectId: record.projectId,
+        replicaId: record.replicaId,
+        generation: record.generation,
+      })
+    ).toBe(true);
+    const released = releaseWorkspaceProjectWriter({
+      userId: record.userId,
+      projectId: record.projectId,
+      replicaId: record.replicaId,
+      expectedGeneration: record.generation,
+    });
+    expect(released.generation).toBe(record.generation + 1);
+    expect(
+      isWorkspaceSessionGenerationCurrent({
+        userId: record.userId,
+        projectId: record.projectId,
+        replicaId: record.replicaId,
+        generation: record.generation,
+      })
+    ).toBe(false);
+    expect(() =>
+      releaseWorkspaceProjectWriter({
+        userId: record.userId,
+        projectId: record.projectId,
+        replicaId: record.replicaId,
+        expectedGeneration: record.generation,
+      })
+    ).toThrow("generation is stale");
   });
 });

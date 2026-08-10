@@ -4,5 +4,7 @@ export * from "./safeRelativePath.js";
 export * from "./managedLayout.js";
 export * from "./sourceIdentity.js";
 export * from "./syncState.js";
+export * from "./syncTransaction.js";
+export * from "./writerLease.js";
 export * from "./scope.js";
 export * from "./importPipeline.js";

@@ -11,6 +11,7 @@ import type { ServerOutboundType } from "@pocket-code/wire";
 import {
   createSnapshot,
   changedFiles,
+  describeSnapshot,
   readSnapshotFile,
   type ChangedFile,
 } from "./shadowSnapshot.js";
@@ -46,18 +47,24 @@ export async function handleSyncPull(
   await ensureGitRepo(workspace, stateRoot);
   const snap = await createSnapshot(workspace, stateRoot);
   let files: ChangedFile[];
+  let full = sinceCommit === null;
   try {
     files = await changedFiles(workspace, sinceCommit, snap.commit, stateRoot);
   } catch {
     // sinceCommit 不可达 → 回退全量
     files = await changedFiles(workspace, null, snap.commit, stateRoot);
+    full = true;
   }
+  const contentManifest = await describeSnapshot(workspace, snap.commit, stateRoot);
+  const metadata = new Map(contentManifest.files.map((file) => [file.path, file]));
   // _reqId 回显:relay 模式下 RelayClient 拆信封会丢 requestId,响应须自带 _reqId 供客户端关联。
   send({
     type: "sync-manifest",
     commit: snap.commit,
+    snapshot: contentManifest.snapshot,
     parent: snap.parent,
-    files,
+    full,
+    files: files.map((file) => ({ ...file, ...(metadata.get(file.path) ?? {}) })),
     _reqId: reqId,
   } satisfies ServerOutboundType);
 }

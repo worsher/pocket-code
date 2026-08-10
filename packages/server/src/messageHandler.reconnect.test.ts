@@ -47,7 +47,12 @@ vi.mock("./agent.js", () => ({
     };
   }),
   runAgent: (...args: unknown[]) =>
-    runAgentMock(args[0], args[1] as string, args[2] as (e: unknown) => void, args[3] as AbortSignal),
+    runAgentMock(
+      args[0],
+      args[1] as string,
+      args[2] as (e: unknown) => void,
+      args[3] as AbortSignal
+    ),
 }));
 
 vi.mock("./db.js", () => ({
@@ -56,6 +61,17 @@ vi.mock("./db.js", () => ({
   deleteSession: vi.fn(() => true),
   getWorkspaceAuthorityId: vi.fn(() => AUTHORITY_ID),
   updateWorkspaceProjectDisplayName: vi.fn(),
+  isWorkspaceSessionGenerationCurrent: vi.fn(() => true),
+  releaseWorkspaceProjectWriter: vi.fn(() => ({
+    userId: "u1",
+    projectId: PROJECT_A,
+    replicaId: REPLICA_ID,
+    storageKey: "ws_0f3d985e0a3a458e932dc89dbbf671c6",
+    displayName: "Remote A",
+    generation: 3,
+    createdAt: 1,
+    updatedAt: 3,
+  })),
   listWorkspaceProjects: vi.fn(() => [
     {
       userId: "u1",
@@ -112,7 +128,7 @@ describe("messageHandler — P14 事件流", () => {
         workspaceProtocolVersion: 2,
         sessionId: "scope-v2",
         projectId: PROJECT_A,
-      }),
+      })
     );
     expect(sent.find((event) => event.type === "session")).toMatchObject({
       workspaceProtocolVersion: 2,
@@ -150,15 +166,47 @@ describe("messageHandler — P14 事件流", () => {
   it("rejects reusing one in-memory session id across projects", async () => {
     const { sent, handler } = makeHandler();
     await handler.onMessage(
-      msg({ type: "init", sessionId: "cross-project", projectId: PROJECT_A }),
+      msg({ type: "init", sessionId: "cross-project", projectId: PROJECT_A })
     );
     await handler.onMessage(
-      msg({ type: "init", sessionId: "cross-project", projectId: PROJECT_B }),
+      msg({ type: "init", sessionId: "cross-project", projectId: PROJECT_B })
     );
     expect(sent.at(-1)).toEqual({
       type: "error",
       error: "Session does not belong to this project.",
     });
+  });
+
+  it("releases the remote writer with generation CAS and aborts an active turn", async () => {
+    const { sent, handler } = makeHandler();
+    await handler.onMessage(
+      msg({
+        type: "init",
+        workspaceProtocolVersion: 2,
+        sessionId: "writer-release",
+        projectId: PROJECT_A,
+      })
+    );
+    const turn = handler.onMessage(msg({ type: "message", content: "keep working" }));
+    await vi.waitFor(() => expect(currentRun).not.toBeNull());
+    await handler.onMessage(
+      msg({
+        type: "workspace-writer-release",
+        projectId: PROJECT_A,
+        replicaId: REPLICA_ID,
+        workspaceGeneration: 2,
+        _reqId: "release-1",
+      })
+    );
+    expect(currentRun!.signal?.aborted).toBe(true);
+    expect(sent.at(-1)).toMatchObject({
+      type: "workspace-writer-released",
+      success: true,
+      workspaceGeneration: 3,
+      _reqId: "release-1",
+    });
+    currentRun!.finish();
+    await turn;
   });
 
   it("① events carry strictly increasing seq; session ack carries eventEpoch/currentSeq", async () => {
@@ -215,7 +263,9 @@ describe("messageHandler — P14 事件流", () => {
 
     // 补发后仍在线:后续实时事件继续到达 B
     run.onEvent({ type: "text-delta", text: "post" });
-    expect((sentB as any[]).filter((m) => typeof m.seq === "number").map((e) => e.seq)).toEqual([4, 5, 6, 7]);
+    expect((sentB as any[]).filter((m) => typeof m.seq === "number").map((e) => e.seq)).toEqual([
+      4, 5, 6, 7,
+    ]);
     run.finish();
     await turn;
   });
@@ -223,7 +273,9 @@ describe("messageHandler — P14 事件流", () => {
   it("③ epoch mismatch → resync-required(epoch-changed)", async () => {
     getSessionStream("p14-c").publish({ type: "text-delta", text: "x" });
     const { sent, handler } = makeHandler();
-    await handler.onMessage(msg({ type: "init", sessionId: "p14-c", lastSeq: 1, eventEpoch: "ep_stale" }));
+    await handler.onMessage(
+      msg({ type: "init", sessionId: "p14-c", lastSeq: 1, eventEpoch: "ep_stale" })
+    );
     const resync = sent.find((m) => m.type === "resync-required") as any;
     expect(resync).toMatchObject({ reason: "epoch-changed", currentSeq: 1 });
     expect(resync.eventEpoch).toMatch(/^ep_/);
@@ -233,7 +285,9 @@ describe("messageHandler — P14 事件流", () => {
     const s = getSessionStream("p14-d");
     for (let i = 0; i < _MAX_EVENTS + 5; i++) s.publish({ type: "text-delta", text: `e${i}` });
     const { sent, handler } = makeHandler();
-    await handler.onMessage(msg({ type: "init", sessionId: "p14-d", lastSeq: 1, eventEpoch: s.epoch }));
+    await handler.onMessage(
+      msg({ type: "init", sessionId: "p14-d", lastSeq: 1, eventEpoch: s.epoch })
+    );
     expect(sent.find((m) => m.type === "resync-required")).toMatchObject({
       reason: "buffer-overflow",
       currentSeq: _MAX_EVENTS + 5,

@@ -51,7 +51,7 @@ export default function ProjectPromptEditor({
 
   const handleSave = () => {
     if (!currentProject) return;
-    updateProject(currentProject.id, { customPrompt: prompt.trim() || undefined });
+    void updateProject(currentProject.id, { customPrompt: prompt.trim() || undefined });
     Alert.alert("已保存", "项目指令已更新");
     onClose();
   };

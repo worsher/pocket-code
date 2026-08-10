@@ -621,6 +621,11 @@ export function useAgent({
     (commit: string, path: string) => conn.syncFile(commit, path),
     [conn]
   );
+  const releaseWorkspaceWriter = useCallback(
+    (args: { projectId: string; replicaId: string; workspaceGeneration: number }) =>
+      conn.releaseWorkspaceWriter(args),
+    [conn]
+  );
   const bindLinkedWorkspace = useCallback(
     (args: {
       projectId: string;
@@ -939,6 +944,7 @@ export function useAgent({
     requestFileContent,
     requestSyncPull,
     requestSyncFile,
+    releaseWorkspaceWriter,
     bindLinkedWorkspace,
     deleteProjectWorkspace,
   };

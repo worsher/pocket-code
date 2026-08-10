@@ -9,6 +9,7 @@ import {
   type ImportMode,
   type ImportSourceKind,
   type SourceIdentity,
+  type SyncPhase,
   type UuidFactory,
 } from "@pocket-code/workspace-core";
 
@@ -46,6 +47,37 @@ export interface ProjectImportSource {
   writeBackPolicy: "explicit" | "linked" | "git";
 }
 
+export interface ProjectSyncConflict {
+  baseSnapshot: string | null;
+  localSnapshot: string;
+  remoteSnapshot: string;
+  detectedAt: number;
+  resolution?: "keep-local" | "keep-remote" | "save-copy";
+}
+
+/** Sync state belongs to one local/remote replica edge, never to the project globally. */
+export interface ProjectSyncEdge {
+  localReplicaId: string;
+  remoteReplicaId: string;
+  remoteAuthorityId: string;
+  baseSnapshot: string | null;
+  localSnapshot: string | null;
+  remoteSnapshot: string | null;
+  /** Remote shadow commit used only as the incremental transfer cursor. */
+  baseRemoteRef: string | null;
+  phase: SyncPhase;
+  transactionId?: string;
+  conflict?: ProjectSyncConflict;
+  updatedAt: number;
+}
+
+export interface ProjectWriterLease {
+  holderReplicaId: string;
+  generation: number;
+  acquiredAt: number;
+  expiresAt?: number;
+}
+
 export interface Project {
   catalogVersion: typeof PROJECT_CATALOG_VERSION;
   id: string;
@@ -62,6 +94,8 @@ export interface Project {
   cloudProjectId?: string;
   localReplica: MobileReplicaCatalogEntry;
   remoteReplicas?: RemoteReplicaCatalogEntry[];
+  syncEdges?: ProjectSyncEdge[];
+  writerLease?: ProjectWriterLease;
   importSource?: ProjectImportSource;
   createdAt: number;
   updatedAt: number;
@@ -200,6 +234,113 @@ function parseProjectImportSource(value: unknown): ProjectImportSource | null {
   };
 }
 
+const SYNC_PHASES: readonly SyncPhase[] = [
+  "idle",
+  "preparing",
+  "transferring",
+  "verifying",
+  "applying",
+  "committed",
+  "failed",
+  "conflict",
+  "recovery-required",
+];
+
+function nullableSnapshot(value: unknown): string | null | undefined {
+  if (value === null) return null;
+  if (typeof value === "string" && value.length > 0 && value.length <= 128) return value;
+  return undefined;
+}
+
+function parseProjectSyncEdge(value: unknown): ProjectSyncEdge | null {
+  if (!isRecord(value)) return null;
+  try {
+    const localReplicaId = parseReplicaId(String(value.localReplicaId ?? ""));
+    const remoteReplicaId = parseReplicaId(String(value.remoteReplicaId ?? ""));
+    const remoteAuthorityId = parseReplicaId(String(value.remoteAuthorityId ?? ""));
+    const baseSnapshot = nullableSnapshot(value.baseSnapshot);
+    const localSnapshot = nullableSnapshot(value.localSnapshot);
+    const remoteSnapshot = nullableSnapshot(value.remoteSnapshot);
+    const baseRemoteRef = nullableSnapshot(value.baseRemoteRef);
+    const phase = value.phase as SyncPhase;
+    const updatedAt = Number(value.updatedAt);
+    if (
+      baseSnapshot === undefined ||
+      localSnapshot === undefined ||
+      remoteSnapshot === undefined ||
+      baseRemoteRef === undefined ||
+      !SYNC_PHASES.includes(phase) ||
+      !Number.isFinite(updatedAt)
+    ) {
+      return null;
+    }
+    let conflict: ProjectSyncConflict | undefined;
+    if (value.conflict !== undefined) {
+      if (!isRecord(value.conflict)) return null;
+      const conflictBase = nullableSnapshot(value.conflict.baseSnapshot);
+      const conflictLocal = nullableSnapshot(value.conflict.localSnapshot);
+      const conflictRemote = nullableSnapshot(value.conflict.remoteSnapshot);
+      const detectedAt = Number(value.conflict.detectedAt);
+      const resolution = value.conflict.resolution;
+      if (
+        conflictBase === undefined ||
+        !conflictLocal ||
+        !conflictRemote ||
+        !Number.isFinite(detectedAt) ||
+        (resolution !== undefined &&
+          resolution !== "keep-local" &&
+          resolution !== "keep-remote" &&
+          resolution !== "save-copy")
+      ) {
+        return null;
+      }
+      conflict = {
+        baseSnapshot: conflictBase,
+        localSnapshot: conflictLocal,
+        remoteSnapshot: conflictRemote,
+        detectedAt,
+        resolution,
+      };
+    }
+    return {
+      localReplicaId,
+      remoteReplicaId,
+      remoteAuthorityId,
+      baseSnapshot,
+      localSnapshot,
+      remoteSnapshot,
+      baseRemoteRef,
+      phase,
+      transactionId: optionalString(value.transactionId),
+      conflict,
+      updatedAt,
+    };
+  } catch {
+    return null;
+  }
+}
+
+function parseProjectWriterLease(value: unknown): ProjectWriterLease | null {
+  if (!isRecord(value)) return null;
+  try {
+    const holderReplicaId = parseReplicaId(String(value.holderReplicaId ?? ""));
+    const generation = Number(value.generation);
+    const acquiredAt = Number(value.acquiredAt);
+    const expiresAt = value.expiresAt === undefined ? undefined : Number(value.expiresAt);
+    if (
+      !Number.isInteger(generation) ||
+      generation < 1 ||
+      !Number.isFinite(acquiredAt) ||
+      (expiresAt !== undefined && !Number.isFinite(expiresAt))
+    ) {
+      return null;
+    }
+    return { holderReplicaId, generation, acquiredAt, expiresAt };
+  } catch {
+    return null;
+  }
+}
+
 export function upsertRemoteReplica(project: Project, replica: RemoteReplicaCatalogEntry): Project {
   const parsed = parseRemoteReplica(replica);
   if (!parsed) throw new Error("Invalid remote replica catalog entry");
@@ -212,6 +353,83 @@ export function upsertRemoteReplica(project: Project, replica: RemoteReplicaCata
     parsed,
   ];
   return { ...project, remoteReplicas };
+}
+
+export function getProjectSyncEdge(
+  project: Project,
+  remoteReplicaId: string
+): ProjectSyncEdge | undefined {
+  return project.syncEdges?.find(
+    (edge) =>
+      edge.localReplicaId === project.localReplica.id && edge.remoteReplicaId === remoteReplicaId
+  );
+}
+
+export function upsertProjectSyncEdge(project: Project, edge: ProjectSyncEdge): Project {
+  const parsed = parseProjectSyncEdge(edge);
+  if (!parsed || parsed.localReplicaId !== project.localReplica.id) {
+    throw new Error("Invalid project sync edge");
+  }
+  return {
+    ...project,
+    syncEdges: [
+      ...(project.syncEdges ?? []).filter(
+        (entry) =>
+          !(
+            entry.localReplicaId === parsed.localReplicaId &&
+            entry.remoteReplicaId === parsed.remoteReplicaId
+          )
+      ),
+      parsed,
+    ],
+  };
+}
+
+function edgeIsConverged(edge: ProjectSyncEdge): boolean {
+  return (
+    edge.phase === "committed" &&
+    !!edge.baseSnapshot &&
+    edge.localSnapshot === edge.baseSnapshot &&
+    edge.remoteSnapshot === edge.baseSnapshot
+  );
+}
+
+/**
+ * Moves the single-writer role between replicas. A remote -> local handoff is
+ * refused while any edge is divergent, and every successful switch bumps the
+ * lease generation so stale async work can be rejected.
+ */
+export function handoffProjectWriterLease(
+  project: Project,
+  targetReplicaId: string,
+  now: number = Date.now()
+): Project {
+  const target = parseReplicaId(targetReplicaId);
+  const current = project.writerLease;
+  if (current?.holderReplicaId === target) return project;
+  if (
+    current &&
+    target === project.localReplica.id &&
+    ((project.syncEdges?.length ?? 0) === 0 ||
+      (project.syncEdges ?? []).some((edge) => !edgeIsConverged(edge)))
+  ) {
+    throw new Error("Writer handoff requires all replica edges to be converged");
+  }
+  const touchesLocal =
+    !!current &&
+    (current.holderReplicaId === project.localReplica.id || target === project.localReplica.id);
+  return {
+    ...project,
+    localReplica: touchesLocal
+      ? { ...project.localReplica, generation: project.localReplica.generation + 1 }
+      : project.localReplica,
+    writerLease: {
+      holderReplicaId: target,
+      generation: (current?.generation ?? 0) + 1,
+      acquiredAt: now,
+    },
+    updatedAt: now,
+  };
 }
 
 function migrateLegacyProject(
@@ -352,6 +570,25 @@ export function upgradeProjectCatalog(
         if (!importSource) {
           repaired = { ...repaired };
           delete repaired.importSource;
+          changed = true;
+        }
+      }
+      if (item.syncEdges !== undefined) {
+        const syncEdges = Array.isArray(item.syncEdges)
+          ? item.syncEdges
+              .map(parseProjectSyncEdge)
+              .filter((edge): edge is ProjectSyncEdge => edge !== null)
+          : [];
+        if (!Array.isArray(item.syncEdges) || syncEdges.length !== item.syncEdges.length) {
+          repaired = { ...repaired, syncEdges };
+          changed = true;
+        }
+      }
+      if (item.writerLease !== undefined) {
+        const writerLease = parseProjectWriterLease(item.writerLease);
+        if (!writerLease) {
+          repaired = { ...repaired };
+          delete repaired.writerLease;
           changed = true;
         }
       }

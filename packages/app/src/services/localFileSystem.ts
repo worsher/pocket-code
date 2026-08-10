@@ -25,7 +25,19 @@ import {
  * Default workspace: Paths.document + "workspace/"
  */
 
-export type MobileWorkspaceTarget = string | Pick<WorkspaceHandle, "worktreeRoot">;
+export type MobileWorkspaceTarget =
+  | string
+  | (Pick<WorkspaceHandle, "worktreeRoot"> &
+      Partial<Pick<WorkspaceHandle, "capabilities" | "generation">>);
+
+function assertWorkspaceCapability(
+  target: MobileWorkspaceTarget,
+  capability: keyof WorkspaceHandle["capabilities"]
+): void {
+  if (typeof target !== "string" && target.capabilities?.[capability] === false) {
+    throw new Error(`Workspace replica does not have ${capability} capability in this writer mode`);
+  }
+}
 
 export function getMobileWorkspaceRoot(target: MobileWorkspaceTarget): string {
   if (typeof target === "string") return target;
@@ -89,6 +101,7 @@ export async function listLocalFiles(
   workspaceTarget: MobileWorkspaceTarget
 ): Promise<{ success: boolean; items?: { name: string; type: string }[]; error?: string }> {
   try {
+    assertWorkspaceCapability(workspaceTarget, "read");
     const root = getWorkspaceDir(workspaceTarget);
     ensureWorkspace(root);
 
@@ -115,6 +128,7 @@ export async function readLocalFile(
   workspaceTarget: MobileWorkspaceTarget
 ): Promise<{ success: boolean; content?: string; error?: string }> {
   try {
+    assertWorkspaceCapability(workspaceTarget, "read");
     const root = getWorkspaceDir(workspaceTarget);
     const file = await resolveFile(root, relativePath, false);
 
@@ -136,6 +150,7 @@ export async function writeLocalFile(
   workspaceTarget: MobileWorkspaceTarget
 ): Promise<{ success: boolean; error?: string }> {
   try {
+    assertWorkspaceCapability(workspaceTarget, "write");
     const root = getWorkspaceDir(workspaceTarget);
     ensureWorkspace(root);
 
@@ -168,6 +183,7 @@ export async function writeLocalFileBase64(
   workspaceTarget: MobileWorkspaceTarget
 ): Promise<{ success: boolean; error?: string }> {
   try {
+    assertWorkspaceCapability(workspaceTarget, "write");
     const root = getWorkspaceDir(workspaceTarget);
     ensureWorkspace(root);
 
@@ -190,6 +206,7 @@ export async function readLocalFileBase64(
   workspaceTarget: MobileWorkspaceTarget
 ): Promise<{ success: boolean; content?: string; error?: string }> {
   try {
+    assertWorkspaceCapability(workspaceTarget, "read");
     const root = getWorkspaceDir(workspaceTarget);
     const file = await resolveFile(root, relativePath, false);
     if (!file.exists) return { success: false, error: "File does not exist" };
@@ -205,6 +222,7 @@ export async function deleteLocalFile(
   workspaceTarget: MobileWorkspaceTarget
 ): Promise<{ success: boolean; error?: string }> {
   try {
+    assertWorkspaceCapability(workspaceTarget, "write");
     const root = getWorkspaceDir(workspaceTarget);
     const file = await resolveFile(root, relativePath, true);
     if (file.exists) {
@@ -230,21 +248,26 @@ export async function executeLocalTool(
   const workspaceRoot = getMobileWorkspaceRoot(workspaceTarget);
   switch (toolName) {
     case "listFiles":
-      return listLocalFiles((args.path as string) || ".", workspaceRoot);
+      return listLocalFiles((args.path as string) || ".", workspaceTarget);
     case "readFile":
-      return readLocalFile(args.path as string, workspaceRoot);
+      return readLocalFile(args.path as string, workspaceTarget);
     case "writeFile":
-      return writeLocalFile(args.path as string, args.content as string, workspaceRoot);
+      return writeLocalFile(args.path as string, args.content as string, workspaceTarget);
     // ── Git tools ──
     case "gitClone":
+      assertWorkspaceCapability(workspaceTarget, "write");
       return gitClone(args.url as string, args.dir as string | undefined, settings!, workspaceRoot);
     case "gitStatus":
+      assertWorkspaceCapability(workspaceTarget, "read");
       return gitStatus(args.path as string | undefined, workspaceRoot);
     case "gitAdd":
+      assertWorkspaceCapability(workspaceTarget, "write");
       return gitAdd(args.filepath as string, args.path as string | undefined, workspaceRoot);
     case "gitCommit":
+      assertWorkspaceCapability(workspaceTarget, "write");
       return gitCommit(args.message as string, args.path as string | undefined, workspaceRoot);
     case "gitPush":
+      assertWorkspaceCapability(workspaceTarget, "write");
       return gitPush(
         settings!,
         args.path as string | undefined,
@@ -253,6 +276,7 @@ export async function executeLocalTool(
         workspaceRoot
       );
     case "gitPull":
+      assertWorkspaceCapability(workspaceTarget, "write");
       return gitPull(
         settings!,
         args.path as string | undefined,
@@ -261,20 +285,24 @@ export async function executeLocalTool(
         workspaceRoot
       );
     case "gitLog":
+      assertWorkspaceCapability(workspaceTarget, "read");
       return gitLog(
         args.path as string | undefined,
         args.depth as number | undefined,
         workspaceRoot
       );
     case "gitBranch":
+      assertWorkspaceCapability(workspaceTarget, args.name ? "write" : "read");
       return gitBranch(
         args.name as string | undefined,
         args.path as string | undefined,
         workspaceRoot
       );
     case "gitCheckout":
+      assertWorkspaceCapability(workspaceTarget, "write");
       return gitCheckout(args.ref as string, args.path as string | undefined, workspaceRoot);
     case "runCommand": {
+      assertWorkspaceCapability(workspaceTarget, "execute");
       const cwd = (args.cwd as string | undefined) ?? undefined;
       const result = await localExec(args.command as string, cwd, {
         timeout: 60_000,

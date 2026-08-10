@@ -12,6 +12,9 @@ import type { MobileWorkspaceTarget } from "../../services/localFileSystem";
 import { pullFromDevMachine } from "../../services/codeSync";
 import { useWorkspace } from "../../contexts/WorkspaceContext";
 import { useProject } from "../../contexts/ProjectContext";
+import type { WorkspaceHandle } from "@pocket-code/workspace-core";
+import { getProjectSyncEdge, type RemoteReplicaCatalogEntry } from "../../store/projectCatalog";
+import { getWorkspaceConnectionKey } from "../../services/workspaceConnection";
 
 interface Props {
   requestFileList: (path: string) => Promise<any>;
@@ -26,6 +29,7 @@ interface Props {
   settings: AppSettings;
   projectId?: string;
   localWorkspaceTarget: MobileWorkspaceTarget;
+  localWorkspaceHandle: WorkspaceHandle | null;
 }
 
 /**
@@ -50,8 +54,9 @@ export default function FilesTab({
   settings,
   projectId,
   localWorkspaceTarget,
+  localWorkspaceHandle,
 }: Props) {
-  const { currentProject, updateProject } = useProject();
+  const { currentProject, updateProject, updateSyncEdge, saveLocalReplicaCopy } = useProject();
   const [viewState, setViewState] = useState<"tree" | "viewer">("tree");
   const [selectedFile, setSelectedFile] = useState<FileItem | null>(null);
   const [openFiles, setOpenFiles] = useState<FileItem[]>([]);
@@ -82,7 +87,21 @@ export default function FilesTab({
   const isEditable = isLocal && !!writeFile;
 
   // 影子快照同步:已连接开发机(server/relay 模式)且 useAgent 提供了 sync 请求函数
-  const shadowSyncAvailable = !isLocal && !!projectId && !!requestSyncPull && !!requestSyncFile;
+  const connectionKey = getWorkspaceConnectionKey(settings);
+  const remoteReplica: RemoteReplicaCatalogEntry | undefined = currentProject?.remoteReplicas
+    ?.filter((replica) => replica.connectionKey === connectionKey)
+    .sort((left, right) => right.updatedAt - left.updatedAt)[0];
+  const syncEdge =
+    currentProject && remoteReplica
+      ? getProjectSyncEdge(currentProject, remoteReplica.id)
+      : undefined;
+  const shadowSyncAvailable =
+    !isLocal &&
+    !!projectId &&
+    !!requestSyncPull &&
+    !!requestSyncFile &&
+    !!localWorkspaceHandle &&
+    !!remoteReplica;
   const syncAvailable = (isLocal && !!projectId && canSyncRemote(settings)) || shadowSyncAvailable;
 
   // 浏览源:browseLocal(影子同步后)用手机本地副本,否则用传入的远端/本地函数。
@@ -104,23 +123,81 @@ export default function FilesTab({
 
       try {
         // ── 影子快照同步:server/relay 模式从开发机拉代码到手机本地工作区 ──
-        if (!isLocal && requestSyncPull && requestSyncFile) {
-          const result = await pullFromDevMachine({
-            requestSyncPull,
-            requestSyncFile,
-            projectId,
-            workspaceTarget: localWorkspaceTarget,
-            sinceCommit: currentProject?.lastSyncedCommit ?? null,
-            onProgress: (m) => setSyncMessage(m),
-          });
+        if (
+          !isLocal &&
+          requestSyncPull &&
+          requestSyncFile &&
+          localWorkspaceHandle &&
+          remoteReplica
+        ) {
+          const runPull = (options?: {
+            forceRemote?: boolean;
+            conflictResolution?: "keep-local" | "keep-remote" | "save-copy";
+          }) =>
+            pullFromDevMachine({
+              requestSyncPull,
+              requestSyncFile,
+              projectId,
+              workspaceHandle: localWorkspaceHandle,
+              remoteReplica,
+              edge: syncEdge,
+              legacyRemoteRef: currentProject?.lastSyncedCommit ?? null,
+              persistEdge: (edge) => updateSyncEdge(projectId, edge),
+              forceRemote: options?.forceRemote,
+              conflictResolution: options?.conflictResolution,
+              onProgress: (m) => setSyncMessage(m),
+            });
+          const result = await runPull();
           if (result.commit) {
-            updateProject(projectId, {
+            await updateProject(projectId, {
+              // Retained for mixed-version clients only. New sync reads edge.baseRemoteRef.
               lastSyncedCommit: result.commit,
               lastSyncTime: Date.now(),
             });
             setLastSyncTime(Date.now());
             setBrowseLocal(true); // 同步后浏览本地副本
             setRefreshKey((k) => k + 1);
+          }
+          if (result.conflict && !silent) {
+            const keepLocal = async () => {
+              if (result.edge) {
+                await updateSyncEdge(projectId, {
+                  ...result.edge,
+                  conflict: { ...result.conflict!, resolution: "keep-local" },
+                  updatedAt: Date.now(),
+                });
+              }
+              setBrowseLocal(true);
+              Alert.alert("已保留本地", "自动同步保持冻结；切换写者或导出前不会覆盖远端。 ");
+            };
+            const acceptRemote = async (resolution: "keep-remote" | "save-copy") => {
+              try {
+                if (resolution === "save-copy") {
+                  const copy = await saveLocalReplicaCopy(projectId);
+                  Alert.alert("已另存本地副本", `已创建“${copy.name}”，原项目将继续使用远端版本。`);
+                }
+                const forced = await runPull({ forceRemote: true, conflictResolution: resolution });
+                if (!forced.success) throw new Error(forced.error ?? "远端版本应用失败");
+                await updateProject(projectId, {
+                  lastSyncedCommit: forced.commit,
+                  lastSyncTime: Date.now(),
+                });
+                setBrowseLocal(true);
+                setRefreshKey((key) => key + 1);
+              } catch (error) {
+                Alert.alert("冲突处理失败", error instanceof Error ? error.message : "未知错误");
+              }
+            };
+            Alert.alert("检测到同步冲突", "本地副本与远端都已变化，自动写入已冻结。", [
+              { text: "保留本地", onPress: () => void keepLocal() },
+              {
+                text: "使用远端",
+                style: "destructive",
+                onPress: () => void acceptRemote("keep-remote"),
+              },
+              { text: "本地另存副本", onPress: () => void acceptRemote("save-copy") },
+            ]);
+            return false;
           }
           if (!silent) {
             if (result.success || result.commit) {
@@ -165,24 +242,32 @@ export default function FilesTab({
       settings,
       projectId,
       localWorkspaceTarget,
+      localWorkspaceHandle,
       isLocal,
       requestSyncPull,
       requestSyncFile,
       currentProject,
       updateProject,
+      updateSyncEdge,
+      saveLocalReplicaCopy,
+      remoteReplica,
+      syncEdge,
     ]
   );
 
   // Auto-sync: when entering local mode with sync available, check if workspace is empty
   useEffect(() => {
     if (!syncAvailable || !projectId) return;
-    if (autoSyncChecked.current.has(projectId)) return;
+    const syncCheckKey = `${projectId}:${connectionKey ?? "local"}`;
+    if (autoSyncChecked.current.has(syncCheckKey)) return;
 
-    autoSyncChecked.current.add(projectId);
+    autoSyncChecked.current.add(syncCheckKey);
 
     (async () => {
       try {
-        const result = await requestFileList(".");
+        const result = shadowSyncAvailable
+          ? await listLocalFiles(".", localWorkspaceTarget)
+          : await requestFileList(".");
         const items = result?.items || [];
         if (items.length === 0) {
           await doSync(true);
@@ -192,7 +277,15 @@ export default function FilesTab({
         await doSync(true);
       }
     })();
-  }, [syncAvailable, projectId, requestFileList, doSync]);
+  }, [
+    syncAvailable,
+    shadowSyncAvailable,
+    projectId,
+    connectionKey,
+    localWorkspaceTarget,
+    requestFileList,
+    doSync,
+  ]);
 
   // ── 活动文件快路径 ──
   // agent 一轮结束(isStreaming true→false)后,若已在浏览本地副本,自动增量同步,

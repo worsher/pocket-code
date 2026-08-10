@@ -6,6 +6,9 @@ import {
   resolveStoredCurrentProjectId,
   upgradeProjectCatalog,
   upsertRemoteReplica,
+  upsertProjectSyncEdge,
+  getProjectSyncEdge,
+  handoffProjectWriterLease,
   type ProjectIdFactories,
 } from "./projectCatalog";
 
@@ -163,6 +166,56 @@ describe("mobile project catalog v2", () => {
     expect(result.changed).toBe(true);
     expect(result.projects[0].localReplica).toEqual(project.localReplica);
     expect(result.projects[0].remoteReplicas).toEqual([]);
+  });
+
+  it("stores an independent base for each local/remote replica edge", () => {
+    const project = createProject("Demo", factories(), "", undefined, 1);
+    const edge = {
+      localReplicaId: project.localReplica.id,
+      remoteReplicaId: "3ca2e8bb-4fe5-4e16-a6ca-99840d666870",
+      remoteAuthorityId: "9d2b456e-6477-4c51-bf25-7680cf9f98d4",
+      baseSnapshot: "a".repeat(64),
+      localSnapshot: "a".repeat(64),
+      remoteSnapshot: "a".repeat(64),
+      baseRemoteRef: "b".repeat(40),
+      phase: "committed" as const,
+      updatedAt: 2,
+    };
+    const updated = upsertProjectSyncEdge(project, edge);
+    expect(getProjectSyncEdge(updated, edge.remoteReplicaId)).toEqual(edge);
+    expect(updated.lastSyncedCommit).toBeUndefined();
+  });
+
+  it("increments generation on a converged writer handoff and blocks conflicts", () => {
+    const project = createProject("Demo", factories(), "", undefined, 1);
+    const remoteId = "3ca2e8bb-4fe5-4e16-a6ca-99840d666870";
+    const remoteWriter = handoffProjectWriterLease(project, remoteId, 2);
+    const converged = upsertProjectSyncEdge(remoteWriter, {
+      localReplicaId: project.localReplica.id,
+      remoteReplicaId: remoteId,
+      remoteAuthorityId: "9d2b456e-6477-4c51-bf25-7680cf9f98d4",
+      baseSnapshot: "a".repeat(64),
+      localSnapshot: "a".repeat(64),
+      remoteSnapshot: "a".repeat(64),
+      baseRemoteRef: "b".repeat(40),
+      phase: "committed",
+      updatedAt: 2,
+    });
+    const localWriter = handoffProjectWriterLease(converged, project.localReplica.id, 3);
+    expect(localWriter.writerLease).toMatchObject({
+      holderReplicaId: project.localReplica.id,
+      generation: 2,
+    });
+    expect(localWriter.localReplica.generation).toBe(project.localReplica.generation + 1);
+
+    const conflicted = upsertProjectSyncEdge(remoteWriter, {
+      ...converged.syncEdges![0],
+      phase: "conflict",
+      remoteSnapshot: "c".repeat(64),
+    });
+    expect(() => handoffProjectWriterLease(conflicted, project.localReplica.id, 4)).toThrow(
+      "requires all replica edges"
+    );
   });
 
   it("persists copy source identity and explicit-only write-back policy", () => {

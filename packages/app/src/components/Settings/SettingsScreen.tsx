@@ -18,7 +18,7 @@ import { RelayClient } from "@pocket-code/client-core";
 
 interface Props {
     settings: AppSettings;
-    onSave: (settings: AppSettings) => void;
+    onSave: (settings: AppSettings) => Promise<void> | void;
     onClose: () => void;
 }
 
@@ -53,9 +53,16 @@ export default function SettingsScreen({ settings, onSave, onClose }: Props) {
         });
     };
 
-    const handleSave = () => {
-        onSave(draft);
-        onClose();
+    const handleSave = async () => {
+        try {
+            await onSave(draft);
+            onClose();
+        } catch (error) {
+            Alert.alert(
+                "设置未保存",
+                error instanceof Error ? error.message : "写者切换失败，请稍后重试"
+            );
+        }
     };
 
     const [oauthLoading, setOauthLoading] = useState(false);
@@ -165,7 +172,7 @@ export default function SettingsScreen({ settings, onSave, onClose }: Props) {
                     relayToken: response.token,
                     relayMachineId: response.machineId,
                 });
-                onSave(merged);
+                await onSave(merged);
                 Alert.alert("配对成功", `已连接到机器: ${response.machineName || response.machineId}`);
                 setPairingCode("");
             } else {

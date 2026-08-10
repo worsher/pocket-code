@@ -247,8 +247,11 @@ export default function TerminalScreen({ onClose, workspaceTarget }: TerminalScr
     return () => {
       clearTimeout(timerId);
       clearInterval(blinkTimer);
-      // Keep PTY alive when tab switches (don't call stopPty here).
-      // Parent can call stopPty() explicitly via ref if needed.
+      // Tab switches do not unmount this component. A real unmount means the
+      // writer lease was revoked or the screen closed, so the PTY must stop.
+      term.stopPty();
+      ptyStartedRef.current = false;
+      termRef.current = null;
     };
   }, []);
 

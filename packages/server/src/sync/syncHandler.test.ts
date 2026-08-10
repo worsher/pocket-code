@@ -39,6 +39,8 @@ describe("syncHandler", () => {
     const m = sent[0];
     expect(m.type).toBe("sync-manifest");
     expect(m.commit).toMatch(/^[0-9a-f]{40}$/);
+    expect(m.snapshot).toMatch(/^[0-9a-f]{64}$/);
+    expect(m.full).toBe(true);
     expect(m.parent).toBeNull();
     const byPath = Object.fromEntries(m.files.map((f: any) => [f.path, f.status]));
     expect(byPath["a.txt"]).toBe("A");
@@ -59,6 +61,8 @@ describe("syncHandler", () => {
     const byPath = Object.fromEntries(m.files.map((f: any) => [f.path, f.status]));
     expect(byPath["a.txt"]).toBe("M");
     expect(byPath["c.txt"]).toBe("A");
+    expect(m.full).toBe(false);
+    expect(m.files.find((file: any) => file.path === "c.txt").digest).toMatch(/^[0-9a-f]{32}$/);
   });
 
   it("handleSyncPull falls back to full manifest when sinceCommit is unreachable", async () => {
@@ -66,6 +70,7 @@ describe("syncHandler", () => {
     await handleSyncPull(ws, "0000000000000000000000000000000000000000", send);
     const m = sent[0];
     expect(m.type).toBe("sync-manifest");
+    expect(m.full).toBe(true);
     // 回退为全量:a.txt 记为 A
     expect(m.files.some((f: any) => f.path === "a.txt" && f.status === "A")).toBe(true);
   });

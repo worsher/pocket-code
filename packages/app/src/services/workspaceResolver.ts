@@ -57,6 +57,8 @@ export function ensureMobileWorkspaceHandle(project: Project): WorkspaceHandle {
   ensureDirectory(worktree);
   ensureDirectory(state);
   ensureDirectory(cache);
+  const isLocalWriter =
+    !project.writerLease || project.writerLease.holderReplicaId === project.localReplica.id;
 
   return {
     projectId,
@@ -69,8 +71,8 @@ export function ensureMobileWorkspaceHandle(project: Project): WorkspaceHandle {
     cacheRoot: cache.uri,
     capabilities: {
       read: true,
-      write: true,
-      execute: true,
+      write: isLocalWriter,
+      execute: isLocalWriter,
       syncBack: true,
     },
   };

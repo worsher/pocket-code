@@ -3,29 +3,15 @@
 // base64 内容写入,对 D 文件删除。requestSyncPull/requestSyncFile 由 useAgent
 // 提供(内部走 WS 直连或 relay,按 _reqId 关联响应),本服务只做编排,便于复用。
 
+import type { WorkspaceHandle } from "@pocket-code/workspace-core";
+import type { ProjectSyncEdge, RemoteReplicaCatalogEntry } from "../store/projectCatalog";
 import {
-  writeLocalFileBase64,
-  deleteLocalFile,
-  type MobileWorkspaceTarget,
-} from "./localFileSystem";
+  pullMobileReplicaTransaction,
+  type MobileSyncFileContent as SyncFileContent,
+  type MobileSyncManifest as SyncManifest,
+} from "./mobileSyncTransaction";
 
-export interface SyncManifestFile {
-  path: string;
-  status: "A" | "M" | "D";
-}
-
-export interface SyncManifest {
-  commit: string;
-  parent: string | null;
-  files: SyncManifestFile[];
-}
-
-export interface SyncFileContent {
-  path: string;
-  content?: string;
-  encoding?: string;
-  error?: string;
-}
+export type { SyncFileContent, SyncManifest };
 
 export interface PullDeps {
   /** 发送 sync-pull,等待 sync-manifest。 */
@@ -34,10 +20,13 @@ export interface PullDeps {
   requestSyncFile: (commit: string, path: string) => Promise<SyncFileContent>;
   /** 当前项目 id(决定写入哪个工作区);default/空→共享工作区。 */
   projectId?: string;
-  /** Catalog-resolved target worktree. Never derive it from projectId. */
-  workspaceTarget: MobileWorkspaceTarget;
-  /** 上次同步到的 commit(增量基准);为空则全量拉取。 */
-  sinceCommit?: string | null;
+  workspaceHandle: WorkspaceHandle;
+  remoteReplica: RemoteReplicaCatalogEntry;
+  edge?: ProjectSyncEdge;
+  legacyRemoteRef?: string | null;
+  persistEdge(edge: ProjectSyncEdge): Promise<void>;
+  forceRemote?: boolean;
+  conflictResolution?: "keep-local" | "keep-remote" | "save-copy";
   onProgress?: (msg: string) => void;
 }
 
@@ -49,49 +38,16 @@ export interface PullResult {
   deleted: number;
   failed: string[];
   error?: string;
+  conflict?: ProjectSyncEdge["conflict"];
+  edge?: ProjectSyncEdge;
 }
 
 /**
  * 从开发机拉取代码到手机本地工作区。
  */
 export async function pullFromDevMachine(deps: PullDeps): Promise<PullResult> {
-  const { requestSyncPull, requestSyncFile, workspaceTarget, sinceCommit, onProgress } = deps;
-  const target = workspaceTarget;
   try {
-    const manifest = await requestSyncPull(sinceCommit ?? undefined);
-    let applied = 0;
-    let deleted = 0;
-    const failed: string[] = [];
-
-    for (const f of manifest.files) {
-      if (f.status === "D") {
-        await deleteLocalFile(f.path, target);
-        deleted++;
-        onProgress?.(`− ${f.path}`);
-        continue;
-      }
-      const res = await requestSyncFile(manifest.commit, f.path);
-      if (res.error || typeof res.content !== "string") {
-        failed.push(f.path);
-        continue;
-      }
-      // sync-file-content 为 base64;直接写解码字节(文本+二进制均正确)。
-      const w = await writeLocalFileBase64(f.path, res.content, target);
-      if (w.success) {
-        applied++;
-        onProgress?.(`✓ ${f.path}`);
-      } else {
-        failed.push(f.path);
-      }
-    }
-
-    return {
-      success: failed.length === 0,
-      commit: manifest.commit,
-      applied,
-      deleted,
-      failed,
-    };
+    return await pullMobileReplicaTransaction(deps);
   } catch (err: any) {
     return {
       success: false,

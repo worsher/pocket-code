@@ -323,6 +323,37 @@ describe("ServerConnection", () => {
     conn.disconnect();
   });
 
+  it("correlates generation-guarded writer release responses", async () => {
+    const conn = new ServerConnection(makeConfig(), makeHandlers());
+    conn.connect();
+    const ws = FakeWebSocket.instances[0];
+    ws.open();
+    const projectId = "10ed836e-ae48-4d67-9e26-a74cbf55a52e";
+    const replicaId = "0f3d985e-0a3a-458e-932d-c89dbbf671c6";
+    const pending = conn.releaseWorkspaceWriter({
+      projectId,
+      replicaId,
+      workspaceGeneration: 2,
+    });
+    const sent = JSON.parse(ws.sent.at(-1)!);
+    expect(sent).toMatchObject({
+      type: "workspace-writer-release",
+      projectId,
+      replicaId,
+      workspaceGeneration: 2,
+    });
+    ws.receive({
+      type: "workspace-writer-released",
+      projectId,
+      replicaId,
+      success: true,
+      workspaceGeneration: 3,
+      _reqId: sent._reqId,
+    });
+    await expect(pending).resolves.toMatchObject({ success: true, workspaceGeneration: 3 });
+    conn.disconnect();
+  });
+
   it("routes normalized agent events to onAgentEvent", () => {
     const events: string[] = [];
     const conn = new ServerConnection(

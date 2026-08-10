@@ -168,6 +168,14 @@ export const SyncFileMessage = z.object({
   _reqId: optStr(),
 });
 
+export const ReleaseWorkspaceWriterMessage = z.object({
+  type: z.literal("workspace-writer-release"),
+  projectId: z.string().uuid(),
+  replicaId: z.string().uuid(),
+  workspaceGeneration: z.number().int().positive(),
+  _reqId: z.string().min(1).max(128),
+});
+
 export const BindLinkedWorkspaceMessage = z.object({
   type: z.literal("workspace-bind-linked"),
   projectId: z.string().uuid(),
@@ -194,6 +202,7 @@ export const WsMessage = z.discriminatedUnion("type", [
   GoalControlMessage,
   SyncPullMessage,
   SyncFileMessage,
+  ReleaseWorkspaceWriterMessage,
   BindLinkedWorkspaceMessage,
 ]);
 

@@ -39,6 +39,8 @@ import { WorkspaceProvider, useWorkspace } from "./src/contexts/WorkspaceContext
 import ProjectPromptEditor from "./src/components/ProjectPromptEditor";
 import { requestNotificationPermissions } from "./src/services/notifications";
 import { tabsForPlatform } from "./src/utils/tabsForPlatform";
+import { getWorkspaceConnectionKey, usesRemoteWorkspace } from "./src/services/workspaceConnection";
+import { handoffProjectWriterLease } from "./src/store/projectCatalog";
 
 function MainScreen() {
   const insets = useSafeAreaInsets();
@@ -82,8 +84,13 @@ function MainScreen() {
     requestNotificationPermissions();
   }, []);
 
-  const { currentProject, currentWorkspaceHandle, currentWorkspaceRoot, registerRemoteReplica } =
-    useProject();
+  const {
+    currentProject,
+    currentWorkspaceHandle,
+    currentWorkspaceRoot,
+    registerRemoteReplica,
+    handoffWriter,
+  } = useProject();
   const { pushFileChange, pendingFilePath, pendingPreviewUrl, clearPendingPreview } =
     useWorkspace();
 
@@ -103,10 +110,37 @@ function MainScreen() {
     }
   }, [pendingPreviewUrl, clearPendingPreview]);
 
-  const handleSaveSettings = useCallback(async (newSettings: AppSettings) => {
+  const persistSettings = useCallback(async (newSettings: AppSettings) => {
     setSettings(newSettings);
     await saveSettings(newSettings);
   }, []);
+
+  const reportedHandoffErrorRef = useRef<string | null>(null);
+  useEffect(() => {
+    if (!settingsLoaded || !currentProject) return;
+    const remoteMode = usesRemoteWorkspace(settings);
+    const connectionKey = getWorkspaceConnectionKey(settings);
+    const targetReplicaId = remoteMode
+      ? currentProject.remoteReplicas
+          ?.filter((replica) => replica.connectionKey === connectionKey)
+          .sort((left, right) => right.updatedAt - left.updatedAt)[0]?.id
+      : currentProject.localReplica.id;
+    if (!targetReplicaId || currentProject.writerLease?.holderReplicaId === targetReplicaId) {
+      reportedHandoffErrorRef.current = null;
+      return;
+    }
+    const attemptKey = `${currentProject.id}:${currentProject.writerLease?.generation ?? 0}:${targetReplicaId}`;
+    void handoffWriter(currentProject.id, targetReplicaId).catch((error) => {
+      if (reportedHandoffErrorRef.current === attemptKey) return;
+      reportedHandoffErrorRef.current = attemptKey;
+      Alert.alert(
+        "写入模式尚未切换",
+        error instanceof Error
+          ? `${error.message}。请先在文件页解决同步冲突。`
+          : "请先在文件页解决同步冲突。"
+      );
+    });
+  }, [settingsLoaded, settings, currentProject, handoffWriter]);
 
   const handleFileChanged = useCallback(
     (path: string, action: "created" | "modified" | "deleted") => {
@@ -141,6 +175,7 @@ function MainScreen() {
     requestFileContent,
     requestSyncPull,
     requestSyncFile,
+    releaseWorkspaceWriter,
     bindLinkedWorkspace,
     deleteProjectWorkspace,
   } = useAgent({
@@ -157,6 +192,41 @@ function MainScreen() {
     onFileChanged: handleFileChanged,
     onRemoteReplica: registerRemoteReplica,
   });
+
+  const handleSaveSettings = useCallback(
+    async (newSettings: AppSettings) => {
+      const currentRemote = usesRemoteWorkspace(settings);
+      const nextRemote = usesRemoteWorkspace(newSettings);
+      const currentConnectionKey = getWorkspaceConnectionKey(settings);
+      const nextConnectionKey = getWorkspaceConnectionKey(newSettings);
+      const leavingCurrentAuthority =
+        currentRemote && (!nextRemote || currentConnectionKey !== nextConnectionKey);
+      if (leavingCurrentAuthority && currentProject) {
+        if (!nextRemote) {
+          // Validate convergence before asking the remote authority to revoke its
+          // generation. This avoids releasing a live writer only to discover a
+          // local conflict afterwards.
+          handoffProjectWriterLease(currentProject, currentProject.localReplica.id);
+        }
+        const activeRemote = currentProject.remoteReplicas
+          ?.filter((replica) => replica.connectionKey === currentConnectionKey)
+          .sort((left, right) => right.updatedAt - left.updatedAt)[0];
+        if (activeRemote) {
+          const response = await releaseWorkspaceWriter({
+            projectId: currentProject.id,
+            replicaId: activeRemote.id,
+            workspaceGeneration: activeRemote.generation,
+          });
+          if (!response.success) throw new Error(response.error ?? "远端写者释放失败");
+        }
+        if (!nextRemote) {
+          await handoffWriter(currentProject.id, currentProject.localReplica.id);
+        }
+      }
+      await persistSettings(newSettings);
+    },
+    [settings, currentProject, releaseWorkspaceWriter, handoffWriter, persistSettings]
+  );
 
   const listRef = useRef<FlatList>(null);
   const appStateRef = useRef<AppStateStatus>(AppState.currentState);
@@ -436,7 +506,7 @@ function MainScreen() {
         </KeyboardAvoidingView>
 
         {/* ── Terminal Tab — always mounted to keep PTY session alive(Android 专属;iOS 沙箱禁 fork/exec 不挂载) ── */}
-        {Platform.OS === "android" && (
+        {Platform.OS === "android" && (currentWorkspaceHandle?.capabilities.execute ?? true) && (
           <KeyboardAvoidingView
             style={[styles.flex1, activeTab !== "terminal" && styles.hidden]}
             behavior="padding"
@@ -472,6 +542,7 @@ function MainScreen() {
             settings={settings}
             projectId={currentProject?.id}
             localWorkspaceTarget={localWorkspaceTarget}
+            localWorkspaceHandle={currentWorkspaceHandle}
           />
         </View>
 
