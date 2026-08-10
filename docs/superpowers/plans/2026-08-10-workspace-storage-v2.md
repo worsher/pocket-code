@@ -34,7 +34,7 @@
 - [ ] 文件 API 改为接收 `WorkspaceHandle` 与已验证相对路径。
 - [ ] 命令执行、PTY/Terminal、Git、Preview 改为使用 handle 的能力和 root。
 - [ ] 移除各模块的 `getWorkspaceRoot(projectId)` 与 fallback 到共享 workspace 的逻辑。
-- [ ] 在适配层实现 realpath/文件句柄包含关系检查和 symlink 越界保护。
+- [ ] 在适配层实现 realpath/文件句柄包含关系检查和 symlink 越界保护。（server realpath 已完成，file-handle/mobile 待补）
 - [ ] 加入跨项目读写、绝对路径、`..`、symlink 和 stale generation 测试。
 
 ## 阶段 4：协议与异步作用域

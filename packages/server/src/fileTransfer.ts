@@ -7,7 +7,7 @@ import { mkdir, writeFile, readFile, stat as fsStat } from "fs/promises";
 import { verifyToken } from "./auth.js";
 import { getSession } from "./db.js";
 import { getWorkspaceRoot } from "./tools.js";
-import { resolveWorkspaceEntry } from "./workspacePath.js";
+import { resolveWorkspaceEntryChecked } from "./workspacePath.js";
 
 const MAX_UPLOAD_SIZE = parseInt(process.env.MAX_UPLOAD_SIZE || "52428800", 10); // 50MB
 const MAX_SYNC_SIZE = 50 * 1024 * 1024; // 50MB total for workspace sync
@@ -38,10 +38,7 @@ function resolveWorkspace(sessionId: string, userId: string, projectId?: string)
  * Headers: Authorization: Bearer <token>
  * Query: ?sessionId=xxx&path=xxx (target path in workspace)
  */
-export async function handleFileUpload(
-  req: IncomingMessage,
-  res: ServerResponse
-): Promise<void> {
+export async function handleFileUpload(req: IncomingMessage, res: ServerResponse): Promise<void> {
   // Auth check
   const token = getAuthToken(req);
   if (!token) {
@@ -111,9 +108,10 @@ export async function handleFileUpload(
   const workspace = resolveWorkspace(sessionId, auth.userId, session.projectId);
   let fullTarget: string;
   try {
-    fullTarget = resolveWorkspaceEntry(
+    fullTarget = await resolveWorkspaceEntryChecked(
       workspace,
-      [targetPath, fileName].filter(Boolean).join("/")
+      [targetPath, fileName].filter(Boolean).join("/"),
+      { allowMissing: true }
     );
   } catch {
     sendJson(res, 400, { error: "Invalid path (path traversal detected)" });
@@ -180,7 +178,7 @@ export async function handleFileDownload(
   const workspace = resolveWorkspace(sessionId, auth.userId, session.projectId);
   let fullPath: string;
   try {
-    fullPath = resolveWorkspaceEntry(workspace, filePath);
+    fullPath = await resolveWorkspaceEntryChecked(workspace, filePath, { allowMissing: true });
   } catch {
     sendJson(res, 400, { error: "Invalid path" });
     return;
@@ -228,18 +226,48 @@ export async function handleFileDownload(
 
 /** Binary file extensions that should be base64 encoded */
 const BINARY_EXTS = new Set([
-  ".png", ".jpg", ".jpeg", ".gif", ".bmp", ".ico", ".webp",
-  ".pdf", ".zip", ".gz", ".tar", ".7z", ".rar",
-  ".woff", ".woff2", ".ttf", ".eot", ".otf",
-  ".mp3", ".mp4", ".wav", ".ogg", ".webm",
-  ".exe", ".dll", ".so", ".dylib",
-  ".sqlite", ".db",
+  ".png",
+  ".jpg",
+  ".jpeg",
+  ".gif",
+  ".bmp",
+  ".ico",
+  ".webp",
+  ".pdf",
+  ".zip",
+  ".gz",
+  ".tar",
+  ".7z",
+  ".rar",
+  ".woff",
+  ".woff2",
+  ".ttf",
+  ".eot",
+  ".otf",
+  ".mp3",
+  ".mp4",
+  ".wav",
+  ".ogg",
+  ".webm",
+  ".exe",
+  ".dll",
+  ".so",
+  ".dylib",
+  ".sqlite",
+  ".db",
 ]);
 
 /** Directories to skip during sync */
 const SKIP_DIRS = new Set([
-  "node_modules", ".git", ".next", "dist", "build", ".cache",
-  "__pycache__", ".venv", "venv",
+  "node_modules",
+  ".git",
+  ".next",
+  "dist",
+  "build",
+  ".cache",
+  "__pycache__",
+  ".venv",
+  "venv",
 ]);
 
 interface SyncFile {
@@ -282,9 +310,7 @@ function collectFiles(
 
       try {
         const raw = require("fs").readFileSync(fullPath);
-        const content = isBinary
-          ? raw.toString("base64")
-          : raw.toString("utf8");
+        const content = isBinary ? raw.toString("base64") : raw.toString("utf8");
 
         sizeAccumulator.total += fileStat.size;
         files.push({

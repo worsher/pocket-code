@@ -1,11 +1,21 @@
-import { describe, it, expect, beforeEach, vi } from "vitest";
-import { mkdtempSync, writeFileSync } from "node:fs";
+import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
+import { existsSync, mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createNodeBackend } from "./nodeBackend.js";
 
 let ws: string;
-beforeEach(() => { ws = mkdtempSync(join(tmpdir(), "pc-nb-")); });
+let externalDirectories: string[];
+beforeEach(() => {
+  ws = mkdtempSync(join(tmpdir(), "pc-nb-"));
+  externalDirectories = [];
+});
+afterEach(() => {
+  rmSync(ws, { recursive: true, force: true });
+  for (const directory of externalDirectories) {
+    rmSync(directory, { recursive: true, force: true });
+  }
+});
 
 describe("NodeBackend", () => {
   it("write/read/list round trip incl. dot entries and isNew", async () => {
@@ -14,7 +24,7 @@ describe("NodeBackend", () => {
     expect((await be.writeFile(join(ws, "a/b.ts"), "hi2")).isNew).toBe(false);
     expect(await be.readFile(join(ws, "a/b.ts"))).toBe("hi2");
     writeFileSync(join(ws, ".hidden"), "");
-    const items = await be.listFiles(ws);
+    const items = await be.listFiles(".");
     expect(items.some((i) => i.name === ".hidden")).toBe(true);
     expect(items.find((i) => i.name === "a")?.type).toBe("dir");
   });
@@ -78,6 +88,50 @@ describe("NodeBackend", () => {
     expect(r.exitCode).toBe(127);
     expect(r.stderr.length).toBeGreaterThan(0);
   });
+
+  it("rejects read, list, and write through a symlink that escapes workspace", async () => {
+    const external = mkdtempSync(join(tmpdir(), "pc-nb-external-"));
+    externalDirectories.push(external);
+    writeFileSync(join(external, "secret.txt"), "secret");
+    symlinkSync(external, join(ws, "escape"), "dir");
+    const be = createNodeBackend(ws);
+
+    await expect(be.readFile(join(ws, "escape/secret.txt"))).rejects.toThrow("outside");
+    await expect(be.listFiles(join(ws, "escape"))).rejects.toThrow("outside");
+    await expect(be.writeFile(join(ws, "escape/new.txt"), "leak")).rejects.toThrow("outside");
+    expect(existsSync(join(external, "new.txt"))).toBe(false);
+  });
+
+  it("rejects a dangling file symlink before it can create an external target", async () => {
+    const external = mkdtempSync(join(tmpdir(), "pc-nb-external-"));
+    externalDirectories.push(external);
+    const externalTarget = join(external, "created.txt");
+    symlinkSync(externalTarget, join(ws, "dangling"), "file");
+    const be = createNodeBackend(ws);
+
+    await expect(be.writeFile(join(ws, "dangling"), "leak")).rejects.toThrow("symbolic link");
+    expect(existsSync(externalTarget)).toBe(false);
+  });
+
+  it("allows a symlink whose resolved target remains inside workspace", async () => {
+    mkdirSync(join(ws, "inside"));
+    writeFileSync(join(ws, "inside/file.txt"), "ok");
+    symlinkSync("inside", join(ws, "alias"), "dir");
+    const be = createNodeBackend(ws);
+
+    expect(await be.readFile(join(ws, "alias/file.txt"))).toBe("ok");
+  });
+
+  it("rejects a host command cwd outside workspace", async () => {
+    const external = mkdtempSync(join(tmpdir(), "pc-nb-external-"));
+    externalDirectories.push(external);
+    const be = createNodeBackend(ws);
+
+    const result = await be.exec("pwd", { cwd: external });
+
+    expect(result.exitCode).toBe(127);
+    expect(result.stderr).toContain("outside");
+  });
 });
 
 vi.mock("./processRegistry.js", () => ({
@@ -93,13 +147,14 @@ describe("nodeBackend 后台进程", () => {
   it("startProcess 转发 startManaged(workspace 作分组 key,cwd/containerCwd 分流传递)", async () => {
     const reg = await import("./processRegistry.js");
     const { createNodeBackend } = await import("./nodeBackend.js");
-    const be = createNodeBackend("/ws", undefined);
+    mkdirSync(join(ws, "sub"));
+    const be = createNodeBackend(ws, undefined);
     const r = await be.startProcess!("npm run dev", { cwd: "sub" });
     expect(r.processId).toBe("p_test");
-    // resolveHostCwd("/ws","sub") → "/ws/sub"；resolveContainerCwd("/ws","sub") → "/workspace/sub"
-    expect(reg.startManaged).toHaveBeenCalledWith("/ws", "npm run dev", {
+    // resolveHostCwd(ws,"sub") → "<ws>/sub"；container cwd → "/workspace/sub"
+    expect(reg.startManaged).toHaveBeenCalledWith(ws, "npm run dev", {
       containerId: undefined,
-      cwd: "/ws/sub",
+      cwd: join(ws, "sub"),
       containerCwd: "/workspace/sub",
     });
   });

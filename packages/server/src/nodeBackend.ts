@@ -7,6 +7,7 @@ import { dirname, join, isAbsolute, relative } from "node:path";
 import type { RuntimeBackend, ExecResult } from "@pocket-code/agent-core";
 import { isDockerEnabled, execInContainer } from "./docker.js";
 import { startManaged, stopManaged } from "./processRegistry.js";
+import { resolveWorkspaceRealPath } from "./workspaceRealPath.js";
 
 const execAsync = promisify(exec);
 
@@ -81,7 +82,14 @@ async function shellExec(
   }
 
   // Host mode
-  const cwd = resolveHostCwd(workspace, opts.cwd);
+  let cwd: string;
+  try {
+    cwd = await resolveWorkspaceRealPath(workspace, resolveHostCwd(workspace, opts.cwd), {
+      allowMissing: false,
+    });
+  } catch (error) {
+    return { stdout: "", stderr: errMessage(error), exitCode: 127 };
+  }
   const env: Record<string, string> = { ...(process.env as Record<string, string>), ...opts.env };
   if (opts.isolateHome) env.HOME = workspace;
 
@@ -134,24 +142,27 @@ function errMessage(err: unknown): string {
 export function createNodeBackend(workspace: string, containerId?: string): RuntimeBackend {
   return {
     async readFile(path: string): Promise<string> {
-      return readFile(path, "utf-8");
+      const target = await resolveWorkspaceRealPath(workspace, path, { allowMissing: false });
+      return readFile(target, "utf-8");
     },
 
     async writeFile(path: string, content: string): Promise<{ isNew: boolean }> {
+      const target = await resolveWorkspaceRealPath(workspace, path, { allowMissing: true });
       let isNew = false;
       try {
-        await stat(path);
+        await stat(target);
       } catch {
         isNew = true;
       }
-      const dir = dirname(path);
+      const dir = dirname(target);
       await mkdir(dir, { recursive: true });
-      await writeFile(path, content, "utf-8");
+      await writeFile(target, content, "utf-8");
       return { isNew };
     },
 
     async listFiles(path: string): Promise<{ name: string; type: "file" | "dir" }[]> {
-      const entries = await readdir(path, { withFileTypes: true });
+      const target = await resolveWorkspaceRealPath(workspace, path, { allowMissing: false });
+      const entries = await readdir(target, { withFileTypes: true });
       return entries.map((e) => ({
         name: e.name,
         type: e.isDirectory() ? "dir" : "file",
@@ -167,7 +178,11 @@ export function createNodeBackend(workspace: string, containerId?: string): Runt
       // 不能传每次可能带子目录的解析结果，否则同 workspace 不同 cwd 的进程分不到一组。
       // host/容器两种 cwd 语义不同(见 resolveHostCwd/resolveContainerCwd 注释)，须分流各自算好透传，
       // 否则后台子进程实际工作目录从未设置，继承 daemon 自己的 cwd(pm2 启动目录=仓库根)。
-      const hostCwd = resolveHostCwd(workspace, opts?.cwd);
+      const hostCwd = await resolveWorkspaceRealPath(
+        workspace,
+        resolveHostCwd(workspace, opts?.cwd),
+        { allowMissing: false }
+      );
       const containerCwd = resolveContainerCwd(workspace, opts?.cwd);
       return startManaged(workspace, cmd, { containerId, cwd: hostCwd, containerCwd });
     },
