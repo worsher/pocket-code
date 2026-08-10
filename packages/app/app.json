@@ -1,7 +1,8 @@
 {
   "expo": {
-    "name": "app",
-    "slug": "app",
+    "name": "Pocket Code",
+    "slug": "pocket-code",
+    "owner": "worsher",
     "version": "1.0.0",
     "orientation": "portrait",
     "icon": "./assets/icon.png",
@@ -33,6 +34,11 @@
     },
     "web": {
       "favicon": "./assets/favicon.png"
+    },
+    "extra": {
+      "eas": {
+        "projectId": "98acabfe-abcf-42ad-a99c-ab5be10f18f5"
+      }
     },
     "plugins": [
       "expo-notifications",
