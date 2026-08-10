@@ -48,6 +48,13 @@ import { importMobileGit, type MobileGitImportResult } from "../services/mobileG
 import type { AppSettings } from "../store/settings";
 import { cloneMobileWorkspace } from "../services/mobileSyncTransaction";
 import { Directory } from "expo-file-system";
+import {
+  applyCopySourceOperation,
+  previewCopySourceOperation,
+  type CopySourceDirection,
+  type CopySourcePreview,
+} from "../services/copySourceSync";
+import { gitAdd, gitCommit, gitPush, resolveGitWorkspaceHead } from "../services/gitService";
 
 interface ProjectContextValue {
   projects: Project[];
@@ -61,6 +68,20 @@ interface ProjectContextValue {
   updateSyncEdge: (projectId: string, edge: ProjectSyncEdge) => Promise<void>;
   saveLocalReplicaCopy: (projectId: string) => Promise<Project>;
   handoffWriter: (projectId: string, targetReplicaId: string) => Promise<Project>;
+  previewCopySource: (
+    projectId: string,
+    direction: CopySourceDirection
+  ) => Promise<CopySourcePreview>;
+  applyCopySource: (
+    projectId: string,
+    direction: CopySourceDirection,
+    force?: boolean
+  ) => Promise<CopySourcePreview>;
+  commitAndPushGitProject: (
+    projectId: string,
+    settings: AppSettings,
+    message: string
+  ) => Promise<string>;
   registerRemoteReplica: (
     projectId: string,
     replica: RemoteReplicaCatalogEntry,
@@ -98,6 +119,15 @@ const ProjectContext = createContext<ProjectContextValue>({
     throw new Error("Project provider is unavailable");
   },
   handoffWriter: async () => {
+    throw new Error("Project provider is unavailable");
+  },
+  previewCopySource: async () => {
+    throw new Error("Project provider is unavailable");
+  },
+  applyCopySource: async () => {
+    throw new Error("Project provider is unavailable");
+  },
+  commitAndPushGitProject: async () => {
     throw new Error("Project provider is unavailable");
   },
   registerRemoteReplica: () => {},
@@ -256,6 +286,93 @@ export function ProjectProvider({ children }: { children: React.ReactNode }) {
     []
   );
 
+  const persistProjectImportSource = useCallback(
+    async (projectId: string, importSource: ProjectImportSource): Promise<void> => {
+      const current = projectsRef.current.find((project) => project.id === projectId);
+      if (!current) throw new Error("Project no longer exists");
+      const replacement = { ...current, importSource, updatedAt: Date.now() };
+      const updated = projectsRef.current.map((project) =>
+        project.id === projectId ? replacement : project
+      );
+      await saveProjects(updated);
+      projectsRef.current = updated;
+      setProjects(updated);
+    },
+    []
+  );
+
+  const previewCopySource = useCallback(
+    async (projectId: string, direction: CopySourceDirection): Promise<CopySourcePreview> => {
+      const project = projectsRef.current.find((entry) => entry.id === projectId);
+      if (!project || project.localReplica.layout !== "v2") {
+        throw new Error("Managed copy project is unavailable");
+      }
+      return previewCopySourceOperation(project, ensureMobileWorkspaceHandle(project), direction);
+    },
+    []
+  );
+
+  const applyCopySource = useCallback(
+    async (
+      projectId: string,
+      direction: CopySourceDirection,
+      force: boolean = false
+    ): Promise<CopySourcePreview> => {
+      const project = projectsRef.current.find((entry) => entry.id === projectId);
+      if (!project || project.localReplica.layout !== "v2") {
+        throw new Error("Managed copy project is unavailable");
+      }
+      const handle = ensureMobileWorkspaceHandle(project);
+      if (!handle.capabilities.write) {
+        throw new Error("Switch the project writer to this phone before synchronizing its source");
+      }
+      return applyCopySourceOperation({
+        project,
+        handle,
+        direction,
+        force,
+        persistImportSource: (source) => persistProjectImportSource(projectId, source),
+      });
+    },
+    [persistProjectImportSource]
+  );
+
+  const commitAndPushGitProject = useCallback(
+    async (projectId: string, settings: AppSettings, message: string): Promise<string> => {
+      const project = projectsRef.current.find((entry) => entry.id === projectId);
+      if (
+        !project ||
+        project.localReplica.layout !== "v2" ||
+        project.importSource?.mode !== "git" ||
+        project.importSource.writeBackPolicy !== "git"
+      ) {
+        throw new Error("Project is not a managed Git import");
+      }
+      const handle = ensureMobileWorkspaceHandle(project);
+      if (!handle.capabilities.write) {
+        throw new Error("Switch the project writer to this phone before committing");
+      }
+      const summary = message.trim();
+      if (!summary) throw new Error("Commit message must not be empty");
+      const staged = await gitAdd(".", undefined, handle.worktreeRoot);
+      if (!staged.success) throw new Error(staged.error ?? "Unable to stage Git changes");
+      const committed = await gitCommit(summary, undefined, handle.worktreeRoot);
+      if (!committed.success || !committed.sha) {
+        throw new Error(committed.error ?? "Unable to commit Git changes");
+      }
+      const pushed = await gitPush(settings, undefined, "origin", undefined, handle.worktreeRoot);
+      if (!pushed.success) throw new Error(pushed.error ?? "Unable to push Git changes");
+      const head = await resolveGitWorkspaceHead(handle.worktreeRoot);
+      await persistProjectImportSource(projectId, {
+        ...project.importSource,
+        importedSnapshot: head,
+        importedAt: Date.now(),
+      });
+      return head;
+    },
+    [persistProjectImportSource]
+  );
+
   const registerRemoteReplica = useCallback(
     (
       projectId: string,
@@ -409,6 +526,9 @@ export function ProjectProvider({ children }: { children: React.ReactNode }) {
         updateSyncEdge,
         saveLocalReplicaCopy,
         handoffWriter,
+        previewCopySource,
+        applyCopySource,
+        commitAndPushGitProject,
         registerRemoteReplica,
         importDirectoryProject,
         importArchiveProject,

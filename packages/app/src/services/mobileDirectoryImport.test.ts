@@ -241,6 +241,8 @@ const { getMobileWorkspaceRoot, writeLocalFile } = await import("./localFileSyst
 const { buildProotCommand } = await import("./runtimeManager");
 const { pullMobileReplicaTransaction, scanMobileSyncDirectory } =
   await import("./mobileSyncTransaction");
+const { applyCopySourceOperation, previewCopySourceOperation } = await import("./copySourceSync");
+const { ensureMobileWorkspaceHandle } = await import("./workspaceResolver");
 
 function sourceDirectory() {
   fake.nodes.set("content://picked", { type: "directory" });
@@ -383,6 +385,106 @@ describe("mobile ZIP archive copy import", () => {
     });
     expect([...fake.nodes.keys()].some((key) => key.endsWith("/worktree/src/index.ts"))).toBe(true);
     expect(fake.nodes.has(archiveUri)).toBe(true);
+  });
+});
+
+describe("copy source reconciliation", () => {
+  it("previews and explicitly reapplies a source-only directory change", async () => {
+    const imported = await importMobileDirectory({
+      source: sourceDirectory(),
+      sourceDeviceId: "phone-a",
+      projects: [],
+      commitProject: async () => undefined,
+    });
+    if (imported.status !== "imported") throw new Error("expected import");
+    const project = imported.committed;
+    const handle = ensureMobileWorkspaceHandle(project);
+    new File("content://picked/src/index.ts").write("source update");
+
+    const preview = await previewCopySourceOperation(project, handle, "reimport");
+    expect(preview).toMatchObject({ decision: "source-ahead" });
+    expect(preview.changes).toContainEqual({
+      path: "src/index.ts",
+      status: "M",
+      type: "file",
+    });
+
+    let persisted: any;
+    await applyCopySourceOperation({
+      project,
+      handle,
+      direction: "reimport",
+      persistImportSource: async (source) => {
+        persisted = source;
+      },
+    });
+    expect(await new File(handle.worktreeRoot, "src", "index.ts").text()).toBe("source update");
+    expect(persisted.importedSnapshot).toBe(preview.sourceSnapshot);
+    expect([...fake.nodes.keys()].some((key) => key.includes("/trash/source_sync_"))).toBe(false);
+  });
+
+  it("blocks a two-sided change until explicit write-back confirmation", async () => {
+    const imported = await importMobileDirectory({
+      source: sourceDirectory(),
+      sourceDeviceId: "phone-a",
+      projects: [],
+      commitProject: async () => undefined,
+    });
+    if (imported.status !== "imported") throw new Error("expected import");
+    const project = imported.committed;
+    const handle = ensureMobileWorkspaceHandle(project);
+    new File("content://picked/src/index.ts").write("source update");
+    new File(handle.worktreeRoot, "src", "index.ts").write("workspace update");
+
+    const preview = await previewCopySourceOperation(project, handle, "write-back");
+    expect(preview.decision).toBe("conflict");
+    await expect(
+      applyCopySourceOperation({
+        project,
+        handle,
+        direction: "write-back",
+        persistImportSource: async () => undefined,
+      })
+    ).rejects.toThrow("confirmation");
+    expect(await new File("content://picked/src/index.ts").text()).toBe("source update");
+
+    await applyCopySourceOperation({
+      project,
+      handle,
+      direction: "write-back",
+      force: true,
+      persistImportSource: async () => undefined,
+    });
+    expect(await new File("content://picked/src/index.ts").text()).toBe("workspace update");
+  });
+
+  it("writes an archive copy back as a verified ZIP", async () => {
+    const archiveUri = "file:///picked/export.zip";
+    fake.nodes.set(archiveUri, {
+      type: "file",
+      content: zipSync({ "a.txt": strToU8("base") }),
+    });
+    const imported = await importMobileArchive({
+      source: new File(archiveUri),
+      sourceDeviceId: "phone-a",
+      projects: [],
+      commitProject: async () => undefined,
+    });
+    if (imported.status !== "imported") throw new Error("expected import");
+    const project = imported.committed;
+    const handle = ensureMobileWorkspaceHandle(project);
+    new File(handle.worktreeRoot, "a.txt").write("workspace update");
+
+    const preview = await previewCopySourceOperation(project, handle, "write-back");
+    expect(preview.decision).toBe("workspace-ahead");
+    await applyCopySourceOperation({
+      project,
+      handle,
+      direction: "write-back",
+      persistImportSource: async () => undefined,
+    });
+    const archive = await inspectZipArchive(await new File(archiveUri).bytes());
+    expect(archive.snapshot).toBe(preview.workspaceSnapshot);
   });
 });
 

@@ -42,6 +42,7 @@ export async function scanMobileDirectory(root: Directory): Promise<{
   snapshot: string;
   bytes: number;
   fileCount: number;
+  manifest: MobileImportManifestEntry[];
 }> {
   const manifest: MobileImportManifestEntry[] = [];
   let bytes = 0;
@@ -76,7 +77,7 @@ export async function scanMobileDirectory(root: Directory): Promise<{
   await visit(root, "");
   manifest.sort((a, b) => a.path.localeCompare(b.path));
   const snapshot = await digestStringAsync(CryptoDigestAlgorithm.SHA256, JSON.stringify(manifest));
-  return { snapshot, bytes, fileCount };
+  return { snapshot, bytes, fileCount, manifest };
 }
 
 export function assertMobileImportSpace(estimatedBytes: number): void {
@@ -133,7 +134,7 @@ export async function rollbackManagedMobileImport(staged: MobileStagedImport): P
   }
 }
 
-function copyDirectoryContents(
+export function copyMobileDirectoryContents(
   source: Directory,
   destination: Directory,
   state: { entries: number } = { entries: 0 }
@@ -145,7 +146,7 @@ function copyDirectoryContents(
       throw new Error(`Directory contains more than ${MAX_IMPORT_FILES} entries`);
     }
     if (entry instanceof Directory) {
-      copyDirectoryContents(entry, new Directory(destination, entry.name), state);
+      copyMobileDirectoryContents(entry, new Directory(destination, entry.name), state);
     } else {
       entry.copy(new File(destination, entry.name));
     }
@@ -199,7 +200,7 @@ export async function importMobileDirectory(args: {
         assertMobileImportSpace(probe.estimatedBytes);
         const staging = createMobileImportStagingDirectory();
         try {
-          copyDirectoryContents(probe.source, staging);
+          copyMobileDirectoryContents(probe.source, staging);
           const stagedSnapshot = (await scanMobileDirectory(staging)).snapshot;
           return { directory: staging, stagedSnapshot };
         } catch (error) {

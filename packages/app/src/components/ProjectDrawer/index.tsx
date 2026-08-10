@@ -1,16 +1,20 @@
 // ── Project Drawer ───────────────────────────────────────
 // A slide-out drawer for switching between projects.
 
-import React, { useState } from "react";
+import React, { useEffect, useState } from "react";
 import { View, Text, TouchableOpacity, FlatList, TextInput, StyleSheet, Alert } from "react-native";
 import { randomUUID } from "expo-crypto";
 import { useProject } from "../../contexts/ProjectContext";
 import type { Project } from "../../store/projects";
 import type { AppSettings } from "../../store/settings";
 import { getWorkspaceConnectionKey } from "../../services/workspaceConnection";
-import type { LinkedWorkspaceImportResponse } from "@pocket-code/client-core";
+import type {
+  LinkedWorkspaceImportResponse,
+  WorkspaceSourceStatusResponse,
+} from "@pocket-code/client-core";
 
 interface Props {
+  monitoringEnabled: boolean;
   onSelectProject?: (projectId: string) => void;
   onEditPrompt?: () => void;
   onDeleteWorkspace?: (projectId: string) => void;
@@ -21,6 +25,7 @@ interface Props {
     path: string;
     allowWeakDuplicate?: boolean;
   }) => Promise<LinkedWorkspaceImportResponse>;
+  onInspectLinkedSource: (projectId: string) => Promise<WorkspaceSourceStatusResponse>;
 }
 
 type ProjectImportUiResult =
@@ -29,11 +34,13 @@ type ProjectImportUiResult =
   | { status: "blocked" | "confirmation-required"; existingProjectId: string };
 
 export default function ProjectDrawer({
+  monitoringEnabled,
   onSelectProject,
   onEditPrompt,
   onDeleteWorkspace,
   settings,
   onBindLinkedWorkspace,
+  onInspectLinkedSource,
 }: Props) {
   const {
     projects,
@@ -45,6 +52,9 @@ export default function ProjectDrawer({
     importArchiveProject,
     importGitProject,
     registerLinkedProject,
+    previewCopySource,
+    applyCopySource,
+    commitAndPushGitProject,
   } = useProject();
 
   const [showCreate, setShowCreate] = useState(false);
@@ -55,7 +65,70 @@ export default function ProjectDrawer({
   const [gitUrl, setGitUrl] = useState("");
   const [linkedPath, setLinkedPath] = useState("");
   const [linkedName, setLinkedName] = useState("");
+  const [gitCommitMessage, setGitCommitMessage] = useState("Update from Pocket Code");
   const [pendingLinkedProjectId, setPendingLinkedProjectId] = useState<string | null>(null);
+  const [linkedSourceStatus, setLinkedSourceStatus] = useState<
+    WorkspaceSourceStatusResponse | undefined
+  >();
+
+  useEffect(() => {
+    if (
+      !monitoringEnabled ||
+      currentProject?.importSource?.mode !== "linked" ||
+      settings.workspaceMode !== "relay"
+    ) {
+      setLinkedSourceStatus(undefined);
+      return;
+    }
+    let active = true;
+    const inspect = async () => {
+      try {
+        const status = await onInspectLinkedSource(currentProject.id);
+        if (active) setLinkedSourceStatus(status);
+      } catch (error) {
+        if (!active) return;
+        setLinkedSourceStatus({
+          type: "workspace-source-status",
+          _reqId: "local-monitor",
+          projectId: currentProject.id,
+          state: "unsupported",
+          checkedAt: Date.now(),
+          error: error instanceof Error ? error.message : "来源检查失败",
+        });
+      }
+    };
+    void inspect();
+    const interval = setInterval(() => void inspect(), 30_000);
+    return () => {
+      active = false;
+      clearInterval(interval);
+    };
+  }, [
+    monitoringEnabled,
+    currentProject?.id,
+    currentProject?.importSource?.mode,
+    settings.workspaceMode,
+    onInspectLinkedSource,
+  ]);
+
+  const linkedStatusText = (status: WorkspaceSourceStatusResponse | undefined) => {
+    switch (status?.state) {
+      case "available":
+        return "来源正常";
+      case "permission-lost":
+        return "权限已失效";
+      case "moved":
+        return "来源路径已移动";
+      case "missing":
+        return "来源已移动或删除";
+      case "replaced":
+        return "原路径已被其他目录替换";
+      case "unsupported":
+        return "当前连接无法检查来源";
+      default:
+        return "正在检查来源";
+    }
+  };
 
   const handleSelect = (projectId: string) => {
     switchProject(projectId);
@@ -229,6 +302,79 @@ export default function ProjectDrawer({
     }
   };
 
+  const summarizeCopyPreview = (
+    direction: "reimport" | "write-back",
+    preview: Awaited<ReturnType<typeof previewCopySource>>
+  ) => {
+    const counts = preview.changes.reduce(
+      (value, change) => ({ ...value, [change.status]: value[change.status] + 1 }),
+      { A: 0, M: 0, D: 0 }
+    );
+    const decision =
+      preview.decision === "conflict"
+        ? "受管副本和原始来源都已修改，继续会覆盖其中一侧。"
+        : preview.decision === "workspace-ahead"
+          ? direction === "reimport"
+            ? "受管副本有新修改，重新导入会覆盖这些修改。"
+            : "原始来源未变化，可以写回受管副本。"
+          : preview.decision === "source-ahead"
+            ? direction === "write-back"
+              ? "原始来源有新修改，写回会覆盖这些修改。"
+              : "受管副本未变化，可以重新导入来源。"
+            : "两侧内容一致。";
+    const examples = preview.changes
+      .slice(0, 6)
+      .map((change) => `${change.status} ${change.path}`)
+      .join("\n");
+    return `${decision}\n\n新增 ${counts.A}，修改 ${counts.M}，删除 ${counts.D}${examples ? `\n\n${examples}` : ""}`;
+  };
+
+  const handleCopySourceAction = async (project: Project, direction: "reimport" | "write-back") => {
+    setIsImporting(true);
+    try {
+      const preview = await previewCopySource(project.id, direction);
+      const title = direction === "reimport" ? "重新导入预览" : "写回原始来源预览";
+      Alert.alert(title, summarizeCopyPreview(direction, preview), [
+        { text: "取消", style: "cancel" },
+        {
+          text: direction === "reimport" ? "确认重新导入" : "确认写回",
+          style: preview.changes.length ? "destructive" : "default",
+          onPress: () => {
+            setIsImporting(true);
+            void applyCopySource(project.id, direction, true)
+              .then(() => Alert.alert("来源同步完成", "写入与快照校验均已完成。"))
+              .catch(showImportError)
+              .finally(() => setIsImporting(false));
+          },
+        },
+      ]);
+    } catch (error) {
+      showImportError(error);
+    } finally {
+      setIsImporting(false);
+    }
+  };
+
+  const handleGitWriteBack = (project: Project) => {
+    Alert.alert(
+      "提交并推送 Git 项目",
+      `将先暂存全部修改，创建提交“${gitCommitMessage.trim()}”，再推送 origin。不会使用文件覆盖协议。`,
+      [
+        { text: "取消", style: "cancel" },
+        {
+          text: "提交并推送",
+          onPress: () => {
+            setIsImporting(true);
+            void commitAndPushGitProject(project.id, settings, gitCommitMessage)
+              .then((head) => Alert.alert("推送完成", `HEAD ${head.slice(0, 12)}`))
+              .catch(showImportError)
+              .finally(() => setIsImporting(false));
+          },
+        },
+      ]
+    );
+  };
+
   const renderItem = ({ item }: { item: Project }) => {
     const isActive = currentProject?.id === item.id;
     return (
@@ -254,6 +400,64 @@ export default function ProjectDrawer({
                   ? "开发机绑定 · daemon 模式直接修改原目录"
                   : "Git · commit/push 回写"}
             </Text>
+          ) : null}
+          {isActive && item.importSource?.mode === "linked" ? (
+            <View style={styles.linkedStatusRow}>
+              <Text
+                style={[
+                  styles.sourceStatus,
+                  linkedSourceStatus?.state !== "available" && styles.sourceStatusWarning,
+                ]}
+              >
+                {linkedStatusText(linkedSourceStatus)}
+              </Text>
+              <TouchableOpacity
+                style={styles.sourceActionBtn}
+                onPress={() =>
+                  void onInspectLinkedSource(item.id)
+                    .then(setLinkedSourceStatus)
+                    .catch(showImportError)
+                }
+              >
+                <Text style={styles.sourceActionText}>重新检查</Text>
+              </TouchableOpacity>
+            </View>
+          ) : null}
+          {isActive && item.importSource?.mode === "copy" ? (
+            <View style={styles.sourceActions}>
+              <TouchableOpacity
+                style={styles.sourceActionBtn}
+                onPress={() => void handleCopySourceAction(item, "reimport")}
+                disabled={isImporting}
+              >
+                <Text style={styles.sourceActionText}>预览重新导入</Text>
+              </TouchableOpacity>
+              <TouchableOpacity
+                style={styles.sourceActionBtn}
+                onPress={() => void handleCopySourceAction(item, "write-back")}
+                disabled={isImporting}
+              >
+                <Text style={styles.sourceActionText}>预览写回来源</Text>
+              </TouchableOpacity>
+            </View>
+          ) : null}
+          {isActive && item.importSource?.mode === "git" ? (
+            <View style={styles.gitWriteBack}>
+              <TextInput
+                style={styles.gitMessageInput}
+                value={gitCommitMessage}
+                onChangeText={setGitCommitMessage}
+                placeholder="Git commit message"
+                placeholderTextColor="#636366"
+              />
+              <TouchableOpacity
+                style={styles.sourceActionBtn}
+                onPress={() => handleGitWriteBack(item)}
+                disabled={isImporting || !gitCommitMessage.trim()}
+              >
+                <Text style={styles.sourceActionText}>提交并推送</Text>
+              </TouchableOpacity>
+            </View>
           ) : null}
         </View>
         {isActive && <Text style={styles.checkmark}>✓</Text>}
@@ -483,6 +687,48 @@ const styles = StyleSheet.create({
     color: "#8E8E93",
     fontSize: 11,
     marginTop: 2,
+  },
+  sourceActions: {
+    flexDirection: "row",
+    gap: 8,
+    marginTop: 8,
+  },
+  linkedStatusRow: {
+    alignItems: "center",
+    flexDirection: "row",
+    gap: 8,
+    marginTop: 8,
+  },
+  sourceStatus: {
+    color: "#30D158",
+    fontSize: 11,
+  },
+  sourceStatusWarning: {
+    color: "#FF9F0A",
+  },
+  sourceActionBtn: {
+    alignSelf: "flex-start",
+    backgroundColor: "#3A3A3C",
+    borderRadius: 6,
+    paddingHorizontal: 9,
+    paddingVertical: 6,
+  },
+  sourceActionText: {
+    color: "#0A84FF",
+    fontSize: 12,
+    fontWeight: "600",
+  },
+  gitWriteBack: {
+    gap: 6,
+    marginTop: 8,
+  },
+  gitMessageInput: {
+    backgroundColor: "#1C1C1E",
+    borderRadius: 6,
+    color: "#FFFFFF",
+    fontSize: 12,
+    paddingHorizontal: 9,
+    paddingVertical: 6,
   },
   checkmark: {
     color: "#007AFF",

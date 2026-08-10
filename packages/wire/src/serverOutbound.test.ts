@@ -27,6 +27,16 @@ describe("ServerOutbound", () => {
       workspaceGeneration: 3,
       _reqId: "release-1",
     },
+    {
+      type: "workspace-source-status",
+      _reqId: "source-1",
+      projectId: "10ed836e-ae48-4d67-9e26-a74cbf55a52e",
+      state: "moved",
+      checkedAt: 123,
+      canonicalLocator: "/old/project",
+      resolvedLocator: "/new/project",
+      stableFileId: "1:42",
+    },
     { type: "sessions-list", sessions: [{ session_id: "s1" }] },
     { type: "session-deleted", sessionId: "s1", success: true },
     { type: "project-workspace-deleted", projectId: "p1", success: false, error: "no sessions" },
@@ -75,6 +85,15 @@ describe("ServerOutbound", () => {
     expect(ServerOutbound.safeParse({ type: "session-deleted", sessionId: "s1" }).success).toBe(
       false
     ); // 缺 success
+    expect(
+      ServerOutbound.safeParse({
+        type: "workspace-source-status",
+        projectId: "10ed836e-ae48-4d67-9e26-a74cbf55a52e",
+        state: "unknown",
+        checkedAt: 123,
+        _reqId: "source-1",
+      }).success
+    ).toBe(false);
   });
 
   it("session carries eventEpoch/currentSeq; resync-required round-trips (P14)", () => {

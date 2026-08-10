@@ -30,6 +30,7 @@ interface InspectedArchiveEntry {
 
 export interface InspectedArchive {
   entries: InspectedArchiveEntry[];
+  manifest: MobileImportManifestEntry[];
   snapshot: string;
   expandedBytes: number;
   fileCount: number;
@@ -170,10 +171,10 @@ export async function inspectZipArchive(bytes: Uint8Array): Promise<InspectedArc
   }
   manifest.sort((a, b) => a.path.localeCompare(b.path));
   const snapshot = await digestStringAsync(CryptoDigestAlgorithm.SHA256, JSON.stringify(manifest));
-  return { entries, snapshot, expandedBytes, fileCount: files.size };
+  return { entries, manifest, snapshot, expandedBytes, fileCount: files.size };
 }
 
-function writeArchiveToDirectory(archive: InspectedArchive, destination: Directory): void {
+export function writeArchiveToDirectory(archive: InspectedArchive, destination: Directory): void {
   for (const entry of archive.entries) {
     const segments = entry.path.split("/");
     if (!entry.data) {

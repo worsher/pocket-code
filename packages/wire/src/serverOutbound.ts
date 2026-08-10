@@ -134,6 +134,18 @@ export const WorkspaceImportResultMsg = z.object({
   error: z.string().optional(),
 });
 
+export const WorkspaceSourceStatusMsg = z.object({
+  type: z.literal("workspace-source-status"),
+  _reqId: z.string(),
+  projectId: z.string().uuid(),
+  state: z.enum(["available", "permission-lost", "moved", "missing", "replaced", "unsupported"]),
+  checkedAt: z.number().int().nonnegative(),
+  canonicalLocator: z.string().optional(),
+  resolvedLocator: z.string().optional(),
+  stableFileId: z.string().optional(),
+  error: z.string().optional(),
+});
+
 export const ServerErrorMsg = z.object({
   type: z.literal("error"),
   error: z.string(),
@@ -154,6 +166,7 @@ export const ServerOutbound = z.union([
   SessionDeletedMsg,
   ProjectWorkspaceDeletedMsg,
   WorkspaceImportResultMsg,
+  WorkspaceSourceStatusMsg,
   ServerErrorMsg,
   ResyncRequiredMsg,
 ]);

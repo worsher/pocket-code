@@ -1,7 +1,7 @@
 import { randomUUID } from "crypto";
-import { homedir } from "os";
 import { basename, isAbsolute, join, relative, resolve } from "path";
-import { mkdir, realpath, rm, stat } from "fs/promises";
+import { constants } from "fs";
+import { access, mkdir, realpath, rm, stat } from "fs/promises";
 import {
   getManagedWorkspaceRelativeRoots,
   runImportPipeline,
@@ -40,6 +40,16 @@ export type LinkedDirectoryImportResult = ImportPipelineResult<
   LinkedDirectoryProbe,
   LinkedDirectoryCommit
 >;
+
+export interface LinkedDirectorySourceStatus {
+  projectId: string;
+  state: "available" | "permission-lost" | "moved" | "missing" | "replaced" | "unsupported";
+  checkedAt: number;
+  canonicalLocator?: string;
+  resolvedLocator?: string;
+  stableFileId?: string;
+  error?: string;
+}
 
 function dataRoot(): string {
   return getServerV2Root();
@@ -141,4 +151,59 @@ export async function bindLinkedDirectory(args: {
       },
     },
   });
+}
+
+/** Revalidates a linked directory without searching or touching unrelated paths. */
+export async function inspectLinkedDirectorySource(
+  project: WorkspaceProjectRecord
+): Promise<LinkedDirectorySourceStatus> {
+  const checkedAt = Date.now();
+  const source = project.importSource;
+  const canonicalLocator = source?.canonicalLocator ?? project.worktreePath;
+  if (source?.mode !== "linked" || source.sourceKind !== "directory" || !canonicalLocator) {
+    return { projectId: project.projectId, state: "unsupported", checkedAt };
+  }
+  try {
+    const resolvedLocator = await realpath(canonicalLocator);
+    await access(resolvedLocator, constants.R_OK | constants.W_OK);
+    const info = await stat(resolvedLocator);
+    if (!info.isDirectory()) {
+      return {
+        projectId: project.projectId,
+        state: "replaced",
+        checkedAt,
+        canonicalLocator,
+        resolvedLocator,
+      };
+    }
+    const stableFileId = `${info.dev}:${info.ino}`;
+    if (stableFileId !== source.importedSnapshot) {
+      return {
+        projectId: project.projectId,
+        state: "replaced",
+        checkedAt,
+        canonicalLocator,
+        resolvedLocator,
+        stableFileId,
+      };
+    }
+    return {
+      projectId: project.projectId,
+      state: resolve(resolvedLocator) === resolve(canonicalLocator) ? "available" : "moved",
+      checkedAt,
+      canonicalLocator,
+      resolvedLocator,
+      stableFileId,
+    };
+  } catch (error) {
+    const code =
+      error && typeof error === "object" && "code" in error ? String(error.code) : undefined;
+    return {
+      projectId: project.projectId,
+      state: code === "EACCES" || code === "EPERM" ? "permission-lost" : "missing",
+      checkedAt,
+      canonicalLocator,
+      error: error instanceof Error ? error.message : "Linked source is unavailable",
+    };
+  }
 }

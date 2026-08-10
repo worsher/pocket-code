@@ -626,6 +626,10 @@ export function useAgent({
       conn.releaseWorkspaceWriter(args),
     [conn]
   );
+  const inspectWorkspaceSource = useCallback(
+    (projectId: string) => conn.inspectWorkspaceSource(projectId),
+    [conn]
+  );
   const bindLinkedWorkspace = useCallback(
     (args: {
       projectId: string;
@@ -945,6 +949,7 @@ export function useAgent({
     requestSyncPull,
     requestSyncFile,
     releaseWorkspaceWriter,
+    inspectWorkspaceSource,
     bindLinkedWorkspace,
     deleteProjectWorkspace,
   };

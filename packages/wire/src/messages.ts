@@ -185,6 +185,12 @@ export const BindLinkedWorkspaceMessage = z.object({
   _reqId: z.string().min(1).max(128),
 });
 
+export const InspectWorkspaceSourceMessage = z.object({
+  type: z.literal("workspace-source-inspect"),
+  projectId: z.string().uuid(),
+  _reqId: z.string().min(1).max(128),
+});
+
 /** Discriminated union of all valid business messages */
 export const WsMessage = z.discriminatedUnion("type", [
   RegisterMessage,
@@ -204,6 +210,7 @@ export const WsMessage = z.discriminatedUnion("type", [
   SyncFileMessage,
   ReleaseWorkspaceWriterMessage,
   BindLinkedWorkspaceMessage,
+  InspectWorkspaceSourceMessage,
 ]);
 
 export type WsMessageType = z.infer<typeof WsMessage>;

@@ -33,7 +33,7 @@ import {
   type WorkspaceSessionScopeType,
 } from "@pocket-code/wire";
 import { handleSyncPull, handleSyncFile } from "./sync/syncHandler.js";
-import { bindLinkedDirectory } from "./linkedImport.js";
+import { bindLinkedDirectory, inspectLinkedDirectorySource } from "./linkedImport.js";
 import { getSessionStream, type SessionEventStream } from "./eventBuffer.js";
 import { rm } from "fs/promises";
 import { join } from "path";
@@ -457,6 +457,38 @@ export function createMessageHandler(
                 error: error?.message ?? "Linked workspace binding failed.",
               });
             }
+            break;
+          }
+
+          case "workspace-source-inspect": {
+            if (!auth || !options?.allowLinkedWorkspaceBinding || replicaKind !== "dev-binding") {
+              send({
+                type: "workspace-source-status",
+                _reqId: msg._reqId,
+                projectId: msg.projectId,
+                state: "unsupported",
+                checkedAt: Date.now(),
+                error: "Linked source inspection requires a trusted daemon.",
+              } satisfies ServerOutboundType);
+              break;
+            }
+            const project = getWorkspaceProject(auth.userId, msg.projectId);
+            if (!project) {
+              send({
+                type: "workspace-source-status",
+                _reqId: msg._reqId,
+                projectId: msg.projectId,
+                state: "missing",
+                checkedAt: Date.now(),
+                error: "Linked project is not registered on this authority.",
+              } satisfies ServerOutboundType);
+              break;
+            }
+            send({
+              type: "workspace-source-status",
+              _reqId: msg._reqId,
+              ...(await inspectLinkedDirectorySource(project)),
+            } satisfies ServerOutboundType);
             break;
           }
 

@@ -97,12 +97,15 @@ export default function FilesTab({
       : undefined;
   const shadowSyncAvailable =
     !isLocal &&
+    currentProject?.importSource?.mode !== "git" &&
     !!projectId &&
     !!requestSyncPull &&
     !!requestSyncFile &&
     !!localWorkspaceHandle &&
     !!remoteReplica;
-  const syncAvailable = (isLocal && !!projectId && canSyncRemote(settings)) || shadowSyncAvailable;
+  const syncAvailable =
+    currentProject?.importSource?.mode !== "git" &&
+    ((isLocal && !!projectId && canSyncRemote(settings)) || shadowSyncAvailable);
 
   // 浏览源:browseLocal(影子同步后)用手机本地副本,否则用传入的远端/本地函数。
   const effectiveRequestFileList = useCallback(

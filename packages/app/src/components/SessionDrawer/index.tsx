@@ -19,7 +19,10 @@ import {
 import { useProject } from "../../contexts/ProjectContext";
 import ProjectDrawer from "../ProjectDrawer";
 import type { AppSettings } from "../../store/settings";
-import type { LinkedWorkspaceImportResponse } from "@pocket-code/client-core";
+import type {
+  LinkedWorkspaceImportResponse,
+  WorkspaceSourceStatusResponse,
+} from "@pocket-code/client-core";
 
 const SCREEN_WIDTH = Dimensions.get("window").width;
 const DRAWER_WIDTH = SCREEN_WIDTH * 0.8;
@@ -39,6 +42,7 @@ interface Props {
     path: string;
     allowWeakDuplicate?: boolean;
   }) => Promise<LinkedWorkspaceImportResponse>;
+  onInspectLinkedSource: (projectId: string) => Promise<WorkspaceSourceStatusResponse>;
 }
 
 export default function SessionDrawer({
@@ -51,6 +55,7 @@ export default function SessionDrawer({
   onDeleteWorkspace,
   settings,
   onBindLinkedWorkspace,
+  onInspectLinkedSource,
 }: Props) {
   const [sessions, setSessions] = useState<SessionInfo[]>([]);
   const slideAnim = useRef(new Animated.Value(-DRAWER_WIDTH)).current;
@@ -163,10 +168,12 @@ export default function SessionDrawer({
         <Animated.View style={[styles.drawer, { transform: [{ translateX: slideAnim }] }]}>
           {/* Project Selector */}
           <ProjectDrawer
+            monitoringEnabled={visible}
             onEditPrompt={onEditPrompt}
             onDeleteWorkspace={onDeleteWorkspace}
             settings={settings}
             onBindLinkedWorkspace={onBindLinkedWorkspace}
+            onInspectLinkedSource={onInspectLinkedSource}
           />
 
           {/* Divider */}

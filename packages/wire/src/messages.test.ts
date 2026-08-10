@@ -192,4 +192,21 @@ describe("wire — WsMessage validation", () => {
       }).success
     ).toBe(false);
   });
+
+  it("validates linked source inspection requests", () => {
+    expect(
+      WsMessage.safeParse({
+        type: "workspace-source-inspect",
+        projectId: "10ed836e-ae48-4d67-9e26-a74cbf55a52e",
+        _reqId: "source_1",
+      }).success
+    ).toBe(true);
+    expect(
+      WsMessage.safeParse({
+        type: "workspace-source-inspect",
+        projectId: "legacy-project-name",
+        _reqId: "source_1",
+      }).success
+    ).toBe(false);
+  });
 });

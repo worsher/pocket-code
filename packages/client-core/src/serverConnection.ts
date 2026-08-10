@@ -34,6 +34,18 @@ export interface WorkspaceWriterReleaseResponse {
   _reqId: string;
 }
 
+export interface WorkspaceSourceStatusResponse {
+  type: "workspace-source-status";
+  projectId: string;
+  state: "available" | "permission-lost" | "moved" | "missing" | "replaced" | "unsupported";
+  checkedAt: number;
+  canonicalLocator?: string;
+  resolvedLocator?: string;
+  stableFileId?: string;
+  error?: string;
+  _reqId: string;
+}
+
 export interface ConnectionConfig {
   getServerUrl(): string;
   isRelayMode(): boolean;
@@ -324,7 +336,8 @@ export class ServerConnection {
         data.type === "sync-manifest" ||
         data.type === "sync-file-content" ||
         data.type === "workspace-import-result" ||
-        data.type === "workspace-writer-released": {
+        data.type === "workspace-writer-released" ||
+        data.type === "workspace-source-status": {
         const resolver = data._reqId && this.resolvers.get(data._reqId);
         if (resolver) {
           resolver(data);
@@ -467,6 +480,16 @@ export class ServerConnection {
       reqId,
       30_000,
       "Linked workspace import"
+    );
+  }
+
+  inspectWorkspaceSource(projectId: string): Promise<WorkspaceSourceStatusResponse> {
+    const reqId = `source_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+    return this.request(
+      { type: "workspace-source-inspect", projectId, _reqId: reqId },
+      reqId,
+      10_000,
+      "Workspace source inspection"
     );
   }
 

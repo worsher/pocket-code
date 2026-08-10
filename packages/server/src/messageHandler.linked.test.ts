@@ -50,6 +50,36 @@ describe("linked workspace RPC authorization", () => {
     });
 
     await handler.onMessage(
+      JSON.stringify({
+        type: "workspace-source-inspect",
+        _reqId: "source-1",
+        projectId: PROJECT_ID,
+      })
+    );
+    expect(sent.at(-1)).toMatchObject({
+      type: "workspace-source-status",
+      _reqId: "source-1",
+      projectId: PROJECT_ID,
+      state: "available",
+    });
+
+    rmSync(source, { recursive: true, force: true });
+    await handler.onMessage(
+      JSON.stringify({
+        type: "workspace-source-inspect",
+        _reqId: "source-2",
+        projectId: PROJECT_ID,
+      })
+    );
+    expect(sent.at(-1)).toMatchObject({
+      type: "workspace-source-status",
+      _reqId: "source-2",
+      projectId: PROJECT_ID,
+      state: "missing",
+    });
+    mkdirSync(source, { recursive: true });
+
+    await handler.onMessage(
       JSON.stringify({ type: "delete-project-workspace", projectId: PROJECT_ID })
     );
     expect(sent.at(-1)).toMatchObject({

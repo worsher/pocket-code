@@ -13,4 +13,6 @@ export type {
   ConnectionConfig,
   ConnectionHandlers,
   LinkedWorkspaceImportResponse,
+  WorkspaceSourceStatusResponse,
+  WorkspaceWriterReleaseResponse,
 } from "./serverConnection";

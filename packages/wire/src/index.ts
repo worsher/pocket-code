@@ -18,7 +18,9 @@ export {
   GoalControlMessage,
   SyncPullMessage,
   SyncFileMessage,
+  ReleaseWorkspaceWriterMessage,
   BindLinkedWorkspaceMessage,
+  InspectWorkspaceSourceMessage,
   WsMessage,
   type WsMessageType,
 } from "./messages.js";
@@ -134,6 +136,8 @@ export {
   SessionDeletedMsg,
   ProjectWorkspaceDeletedMsg,
   WorkspaceImportResultMsg,
+  WorkspaceWriterReleasedMsg,
+  WorkspaceSourceStatusMsg,
   ServerErrorMsg,
   ResyncRequiredMsg,
   ServerOutbound,

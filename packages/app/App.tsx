@@ -176,6 +176,7 @@ function MainScreen() {
     requestSyncPull,
     requestSyncFile,
     releaseWorkspaceWriter,
+    inspectWorkspaceSource,
     bindLinkedWorkspace,
     deleteProjectWorkspace,
   } = useAgent({
@@ -577,6 +578,7 @@ function MainScreen() {
         onDeleteWorkspace={deleteProjectWorkspace}
         settings={settings}
         onBindLinkedWorkspace={bindLinkedWorkspace}
+        onInspectLinkedSource={inspectWorkspaceSource}
       />
 
       {/* Project Prompt Editor */}

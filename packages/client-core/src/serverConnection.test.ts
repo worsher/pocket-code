@@ -323,6 +323,31 @@ describe("ServerConnection", () => {
     conn.disconnect();
   });
 
+  it("correlates linked source status responses by request id", async () => {
+    const conn = new ServerConnection(makeConfig(), makeHandlers());
+    conn.connect();
+    const ws = FakeWebSocket.instances[0];
+    ws.open();
+    const projectId = "10ed836e-ae48-4d67-9e26-a74cbf55a52e";
+
+    const pending = conn.inspectWorkspaceSource(projectId);
+    const sent = JSON.parse(ws.sent.at(-1)!);
+    expect(sent).toMatchObject({ type: "workspace-source-inspect", projectId });
+    ws.receive({
+      type: "workspace-source-status",
+      _reqId: sent._reqId,
+      projectId,
+      state: "permission-lost",
+      checkedAt: 123,
+      canonicalLocator: "/Users/example/code/project",
+    });
+    await expect(pending).resolves.toMatchObject({
+      projectId,
+      state: "permission-lost",
+    });
+    conn.disconnect();
+  });
+
   it("correlates generation-guarded writer release responses", async () => {
     const conn = new ServerConnection(makeConfig(), makeHandlers());
     conn.connect();
