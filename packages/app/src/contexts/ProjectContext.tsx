@@ -1,7 +1,15 @@
 // ── Project Context ──────────────────────────────────────
 // Provides project state across the app via React Context.
 
-import React, { createContext, useContext, useState, useEffect, useCallback } from "react";
+import React, {
+  createContext,
+  useContext,
+  useState,
+  useEffect,
+  useCallback,
+  useMemo,
+} from "react";
+import type { WorkspaceHandle } from "@pocket-code/workspace-core";
 import {
   type Project,
   loadProjects,
@@ -10,10 +18,16 @@ import {
   saveCurrentProjectId,
   createProject as createProjectRecord,
 } from "../store/projects";
+import {
+  ensureMobileWorkspaceHandle,
+  getLegacyMobileWorkspaceRoot,
+} from "../services/workspaceResolver";
 
 interface ProjectContextValue {
   projects: Project[];
   currentProject: Project | null;
+  currentWorkspaceHandle: WorkspaceHandle | null;
+  currentWorkspaceRoot?: string;
   switchProject: (projectId: string) => void;
   createProject: (name: string, description?: string, gitUrl?: string) => void;
   deleteProject: (projectId: string) => void;
@@ -23,6 +37,8 @@ interface ProjectContextValue {
 const ProjectContext = createContext<ProjectContextValue>({
   projects: [],
   currentProject: null,
+  currentWorkspaceHandle: null,
+  currentWorkspaceRoot: undefined,
   switchProject: () => {},
   createProject: () => {},
   deleteProject: () => {},
@@ -39,24 +55,28 @@ export function ProjectProvider({ children }: { children: React.ReactNode }) {
   const [loaded, setLoaded] = useState(false);
 
   useEffect(() => {
-    Promise.all([loadProjects(), loadCurrentProjectId()]).then(
-      ([loadedProjects, loadedId]) => {
-        setProjects(loadedProjects);
-        setCurrentProjectId(loadedId);
-        setLoaded(true);
-      }
-    );
+    loadProjects().then(async (loadedProjects) => {
+      const loadedId = await loadCurrentProjectId(loadedProjects);
+      setProjects(loadedProjects);
+      setCurrentProjectId(loadedId);
+      setLoaded(true);
+    });
   }, []);
 
   const currentProject = projects.find((p) => p.id === currentProjectId) || projects[0] || null;
+  const currentWorkspace = useMemo(() => {
+    if (!currentProject) return { handle: null, root: undefined };
+    if (currentProject.localReplica.layout === "v2") {
+      const handle = ensureMobileWorkspaceHandle(currentProject);
+      return { handle, root: handle.worktreeRoot };
+    }
+    return { handle: null, root: getLegacyMobileWorkspaceRoot(currentProject) };
+  }, [currentProject]);
 
-  const switchProject = useCallback(
-    (projectId: string) => {
-      setCurrentProjectId(projectId);
-      saveCurrentProjectId(projectId);
-    },
-    []
-  );
+  const switchProject = useCallback((projectId: string) => {
+    setCurrentProjectId(projectId);
+    saveCurrentProjectId(projectId);
+  }, []);
 
   const createProject = useCallback(
     (name: string, description?: string, gitUrl?: string) => {
@@ -86,18 +106,15 @@ export function ProjectProvider({ children }: { children: React.ReactNode }) {
     [currentProjectId, switchProject]
   );
 
-  const updateProject = useCallback(
-    (projectId: string, updates: Partial<Project>) => {
-      setProjects((prev) => {
-        const updated = prev.map((p) =>
-          p.id === projectId ? { ...p, ...updates, updatedAt: Date.now() } : p
-        );
-        saveProjects(updated);
-        return updated;
-      });
-    },
-    []
-  );
+  const updateProject = useCallback((projectId: string, updates: Partial<Project>) => {
+    setProjects((prev) => {
+      const updated = prev.map((p) =>
+        p.id === projectId ? { ...p, ...updates, updatedAt: Date.now() } : p
+      );
+      saveProjects(updated);
+      return updated;
+    });
+  }, []);
 
   if (!loaded) return null;
 
@@ -106,6 +123,8 @@ export function ProjectProvider({ children }: { children: React.ReactNode }) {
       value={{
         projects,
         currentProject,
+        currentWorkspaceHandle: currentWorkspace.handle,
+        currentWorkspaceRoot: currentWorkspace.root,
         switchProject,
         createProject,
         deleteProject,

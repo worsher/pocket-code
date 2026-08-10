@@ -3,10 +3,11 @@
 // /phaseFor)。云端与 geek 共用同一 reducer,对外 API 面保持不变。
 import { useState, useRef, useCallback, useEffect } from "react";
 import { AppState } from "react-native";
+import type { WorkspaceHandle } from "@pocket-code/workspace-core";
 import { getModelConfig, getApiKeyField, MODELS } from "../services/modelConfig";
 import { updateSettings, type AppSettings } from "../store/settings";
 import { saveChatHistory, loadChatHistory } from "../store/chatHistory";
-import { executeLocalTool, writeLocalFile, getProjectWorkspaceRoot, getDefaultWorkspace } from "../services/localFileSystem";
+import { executeLocalTool, writeLocalFile, getDefaultWorkspace } from "../services/localFileSystem";
 import { enqueueMessage, getQueue, dequeueMessage } from "../services/offlineQueue";
 import { sendLocalNotification } from "../services/notifications";
 import {
@@ -41,6 +42,8 @@ interface UseAgentOptions {
   model?: string;
   customPrompt?: string;
   projectId?: string;
+  workspaceHandle?: WorkspaceHandle | null;
+  workspaceRoot?: string;
   /** Called when AI modifies a file (writeFile/editFile). Used by WorkspaceContext for auto-refresh. */
   onFileChanged?: (path: string, action: "created" | "modified" | "deleted") => void;
 }
@@ -77,7 +80,15 @@ const mkAssistantMsg = (): Message => ({
 });
 
 // ── Main Hook ──────────────────────────────────────────
-export function useAgent({ settings, model = "deepseek-v4-flash", customPrompt, projectId, onFileChanged }: UseAgentOptions) {
+export function useAgent({
+  settings,
+  model = "deepseek-v4-flash",
+  customPrompt,
+  projectId,
+  workspaceHandle,
+  workspaceRoot,
+  onFileChanged,
+}: UseAgentOptions) {
   const [messages, setMessages] = useState<Message[]>([]);
   const [isConnected, setIsConnected] = useState(false);
   const [isStreaming, setIsStreaming] = useState(false);
@@ -106,6 +117,8 @@ export function useAgent({ settings, model = "deepseek-v4-flash", customPrompt, 
   const modelRef = useRef(model); modelRef.current = model;
   const customPromptRef = useRef(customPrompt); customPromptRef.current = customPrompt;
   const projectIdRef = useRef(projectId); projectIdRef.current = projectId;
+  const workspaceHandleRef = useRef(workspaceHandle); workspaceHandleRef.current = workspaceHandle;
+  const workspaceRootRef = useRef(workspaceRoot); workspaceRootRef.current = workspaceRoot;
   const onFileChangedRef = useRef(onFileChanged); onFileChangedRef.current = onFileChanged;
   const workspaceModeRef = useRef(settings.workspaceMode); workspaceModeRef.current = settings.workspaceMode;
   const settingsRef = useRef(settings); settingsRef.current = settings;
@@ -319,7 +332,8 @@ export function useAgent({ settings, model = "deepseek-v4-flash", customPrompt, 
         onFileChangedRef.current?.(path, changeType);
         // local 模式:自动同步到本地(读取失败非致命,文件仍在远端)
         if (workspaceModeRef.current === "local" && projectIdRef.current && shouldSyncFile(path)) {
-          const localRoot = getProjectWorkspaceRoot(projectIdRef.current);
+          const localRoot =
+            workspaceHandleRef.current?.worktreeRoot ?? workspaceRootRef.current;
           connRef.current?.readFile(path).then((result: any) => {
             if (result?.success && result.content != null && result.content.length <= MAX_SYNC_FILE_SIZE) {
               writeLocalFile(path, result.content, localRoot);
@@ -366,7 +380,12 @@ export function useAgent({ settings, model = "deepseek-v4-flash", customPrompt, 
   const executeTool = useCallback(
     async (toolName: string, args: Record<string, unknown>): Promise<unknown> => {
       if (workspaceModeRef.current !== "server") {
-        const localResult = await executeLocalTool(toolName, args, settingsRef.current);
+        const localResult = await executeLocalTool(
+          toolName,
+          args,
+          settingsRef.current,
+          workspaceRootRef.current,
+        );
         if (localResult !== null) return localResult;
       }
       const result = await conn.execTool(toolName, args); // Termux 或 runCommand 回退
@@ -442,7 +461,10 @@ export function useAgent({ settings, model = "deepseek-v4-flash", customPrompt, 
       // (单一真相),避免该值经 runCommand/git 工具的 cwd、以及 searchFiles 拼进
       // grep 命令字符串后,泄漏一个真实 shell 不认识的虚拟路径(详见
       // deviceBackend.ts 顶部注释)。
-      const geekWorkspaceRoot = getProjectWorkspaceRoot(projectIdRef.current) ?? getDefaultWorkspace();
+      const geekWorkspaceRoot =
+        workspaceHandleRef.current?.worktreeRoot ??
+        workspaceRootRef.current ??
+        getDefaultWorkspace();
 
       const abortController = new AbortController();
       abortRef.current = abortController;
@@ -626,7 +648,7 @@ export function useAgent({ settings, model = "deepseek-v4-flash", customPrompt, 
     setCompactionNotice(null);
     setEditCutoff(0);
     setGoalState(null);
-  }, [projectId, conn]);
+  }, [projectId, workspaceHandle?.generation, workspaceRoot, conn]);
 
   // ── Cleanup ───────────────────────────────────────────
   useEffect(() => {

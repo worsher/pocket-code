@@ -1,10 +1,12 @@
 declare const projectIdBrand: unique symbol;
 declare const replicaIdBrand: unique symbol;
 declare const legacyProjectIdBrand: unique symbol;
+declare const storageKeyBrand: unique symbol;
 
 export type ProjectId = string & { readonly [projectIdBrand]: true };
 export type ReplicaId = string & { readonly [replicaIdBrand]: true };
 export type LegacyProjectId = string & { readonly [legacyProjectIdBrand]: true };
+export type StorageKey = string & { readonly [storageKeyBrand]: true };
 
 export type ReplicaKind = "mobile" | "cloud" | "dev-binding";
 export type ReplicaRole = "writer" | "mirror";
@@ -76,7 +78,7 @@ export type ReplicaLocation =
   | {
       readonly type: "managed";
       /** Catalog-assigned path segment; never derived from projectId. */
-      readonly storageKey: string;
+      readonly storageKey: StorageKey;
     }
   | {
       readonly type: "external";

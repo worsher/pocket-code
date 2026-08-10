@@ -13,6 +13,7 @@ import { PocketTerminal, getNativeLibDir } from "pocket-terminal-module";
 import KeyboardToolbar from "./KeyboardToolbar";
 import RuntimeSetup from "../RuntimeSetup";
 import { getRuntimeStatus } from "../../services/runtimeManager";
+import { getDefaultWorkspace } from "../../services/localFileSystem";
 
 // ── Types ──────────────────────────────────────
 interface TextSpan {
@@ -89,9 +90,20 @@ export interface TerminalScreenHandle {
 interface TerminalScreenProps {
     /** Called when the terminal exits or is paused. */
     onClose?: () => void;
+    /** Catalog-resolved worktree URI. */
+    workspaceRoot?: string;
 }
 
-export default function TerminalScreen({ onClose }: TerminalScreenProps) {
+function shellQuote(value: string): string {
+    return `'${value.replace(/'/g, `'\\''`)}'`;
+}
+
+function nativeWorkspacePath(workspaceRoot?: string): string {
+    const uri = workspaceRoot ?? getDefaultWorkspace();
+    return decodeURIComponent(uri.replace(/^file:\/\//, "")).replace(/\/$/, "");
+}
+
+export default function TerminalScreen({ onClose, workspaceRoot }: TerminalScreenProps) {
     const [historyData, setHistoryData] = useState<TextSpan[][]>([]);
     const [rowsData, setRowsData] = useState<TextSpan[][]>([]);
     const [cursor, setCursor] = useState({ x: 0, y: 0 });
@@ -119,6 +131,9 @@ export default function TerminalScreen({ onClose }: TerminalScreenProps) {
     const ptyStartedRef = useRef(false);
     // Prevent double proot launch (PTY effect + showSetup transition both might trigger)
     const prootLaunchedRef = useRef(false);
+    const prootLaunchGenerationRef = useRef(0);
+    const workspaceRootRef = useRef(workspaceRoot);
+    workspaceRootRef.current = workspaceRoot;
     // Adaptive poll interval: fast when user is typing, slow otherwise
     const lastInputRef = useRef(Date.now());
 
@@ -127,8 +142,14 @@ export default function TerminalScreen({ onClose }: TerminalScreenProps) {
     // prootLaunchedRef guards against duplicate launches.
     function tryLaunchProot(term: PocketTerminal) {
         if (prootLaunchedRef.current) return;
+        const launchGeneration = ++prootLaunchGenerationRef.current;
         getRuntimeStatus().then((status) => {
-            if (!status.rootfsInstalled) return;
+            if (launchGeneration !== prootLaunchGenerationRef.current) return;
+            const workspacePath = nativeWorkspacePath(workspaceRootRef.current);
+            if (!status.rootfsInstalled) {
+                term.write(`\x15cd ${shellQuote(workspacePath)}\n`);
+                return;
+            }
             const nativeLibDir = getNativeLibDir();
             if (!nativeLibDir) return;
             if (prootLaunchedRef.current) return;
@@ -144,7 +165,9 @@ export default function TerminalScreen({ onClose }: TerminalScreenProps) {
             // Launch with -l (login shell) so Alpine's /etc/profile sets correct PATH.
             // Do NOT bind Android system binaries — they need bionic libc.
             setTimeout(() => {
-                const cmd = `\x15mkdir -p "${tmpDir}" && export PROOT_TMP_DIR="${tmpDir}" && export PROOT_LOADER="${prootLoaderBin}" && "${prootBin}" -0 --rootfs="${rootfsPath}" --bind=/dev --bind=/proc --bind=/sys -w /root /bin/sh -l\n`;
+                if (launchGeneration !== prootLaunchGenerationRef.current) return;
+                const latestWorkspacePath = nativeWorkspacePath(workspaceRootRef.current);
+                const cmd = `\x15mkdir -p "${tmpDir}" && export PROOT_TMP_DIR="${tmpDir}" && export PROOT_LOADER="${prootLoaderBin}" && "${prootBin}" -0 --rootfs="${rootfsPath}" --bind=/dev --bind=/proc --bind=/sys --bind=${shellQuote(latestWorkspacePath)}:/workspace -w /workspace /bin/sh -l\n`;
                 term.write(cmd);
             }, 400);
         }).catch(() => {/* ignore */});
@@ -220,6 +243,22 @@ export default function TerminalScreen({ onClose }: TerminalScreenProps) {
         };
         // eslint-disable-next-line react-hooks/exhaustive-deps
     }, []);
+
+    // A project switch invalidates the old proot bind. Exit to the Android
+    // shell and relaunch with the new catalog-resolved worktree.
+    const previousWorkspaceRootRef = useRef(workspaceRoot);
+    useEffect(() => {
+        if (previousWorkspaceRootRef.current === workspaceRoot) return;
+        previousWorkspaceRootRef.current = workspaceRoot;
+        const term = termRef.current;
+        if (!term || !ptyStartedRef.current) return;
+        if (prootLaunchedRef.current) term.write("\x15exit\n");
+        prootLaunchGenerationRef.current += 1;
+        prootLaunchedRef.current = false;
+        const timer = setTimeout(() => tryLaunchProot(term), 200);
+        return () => clearTimeout(timer);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, [workspaceRoot]);
 
     // When RuntimeSetup completes (showSetup → false), try to enter Alpine shell.
     // This handles the case where rootfs was just installed for the first time:

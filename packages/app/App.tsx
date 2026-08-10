@@ -25,7 +25,7 @@ import ChatInput from "./src/components/ChatInput";
 import SettingsScreen from "./src/components/Settings/SettingsScreen";
 import SessionDrawer from "./src/components/SessionDrawer";
 import FileExplorer from "./src/components/FileExplorer";
-import { listLocalFiles, readLocalFile, writeLocalFile, getProjectWorkspaceRoot } from "./src/services/localFileSystem";
+import { listLocalFiles, readLocalFile, writeLocalFile } from "./src/services/localFileSystem";
 import QuickActions from "./src/components/QuickActions";
 import SearchDialog from "./src/components/SearchDialog";
 import TerminalScreen from "./src/components/TerminalScreen";
@@ -85,7 +85,7 @@ function MainScreen() {
     requestNotificationPermissions();
   }, []);
 
-  const { currentProject } = useProject();
+  const { currentProject, currentWorkspaceHandle, currentWorkspaceRoot } = useProject();
   const { pushFileChange, pendingFilePath, pendingPreviewUrl, clearPendingPreview } = useWorkspace();
 
   // Auto-switch to Files tab when navigateToFile is called from chat
@@ -140,7 +140,15 @@ function MainScreen() {
     requestSyncPull,
     requestSyncFile,
     deleteProjectWorkspace,
-  } = useAgent({ settings, model: currentModel, customPrompt: currentProject?.customPrompt, projectId: currentProject?.id, onFileChanged: handleFileChanged });
+  } = useAgent({
+    settings,
+    model: currentModel,
+    customPrompt: currentProject?.customPrompt,
+    projectId: currentProject?.id,
+    workspaceHandle: currentWorkspaceHandle,
+    workspaceRoot: currentWorkspaceRoot,
+    onFileChanged: handleFileChanged,
+  });
 
   const listRef = useRef<FlatList>(null);
   const appStateRef = useRef<AppStateStatus>(AppState.currentState);
@@ -165,7 +173,14 @@ function MainScreen() {
     }
     connect();
     return () => disconnect();
-  }, [settingsLoaded, needsAutoConnect, connect]);
+  }, [
+    settingsLoaded,
+    needsAutoConnect,
+    connect,
+    disconnect,
+    currentProject?.id,
+    currentWorkspaceHandle?.generation,
+  ]);
 
   // Auto-reconnect when app comes back to foreground
   useEffect(() => {
@@ -245,8 +260,8 @@ function MainScreen() {
   const selectedModel = AVAILABLE_MODELS.find((m) => m.key === currentModel);
   const isGeek = settings.mode === "geek";
 
-  // Project-specific local workspace root
-  const localWorkspaceRoot = getProjectWorkspaceRoot(currentProject?.id);
+  // Project-specific local workspace root resolved from the catalog.
+  const localWorkspaceRoot = currentWorkspaceRoot;
 
   // Don't render until settings loaded
   if (!settingsLoaded) {
@@ -445,7 +460,7 @@ function MainScreen() {
             behavior="padding"
             keyboardVerticalOffset={insets.top}
           >
-            <TerminalScreen />
+            <TerminalScreen workspaceRoot={localWorkspaceRoot} />
           </KeyboardAvoidingView>
         )}
 
@@ -467,12 +482,17 @@ function MainScreen() {
             workspaceMode={settings.workspaceMode}
             settings={settings}
             projectId={currentProject?.id}
+            localWorkspaceRoot={localWorkspaceRoot}
           />
         </View>
 
         {/* ── Preview Tab ── */}
         <View style={[styles.flex1, activeTab !== "preview" && styles.hidden]}>
-          <PreviewTab initialUrl={previewUrl} settings={settings} projectId={currentProject?.id} />
+          <PreviewTab
+            initialUrl={previewUrl}
+            settings={settings}
+            workspaceRoot={localWorkspaceRoot}
+          />
         </View>
       </View>
 

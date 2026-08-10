@@ -13,6 +13,7 @@
   },
   "dependencies": {
     "@pocket-code/agent-core": "workspace:*",
+    "@pocket-code/workspace-core": "workspace:*",
     "@react-native-async-storage/async-storage": "^2.2.0",
     "@react-native-community/netinfo": "^11.4.1",
     "buffer": "^6.0.3",
@@ -21,6 +22,7 @@
     "expo-build-properties": "^55.0.10",
     "expo-clipboard": "^8.0.8",
     "expo-constants": "^18.0.13",
+    "expo-crypto": "~15.0.8",
     "expo-document-picker": "^13.0.5",
     "expo-file-system": "^19.0.21",
     "expo-image-picker": "^17.0.10",

@@ -6,7 +6,6 @@
 import {
   writeLocalFileBase64,
   deleteLocalFile,
-  getProjectWorkspaceRoot,
   getDefaultWorkspace,
 } from "./localFileSystem";
 
@@ -35,6 +34,8 @@ export interface PullDeps {
   requestSyncFile: (commit: string, path: string) => Promise<SyncFileContent>;
   /** 当前项目 id(决定写入哪个工作区);default/空→共享工作区。 */
   projectId?: string;
+  /** Catalog-resolved target worktree. Never derive it from projectId. */
+  workspaceRoot?: string;
   /** 上次同步到的 commit(增量基准);为空则全量拉取。 */
   sinceCommit?: string | null;
   onProgress?: (msg: string) => void;
@@ -54,8 +55,8 @@ export interface PullResult {
  * 从开发机拉取代码到手机本地工作区。
  */
 export async function pullFromDevMachine(deps: PullDeps): Promise<PullResult> {
-  const { requestSyncPull, requestSyncFile, projectId, sinceCommit, onProgress } = deps;
-  const workspaceRoot = getProjectWorkspaceRoot(projectId) ?? getDefaultWorkspace();
+  const { requestSyncPull, requestSyncFile, workspaceRoot, sinceCommit, onProgress } = deps;
+  const targetRoot = workspaceRoot ?? getDefaultWorkspace();
   try {
     const manifest = await requestSyncPull(sinceCommit ?? undefined);
     let applied = 0;
@@ -64,7 +65,7 @@ export async function pullFromDevMachine(deps: PullDeps): Promise<PullResult> {
 
     for (const f of manifest.files) {
       if (f.status === "D") {
-        await deleteLocalFile(f.path, workspaceRoot);
+        await deleteLocalFile(f.path, targetRoot);
         deleted++;
         onProgress?.(`− ${f.path}`);
         continue;
@@ -75,7 +76,7 @@ export async function pullFromDevMachine(deps: PullDeps): Promise<PullResult> {
         continue;
       }
       // sync-file-content 为 base64;直接写解码字节(文本+二进制均正确)。
-      const w = await writeLocalFileBase64(f.path, res.content, workspaceRoot);
+      const w = await writeLocalFileBase64(f.path, res.content, targetRoot);
       if (w.success) {
         applied++;
         onProgress?.(`✓ ${f.path}`);

@@ -13,18 +13,18 @@ import { maybeRewriteToTunnel } from "./tunnelUrl";
 import { createBuildSession } from "../../services/previewBuilder/orchestrator";
 import { createExpoIo } from "../../services/previewBuilder/ioExpo";
 import { ensureBuilderAssets } from "../../services/previewBuilder/assets";
-import { getProjectWorkspaceRoot, getDefaultWorkspace } from "../../services/localFileSystem";
+import { getDefaultWorkspace } from "../../services/localFileSystem";
 
 interface Props {
   /** URL to load initially, set externally when a dev server is detected */
   initialUrl?: string;
   /** App 设置:relay 模式下用于构造中继隧道预览 URL */
   settings?: AppSettings;
-  /** 当前项目 id:本地构建的工作区定位(getProjectWorkspaceRoot) */
-  projectId?: string;
+  /** Catalog-resolved local worktree URI. */
+  workspaceRoot?: string;
 }
 
-export default function PreviewTab({ initialUrl, settings, projectId }: Props) {
+export default function PreviewTab({ initialUrl, settings, workspaceRoot }: Props) {
   const [url, setUrl] = useState(initialUrl || "http://localhost:3000");
   const [inputUrl, setInputUrl] = useState(url);
   const [loading, setLoading] = useState(false);
@@ -93,8 +93,6 @@ export default function PreviewTab({ initialUrl, settings, projectId }: Props) {
   const builderRef = useRef<WebView>(null);
   const sessionRef = useRef<ReturnType<typeof createBuildSession> | null>(null);
   const initDoneRef = useRef(false);
-
-  const workspaceRoot = getProjectWorkspaceRoot(projectId);
 
   const teardownBuilder = useCallback(() => {
     sessionRef.current?.cancelled();

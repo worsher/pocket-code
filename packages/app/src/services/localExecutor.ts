@@ -11,6 +11,7 @@ import { requireNativeModule } from "expo-modules-core";
 import { Paths, Directory } from "expo-file-system";
 import { getRuntimeStatus, buildProotCommand } from "./runtimeManager";
 import { startNativeProcess } from "./processManager";
+import { normalizeWorkspaceRelativePath } from "@pocket-code/workspace-core";
 
 // ── Types ─────────────────────────────────────────────────────────────────────
 
@@ -30,6 +31,8 @@ export interface ExecOptions {
     env?: Record<string, string>;
     /** stdout 字符数上限，超过则截断，默认 10000 */
     maxStdoutLength?: number;
+    /** Catalog-resolved worktree URI/path. */
+    workspaceRoot?: string;
 }
 
 // ── Config ────────────────────────────────────────────────────────────────────
@@ -42,20 +45,32 @@ const DEFAULT_MAX_STDOUT = 10_000;
 /**
  * 获取 workspace 根目录（绝对路径，不带 file:// 前缀）。
  */
-export function getWorkspaceDir(): string {
-    return new Directory(Paths.document.uri || "", "workspace").uri.replace("file://", "");
+export function getWorkspaceDir(workspaceRoot?: string): string {
+    const uri = workspaceRoot ?? new Directory(Paths.document.uri || "", "workspace").uri;
+    return decodeURIComponent(uri.replace(/^file:\/\//, ""));
 }
 
 /**
  * 将用户传入的 cwd（可能是相对路径）解析为绝对路径。
  * 相对路径相对于 workspace 根目录。
  */
-function resolveCwd(cwd?: string): string {
+function resolveCwd(cwd?: string, workspaceRoot?: string): string {
     // Strip trailing slash from workspace dir (Directory.uri may include one)
-    const workspace = getWorkspaceDir().replace(/\/$/, "");
+    const workspace = getWorkspaceDir(workspaceRoot).replace(/\/$/, "");
     if (!cwd || cwd === ".") return workspace;
-    if (cwd.startsWith("/")) return cwd;
-    return `${workspace}/${cwd}`;
+    if (cwd.startsWith("/")) {
+        const absolute = cwd.replace(/\/$/, "");
+        if (absolute === workspace) return workspace;
+        if (!absolute.startsWith(`${workspace}/`)) {
+            throw new Error("Command cwd is outside the workspace");
+        }
+        const safeSuffix = normalizeWorkspaceRelativePath(
+            absolute.slice(workspace.length + 1)
+        );
+        return safeSuffix === "." ? workspace : `${workspace}/${safeSuffix}`;
+    }
+    const safeCwd = normalizeWorkspaceRelativePath(cwd);
+    return safeCwd === "." ? workspace : `${workspace}/${safeCwd}`;
 }
 
 // ── Public API ────────────────────────────────────────────────────────────────
@@ -79,9 +94,10 @@ export async function exec(
     const {
         timeout = DEFAULT_TIMEOUT_MS,
         maxStdoutLength = DEFAULT_MAX_STDOUT,
+        workspaceRoot,
     } = options;
 
-    const resolvedCwd = resolveCwd(cwd);
+    const resolvedCwd = resolveCwd(cwd, workspaceRoot);
 
     // Check runtime availability
     const status = await getRuntimeStatus();
@@ -142,9 +158,10 @@ export async function exec(
  */
 export async function startBackgroundExec(
     command: string,
-    cwd?: string
+    cwd?: string,
+    workspaceRoot?: string,
 ): Promise<{ success: boolean; processId?: number; error?: string }> {
-    const resolvedCwd = resolveCwd(cwd);
+    const resolvedCwd = resolveCwd(cwd, workspaceRoot);
 
     const status = await getRuntimeStatus();
     const useProot = status.prootAvailable && status.rootfsInstalled;

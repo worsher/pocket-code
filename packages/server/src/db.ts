@@ -2,7 +2,16 @@ import initSqlJs, { type Database as SqlJsDatabase } from "sql.js";
 import { join, resolve, dirname } from "path";
 import { homedir } from "os";
 import { mkdirSync, readFileSync, writeFileSync, existsSync } from "fs";
+import { randomUUID } from "crypto";
 import type { CoreMessage } from "@pocket-code/agent-core";
+import {
+  createReplicaId,
+  createStorageKey,
+  parseProjectId,
+  parseReplicaId,
+  parseStorageKey,
+  type UuidFactory,
+} from "@pocket-code/workspace-core";
 
 // ── Database setup ──────────────────────────────────────
 
@@ -57,6 +66,22 @@ export async function initDb(): Promise<void> {
     // Column already exists — safe to ignore
   }
   db.run(`CREATE INDEX IF NOT EXISTS idx_sessions_project ON sessions(project_id);`);
+
+  // Workspace Storage v2 catalog. Physical storage keys are random and scoped
+  // by the (user_id, project_id) catalog row; client IDs never become paths.
+  db.run(`
+    CREATE TABLE IF NOT EXISTS workspace_projects (
+      user_id TEXT NOT NULL,
+      project_id TEXT NOT NULL,
+      replica_id TEXT NOT NULL,
+      storage_key TEXT NOT NULL UNIQUE,
+      generation INTEGER NOT NULL DEFAULT 1,
+      created_at INTEGER NOT NULL,
+      updated_at INTEGER NOT NULL,
+      PRIMARY KEY (user_id, project_id)
+    );
+  `);
+  db.run(`CREATE INDEX IF NOT EXISTS idx_workspace_projects_user ON workspace_projects(user_id);`);
 
   // User quotas table
   db.run(`
@@ -115,6 +140,16 @@ export interface SessionInfo {
   title: string;
   modelKey: string;
   messageCount: number;
+  createdAt: number;
+  updatedAt: number;
+}
+
+export interface WorkspaceProjectRecord {
+  userId: string;
+  projectId: string;
+  replicaId: string;
+  storageKey: string;
+  generation: number;
   createdAt: number;
   updatedAt: number;
 }
@@ -243,6 +278,61 @@ export function cleanupOldSessions(maxAgeDays: number = 7): number {
   const changes = db.getRowsModified();
   if (changes > 0) persist();
   return changes;
+}
+
+// ── Workspace Storage v2 catalog ───────────────────────
+
+export function getWorkspaceProject(
+  userId: string,
+  projectId: string
+): WorkspaceProjectRecord | null {
+  const stmt = db.prepare(
+    `SELECT user_id, project_id, replica_id, storage_key, generation, created_at, updated_at
+     FROM workspace_projects
+     WHERE user_id = ? AND project_id = ?`
+  );
+  stmt.bind([userId, projectId]);
+  if (!stmt.step()) {
+    stmt.free();
+    return null;
+  }
+  const row = stmt.getAsObject();
+  stmt.free();
+  return {
+    userId: row.user_id as string,
+    projectId: row.project_id as string,
+    replicaId: parseReplicaId(row.replica_id as string),
+    storageKey: parseStorageKey(row.storage_key as string),
+    generation: row.generation as number,
+    createdAt: row.created_at as number,
+    updatedAt: row.updated_at as number,
+  };
+}
+
+export function ensureWorkspaceProject(
+  userId: string,
+  projectId: string,
+  uuidFactory: UuidFactory = randomUUID
+): WorkspaceProjectRecord {
+  if (!userId) throw new Error("User ID is required for a v2 workspace");
+  const safeProjectId = parseProjectId(projectId);
+  const existing = getWorkspaceProject(userId, safeProjectId);
+  if (existing) return existing;
+
+  const now = Date.now();
+  const replicaId = createReplicaId(uuidFactory);
+  const storageKey = createStorageKey(uuidFactory);
+  db.run(
+    `INSERT OR IGNORE INTO workspace_projects
+       (user_id, project_id, replica_id, storage_key, generation, created_at, updated_at)
+     VALUES (?, ?, ?, ?, 1, ?, ?)`,
+    [userId, safeProjectId, replicaId, storageKey, now, now]
+  );
+  if (db.getRowsModified() > 0) persist();
+
+  const created = getWorkspaceProject(userId, safeProjectId);
+  if (!created) throw new Error("Failed to create workspace project catalog entry");
+  return created;
 }
 
 // ── User Quotas ─────────────────────────────────────────

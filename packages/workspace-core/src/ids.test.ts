@@ -2,9 +2,11 @@ import { describe, expect, it } from "vitest";
 import {
   createProjectId,
   createReplicaId,
+  createStorageKey,
   isUuid,
   parseLegacyProjectId,
   parseProjectId,
+  parseStorageKey,
 } from "./ids.js";
 
 const PROJECT_UUID = "018f00d2-8931-7bc0-aad1-1ec83b13f982";
@@ -32,5 +34,10 @@ describe("workspace IDs", () => {
     expect(parseLegacyProjectId("proj_123:mobile")).toBe("proj_123:mobile");
     expect(() => parseLegacyProjectId("../default")).toThrow("legacy project ID");
     expect(() => parseLegacyProjectId("a/b")).toThrow("legacy project ID");
+  });
+
+  it("creates independent path-safe storage keys", () => {
+    const key = createStorageKey(() => REPLICA_UUID);
+    expect(parseStorageKey(key)).toBe("ws_550e8400e29b41d4a716446655440000");
   });
 });

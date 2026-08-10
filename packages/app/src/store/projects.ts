@@ -1,69 +1,68 @@
 // ── Project Data Store ────────────────────────────────────
-// Manages multiple projects with persistent storage.
+// AsyncStorage adapter for the versioned mobile project catalog.
 
 import AsyncStorage from "@react-native-async-storage/async-storage";
+import { randomUUID } from "expo-crypto";
+import {
+  createProject as createCatalogProject,
+  resolveStoredCurrentProjectId,
+  upgradeProjectCatalog,
+  type Project,
+  type ProjectIdFactories,
+} from "./projectCatalog";
 
 const STORAGE_KEY = "pocket-code:projects";
 const CURRENT_KEY = "pocket-code:current-project";
 
-export interface Project {
-  id: string;
-  name: string;
-  description: string;
-  gitUrl?: string;
-  lastSessionId?: string;
-  customPrompt?: string;
-  lastSyncTime?: number;
-  /** 上次代码同步到的影子快照 commit(增量同步基准)。 */
-  lastSyncedCommit?: string;
-  cloudProjectId?: string;
-  createdAt: number;
-  updatedAt: number;
-}
+export type { Project } from "./projectCatalog";
 
-const DEFAULT_PROJECT: Project = {
-  id: "default",
-  name: "Default",
-  description: "默认项目",
-  createdAt: Date.now(),
-  updatedAt: Date.now(),
+const RUNTIME_FACTORIES: ProjectIdFactories = {
+  projectUuid: randomUUID,
+  replicaUuid: randomUUID,
+  storageUuid: randomUUID,
 };
 
+export function createProject(name: string, description?: string, gitUrl?: string): Project {
+  return createCatalogProject(name, RUNTIME_FACTORIES, description, gitUrl);
+}
+
 export async function loadProjects(): Promise<Project[]> {
+  let parsed: unknown = null;
   try {
     const raw = await AsyncStorage.getItem(STORAGE_KEY);
-    if (!raw) return [DEFAULT_PROJECT];
-    const projects = JSON.parse(raw) as Project[];
-    return projects.length > 0 ? projects : [DEFAULT_PROJECT];
+    parsed = raw ? JSON.parse(raw) : null;
   } catch {
-    return [DEFAULT_PROJECT];
+    // A corrupt catalog is recovered to the compatibility default below.
   }
+
+  const upgraded = upgradeProjectCatalog(parsed, RUNTIME_FACTORIES);
+  if (upgraded.changed) {
+    await saveProjects(upgraded.projects).catch(() => {
+      // Keep the in-memory catalog usable when persistence is temporarily
+      // unavailable. A later update/load retries the versioned write.
+    });
+  }
+  return upgraded.projects;
 }
 
 export async function saveProjects(projects: Project[]): Promise<void> {
   await AsyncStorage.setItem(STORAGE_KEY, JSON.stringify(projects));
 }
 
-export async function loadCurrentProjectId(): Promise<string> {
+export async function loadCurrentProjectId(projects?: readonly Project[]): Promise<string> {
   try {
-    const id = await AsyncStorage.getItem(CURRENT_KEY);
-    return id || "default";
+    const storedId = await AsyncStorage.getItem(CURRENT_KEY);
+    if (!projects) return storedId || "default";
+    const resolvedId = resolveStoredCurrentProjectId(projects, storedId);
+    if (resolvedId && resolvedId !== storedId) {
+      await saveCurrentProjectId(resolvedId);
+    }
+    return resolvedId;
   } catch {
-    return "default";
+    return projects?.[0]?.id || "default";
   }
 }
 
 export async function saveCurrentProjectId(id: string): Promise<void> {
   await AsyncStorage.setItem(CURRENT_KEY, id);
-}
-
-export function createProject(name: string, description?: string, gitUrl?: string): Project {
-  return {
-    id: `proj_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`,
-    name,
-    description: description || "",
-    gitUrl,
-    createdAt: Date.now(),
-    updatedAt: Date.now(),
-  };
 }

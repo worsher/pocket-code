@@ -1,5 +1,6 @@
 import { Paths, File, Directory } from "expo-file-system";
 import * as LegacyFS from "expo-file-system/legacy";
+import { normalizeWorkspaceRelativePath } from "@pocket-code/workspace-core";
 import { exec as localExec, startBackgroundExec } from "./localExecutor";
 import { killProcess } from "./processManager";
 import type { AppSettings } from "../store/settings";
@@ -45,14 +46,14 @@ function ensureWorkspace(dir: Directory): void {
 
 /** Resolve a relative path against the workspace root directory */
 function resolveDir(root: Directory, relativePath: string): Directory {
-  if (relativePath === "." || relativePath === "") return root;
-  // Prevent directory traversal
-  const normalized = relativePath.replace(/\.\.\//g, "");
+  const normalized = normalizeWorkspaceRelativePath(relativePath);
+  if (normalized === ".") return root;
   return new Directory(root, normalized);
 }
 
 function resolveFile(root: Directory, relativePath: string): File {
-  const normalized = relativePath.replace(/\.\.\//g, "");
+  const normalized = normalizeWorkspaceRelativePath(relativePath);
+  if (normalized === ".") throw new Error("A file path is required");
   return new File(root, normalized);
 }
 
@@ -183,71 +184,83 @@ export async function deleteLocalFile(
 export async function executeLocalTool(
   toolName: string,
   args: Record<string, unknown>,
-  settings?: AppSettings
+  settings?: AppSettings,
+  workspaceRoot?: string,
 ): Promise<unknown | null> {
   switch (toolName) {
     case "listFiles":
-      return listLocalFiles((args.path as string) || ".");
+      return listLocalFiles((args.path as string) || ".", workspaceRoot);
     case "readFile":
-      return readLocalFile(args.path as string);
+      return readLocalFile(args.path as string, workspaceRoot);
     case "writeFile":
-      return writeLocalFile(args.path as string, args.content as string);
+      return writeLocalFile(args.path as string, args.content as string, workspaceRoot);
     // ── Git tools ──
     case "gitClone":
       return gitClone(
         args.url as string,
         args.dir as string | undefined,
-        settings!
+        settings!,
+        workspaceRoot,
       );
     case "gitStatus":
-      return gitStatus(args.path as string | undefined);
+      return gitStatus(args.path as string | undefined, workspaceRoot);
     case "gitAdd":
       return gitAdd(
         args.filepath as string,
-        args.path as string | undefined
+        args.path as string | undefined,
+        workspaceRoot,
       );
     case "gitCommit":
       return gitCommit(
         args.message as string,
-        args.path as string | undefined
+        args.path as string | undefined,
+        workspaceRoot,
       );
     case "gitPush":
       return gitPush(
         settings!,
         args.path as string | undefined,
         args.remote as string | undefined,
-        args.branch as string | undefined
+        args.branch as string | undefined,
+        workspaceRoot,
       );
     case "gitPull":
       return gitPull(
         settings!,
         args.path as string | undefined,
         args.remote as string | undefined,
-        args.branch as string | undefined
+        args.branch as string | undefined,
+        workspaceRoot,
       );
     case "gitLog":
       return gitLog(
         args.path as string | undefined,
-        args.depth as number | undefined
+        args.depth as number | undefined,
+        workspaceRoot,
       );
     case "gitBranch":
       return gitBranch(
         args.name as string | undefined,
-        args.path as string | undefined
+        args.path as string | undefined,
+        workspaceRoot,
       );
     case "gitCheckout":
       return gitCheckout(
         args.ref as string,
-        args.path as string | undefined
+        args.path as string | undefined,
+        workspaceRoot,
       );
     case "runCommand": {
       const cwd = (args.cwd as string | undefined) ?? undefined;
-      const result = await localExec(args.command as string, cwd, { timeout: 60_000 });
+      const result = await localExec(args.command as string, cwd, {
+        timeout: 60_000,
+        workspaceRoot,
+      });
       return result;
     }
     case "runInBackground": {
       const cwd = (args.cwd as string | undefined) ?? undefined;
-      const result = await startBackgroundExec(args.command as string, cwd);
+      const result = await startBackgroundExec(args.command as string, cwd, workspaceRoot);
       if (result.success) {
         return {
           success: true,

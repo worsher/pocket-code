@@ -1,4 +1,4 @@
-import React, { useState, useCallback, useMemo, useEffect, useRef } from "react";
+import React, { useState, useCallback, useEffect, useRef } from "react";
 import { View, Text, StyleSheet, Alert, ActivityIndicator } from "react-native";
 import FileTreeView from "./components/FileTreeView";
 import InlineFileViewer from "./components/InlineFileViewer";
@@ -7,7 +7,7 @@ import FileTabBar from "./components/FileTabBar";
 import type { FileItem } from "../../hooks/useFileTree";
 import type { WorkspaceMode, AppSettings } from "../../store/settings";
 import { syncRemoteToLocal } from "../../services/workspaceSync";
-import { getProjectWorkspaceRoot, listLocalFiles, readLocalFile } from "../../services/localFileSystem";
+import { listLocalFiles, readLocalFile } from "../../services/localFileSystem";
 import { pullFromDevMachine } from "../../services/codeSync";
 import { useWorkspace } from "../../contexts/WorkspaceContext";
 import { useProject } from "../../contexts/ProjectContext";
@@ -24,6 +24,7 @@ interface Props {
   workspaceMode: WorkspaceMode;
   settings: AppSettings;
   projectId?: string;
+  localWorkspaceRoot?: string;
 }
 
 /**
@@ -47,6 +48,7 @@ export default function FilesTab({
   workspaceMode,
   settings,
   projectId,
+  localWorkspaceRoot,
 }: Props) {
   const { currentProject, updateProject } = useProject();
   const [viewState, setViewState] = useState<"tree" | "viewer">("tree");
@@ -82,11 +84,6 @@ export default function FilesTab({
   const shadowSyncAvailable = !isLocal && !!projectId && !!requestSyncPull && !!requestSyncFile;
   const syncAvailable = (isLocal && !!projectId && canSyncRemote(settings)) || shadowSyncAvailable;
 
-  const localWorkspaceRoot = useMemo(
-    () => getProjectWorkspaceRoot(projectId),
-    [projectId]
-  );
-
   // 浏览源:browseLocal(影子同步后)用手机本地副本,否则用传入的远端/本地函数。
   const effectiveRequestFileList = useCallback(
     (path: string) =>
@@ -110,6 +107,7 @@ export default function FilesTab({
           requestSyncPull,
           requestSyncFile,
           projectId,
+          workspaceRoot: localWorkspaceRoot,
           sinceCommit: currentProject?.lastSyncedCommit ?? null,
           onProgress: (m) => setSyncMessage(m),
         });

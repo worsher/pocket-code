@@ -10,21 +10,25 @@ import http from "isomorphic-git/http/web";
 import { Paths, Directory } from "expo-file-system";
 import { createFsAdapter } from "./expoFsAdapter";
 import type { AppSettings } from "../store/settings";
+import { normalizeWorkspaceRelativePath } from "@pocket-code/workspace-core";
 
 // ── Workspace helpers ──────────────────────────────────
 
-function getWorkspaceUri(): string {
-  const dir = new Directory(Paths.document, "workspace");
+function getWorkspaceUri(workspaceRoot?: string): string {
+  const dir = workspaceRoot
+    ? new Directory(workspaceRoot)
+    : new Directory(Paths.document, "workspace");
   if (!dir.exists) dir.create({ idempotent: true });
   return dir.uri;
 }
 
 /** Get the fs adapter for the workspace */
-function getFsAndDir(subDir?: string) {
-  const workspaceUri = getWorkspaceUri();
+function getFsAndDir(workspaceRoot?: string, subDir?: string) {
+  const workspaceUri = getWorkspaceUri(workspaceRoot);
   const fs = createFsAdapter(workspaceUri);
   // isomorphic-git uses absolute POSIX paths; "/" maps to workspace root
-  const dir = subDir ? `/${subDir}` : "/";
+  const safeSubDir = subDir ? normalizeWorkspaceRelativePath(subDir) : ".";
+  const dir = safeSubDir === "." ? "/" : `/${safeSubDir}`;
   return { fs, dir };
 }
 
@@ -87,7 +91,8 @@ function createOnAuth(settings: AppSettings) {
 export async function gitClone(
   url: string,
   targetDir: string | undefined,
-  settings: AppSettings
+  settings: AppSettings,
+  workspaceRoot?: string,
 ): Promise<{ success: boolean; error?: string }> {
   try {
     // Derive directory name from URL if not specified
@@ -98,8 +103,8 @@ export async function gitClone(
         .pop()
         ?.replace(/\.git$/, "") ||
       "repo";
-    const { fs } = getFsAndDir();
-    const dir = `/${dirName}`;
+    const { fs } = getFsAndDir(workspaceRoot);
+    const dir = `/${normalizeWorkspaceRelativePath(dirName)}`;
 
     const authUrl = injectCredentialsIntoUrl(url, settings);
     console.log("[Git] Clone original URL:", url);
@@ -125,14 +130,15 @@ export async function gitClone(
 }
 
 export async function gitStatus(
-  path?: string
+  path?: string,
+  workspaceRoot?: string,
 ): Promise<{
   success: boolean;
   files?: Array<{ filepath: string; status: string }>;
   error?: string;
 }> {
   try {
-    const { fs, dir } = getFsAndDir(path);
+    const { fs, dir } = getFsAndDir(workspaceRoot, path);
 
     const matrix = await git.statusMatrix({ fs, dir });
     const files = matrix
@@ -162,12 +168,14 @@ export async function gitStatus(
 
 export async function gitAdd(
   filepath: string,
-  path?: string
+  path?: string,
+  workspaceRoot?: string,
 ): Promise<{ success: boolean; error?: string }> {
   try {
-    const { fs, dir } = getFsAndDir(path);
+    const { fs, dir } = getFsAndDir(workspaceRoot, path);
+    const safeFilepath = normalizeWorkspaceRelativePath(filepath);
 
-    if (filepath === ".") {
+    if (safeFilepath === ".") {
       // Stage all changes
       const matrix = await git.statusMatrix({ fs, dir });
       for (const [file, , workdir] of matrix) {
@@ -178,7 +186,7 @@ export async function gitAdd(
         }
       }
     } else {
-      await git.add({ fs, dir, filepath });
+      await git.add({ fs, dir, filepath: safeFilepath });
     }
 
     return { success: true };
@@ -189,10 +197,11 @@ export async function gitAdd(
 
 export async function gitCommit(
   message: string,
-  path?: string
+  path?: string,
+  workspaceRoot?: string,
 ): Promise<{ success: boolean; sha?: string; error?: string }> {
   try {
-    const { fs, dir } = getFsAndDir(path);
+    const { fs, dir } = getFsAndDir(workspaceRoot, path);
 
     const sha = await git.commit({
       fs,
@@ -214,10 +223,11 @@ export async function gitPush(
   settings: AppSettings,
   path?: string,
   remote?: string,
-  branch?: string
+  branch?: string,
+  workspaceRoot?: string,
 ): Promise<{ success: boolean; error?: string }> {
   try {
-    const { fs, dir } = getFsAndDir(path);
+    const { fs, dir } = getFsAndDir(workspaceRoot, path);
 
     // Read the remote URL and inject credentials
     const remoteUrl = await git.getConfig({
@@ -246,10 +256,11 @@ export async function gitPull(
   settings: AppSettings,
   path?: string,
   remote?: string,
-  branch?: string
+  branch?: string,
+  workspaceRoot?: string,
 ): Promise<{ success: boolean; error?: string }> {
   try {
-    const { fs, dir } = getFsAndDir(path);
+    const { fs, dir } = getFsAndDir(workspaceRoot, path);
 
     // Read the remote URL and inject credentials
     const remoteUrl = await git.getConfig({
@@ -281,7 +292,8 @@ export async function gitPull(
 
 export async function gitLog(
   path?: string,
-  depth?: number
+  depth?: number,
+  workspaceRoot?: string,
 ): Promise<{
   success: boolean;
   commits?: Array<{
@@ -293,7 +305,7 @@ export async function gitLog(
   error?: string;
 }> {
   try {
-    const { fs, dir } = getFsAndDir(path);
+    const { fs, dir } = getFsAndDir(workspaceRoot, path);
 
     const commits = await git.log({ fs, dir, depth: depth || 10 });
     const result = commits.map((c) => ({
@@ -311,7 +323,8 @@ export async function gitLog(
 
 export async function gitBranch(
   name?: string,
-  path?: string
+  path?: string,
+  workspaceRoot?: string,
 ): Promise<{
   success: boolean;
   branches?: string[];
@@ -319,7 +332,7 @@ export async function gitBranch(
   error?: string;
 }> {
   try {
-    const { fs, dir } = getFsAndDir(path);
+    const { fs, dir } = getFsAndDir(workspaceRoot, path);
 
     if (name) {
       // Create new branch
@@ -338,10 +351,11 @@ export async function gitBranch(
 
 export async function gitCheckout(
   ref: string,
-  path?: string
+  path?: string,
+  workspaceRoot?: string,
 ): Promise<{ success: boolean; error?: string }> {
   try {
-    const { fs, dir } = getFsAndDir(path);
+    const { fs, dir } = getFsAndDir(workspaceRoot, path);
 
     await git.checkout({ fs, dir, ref });
     return { success: true };

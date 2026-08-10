@@ -22,9 +22,9 @@
 
 ## 阶段 2：Catalog v2 与目录解析
 
-- [ ] 设计可版本化 catalog schema，Project 与 Replica 分表/分记录存储。
-- [ ] 分别实现 mobile/server catalog repository，并加入用户作用域。
-- [ ] 实现 `WorkspaceResolver`，受管理路径只接受 catalog 分配的 storage key。
+- [x] 设计可版本化 catalog schema，Project 与 Replica 分表/分记录存储。
+- [x] 分别实现 mobile/server catalog repository，并加入用户作用域。
+- [x] 实现 `WorkspaceResolver`，受管理路径只接受 catalog 分配的 storage key。
 - [ ] 建立 `projects/<storage-key>/{worktree,state,cache}`、runtime、staging、trash。
 - [ ] 移除 default project 的特殊目录语义，新建项目全部进入 v2。
 - [ ] 加入 catalog 原子写、损坏恢复和并发测试。

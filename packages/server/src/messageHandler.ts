@@ -463,7 +463,11 @@ export function createMessageHandler(
               } satisfies ServerOutboundType);
               return;
             }
-            const workspacePath = getWorkspaceRoot("", delProjectId);
+            const workspacePath = getWorkspaceRoot({
+              sessionId: "",
+              projectId: delProjectId,
+              userId: auth.userId,
+            });
             try {
               await rm(workspacePath, { recursive: true, force: true });
               send({

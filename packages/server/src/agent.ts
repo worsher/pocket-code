@@ -130,7 +130,11 @@ export async function createSession(
   userId: string,
   projectId: string = ''
 ): Promise<AgentSession> {
-  const workspace = getWorkspaceRoot(sessionId, projectId || undefined);
+  const workspace = getWorkspaceRoot({
+    sessionId,
+    projectId: projectId || undefined,
+    userId,
+  });
   await mkdir(workspace, { recursive: true });
 
   // Try to restore from database

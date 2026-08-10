@@ -2,11 +2,12 @@
 
 import type { IncomingMessage, ServerResponse } from "http";
 import { createReadStream, existsSync, statSync, readdirSync } from "fs";
-import { join, resolve, basename, extname, relative } from "path";
+import { join, basename, extname, relative } from "path";
 import { mkdir, writeFile, readFile, stat as fsStat } from "fs/promises";
 import { verifyToken } from "./auth.js";
 import { getSession } from "./db.js";
 import { getWorkspaceRoot } from "./tools.js";
+import { resolveWorkspaceEntry } from "./workspacePath.js";
 
 const MAX_UPLOAD_SIZE = parseInt(process.env.MAX_UPLOAD_SIZE || "52428800", 10); // 50MB
 const MAX_SYNC_SIZE = 50 * 1024 * 1024; // 50MB total for workspace sync
@@ -25,8 +26,8 @@ function sendJson(res: ServerResponse, status: number, data: unknown) {
 }
 
 /** Resolve workspace path from session, using project-aware getWorkspaceRoot */
-function resolveWorkspace(sessionId: string, projectId?: string): string {
-  return getWorkspaceRoot(sessionId, projectId || undefined);
+function resolveWorkspace(sessionId: string, userId: string, projectId?: string): string {
+  return getWorkspaceRoot({ sessionId, userId, projectId: projectId || undefined });
 }
 
 // ── Upload ───────────────────────────────────────────────
@@ -107,10 +108,14 @@ export async function handleFileUpload(
   }
 
   // Resolve workspace using project-aware path (consistent with tools.ts)
-  const workspace = resolveWorkspace(sessionId, session.projectId);
-  const fullTarget = resolve(workspace, targetPath, fileName);
-
-  if (!fullTarget.startsWith(resolve(workspace))) {
+  const workspace = resolveWorkspace(sessionId, auth.userId, session.projectId);
+  let fullTarget: string;
+  try {
+    fullTarget = resolveWorkspaceEntry(
+      workspace,
+      [targetPath, fileName].filter(Boolean).join("/")
+    );
+  } catch {
     sendJson(res, 400, { error: "Invalid path (path traversal detected)" });
     return;
   }
@@ -172,11 +177,11 @@ export async function handleFileDownload(
   }
 
   // Resolve workspace using project-aware path (consistent with tools.ts)
-  const workspace = resolveWorkspace(sessionId, session.projectId);
-  const fullPath = resolve(workspace, filePath);
-
-  // Prevent path traversal
-  if (!fullPath.startsWith(resolve(workspace))) {
+  const workspace = resolveWorkspace(sessionId, auth.userId, session.projectId);
+  let fullPath: string;
+  try {
+    fullPath = resolveWorkspaceEntry(workspace, filePath);
+  } catch {
     sendJson(res, 400, { error: "Invalid path" });
     return;
   }
@@ -324,7 +329,11 @@ export async function handleWorkspaceSync(
   }
 
   // Use project-level workspace (sessionId empty since we want project root)
-  const workspace = getWorkspaceRoot("", projectId);
+  const workspace = getWorkspaceRoot({
+    sessionId: "",
+    projectId,
+    userId: auth.userId,
+  });
 
   if (!existsSync(workspace)) {
     sendJson(res, 404, { error: "Workspace not found" });

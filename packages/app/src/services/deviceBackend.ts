@@ -115,7 +115,7 @@ export interface CreateDeviceBackendOpts {
   execTool: (name: string, args: Record<string, unknown>) => Promise<unknown>;
   /**
    * 真实设备工作区根,须与调用方传给 runAgentLoop 的 `workspace` 参数是同一个值
-   * (单一真相)。通常是 `getProjectWorkspaceRoot(projectId) ?? getDefaultWorkspace()`。
+   * (单一真相)。必须来自 ProjectContext 暴露的 catalog-resolved workspace root。
    * 本文件内部的路径解析(readFile/writeFile/listFiles 的 base、exec 的 cwd
    * 翻译)一律只使用这个传入值,不在内部重新调用 getProjectWorkspaceRoot/
    * getDefaultWorkspace 求根。
