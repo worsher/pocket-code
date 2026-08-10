@@ -10,7 +10,12 @@ import {
   loadCurrentProjectId,
   saveCurrentProjectId,
   createProject as createProjectRecord,
+  adoptRemoteProject,
 } from "../store/projects";
+import {
+  upsertRemoteReplica as upsertRemoteReplicaRecord,
+  type RemoteReplicaCatalogEntry,
+} from "../store/projectCatalog";
 import {
   ensureMobileWorkspaceHandle,
   getLegacyMobileWorkspaceRoot,
@@ -25,6 +30,11 @@ interface ProjectContextValue {
   createProject: (name: string, description?: string, gitUrl?: string) => void;
   deleteProject: (projectId: string) => void;
   updateProject: (projectId: string, updates: Partial<Project>) => void;
+  registerRemoteReplica: (
+    projectId: string,
+    replica: RemoteReplicaCatalogEntry,
+    displayName?: string,
+  ) => void;
 }
 
 const ProjectContext = createContext<ProjectContextValue>({
@@ -36,6 +46,7 @@ const ProjectContext = createContext<ProjectContextValue>({
   createProject: () => {},
   deleteProject: () => {},
   updateProject: () => {},
+  registerRemoteReplica: () => {},
 });
 
 export function useProject() {
@@ -117,6 +128,28 @@ export function ProjectProvider({ children }: { children: React.ReactNode }) {
     });
   }, []);
 
+  const registerRemoteReplica = useCallback(
+    (projectId: string, replica: RemoteReplicaCatalogEntry, displayName?: string) => {
+      setProjects((prev) => {
+        const existing = prev.find((project) => project.id === projectId);
+        const adopted = existing ?? adoptRemoteProject(projectId, displayName ?? "Remote project");
+        const merged = {
+          ...upsertRemoteReplicaRecord(adopted, replica),
+          ...(displayName && !existing?.name ? { name: displayName } : {}),
+          updatedAt: Date.now(),
+        };
+        const updated = existing
+          ? prev.map((project) => (project.id === projectId ? merged : project))
+          : [...prev, merged];
+        void saveProjects(updated).catch((error) => {
+          console.error("[Projects] Failed to persist remote replica:", error);
+        });
+        return updated;
+      });
+    },
+    [],
+  );
+
   if (!loaded) return null;
 
   return (
@@ -130,6 +163,7 @@ export function ProjectProvider({ children }: { children: React.ReactNode }) {
         createProject,
         deleteProject,
         updateProject,
+        registerRemoteReplica,
       }}
     >
       {children}

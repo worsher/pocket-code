@@ -9,11 +9,25 @@ import { createNodeBackend } from "./nodeBackend.js";
 import { setupGitCredentials } from "./gitCredentials.js";
 import { verifyToken, registerAnonymous, type AuthPayload } from "./auth.js";
 import { isDockerEnabled, getContainer } from "./docker.js";
-import { initDb, listUserSessions, deleteSession, saveSessionGoal } from "./db.js";
+import {
+  initDb,
+  listUserSessions,
+  deleteSession,
+  saveSessionGoal,
+  getWorkspaceAuthorityId,
+  listWorkspaceProjects,
+  updateWorkspaceProjectDisplayName,
+} from "./db.js";
 import { createGoal, goalUpdatedEvent, clearedEvent, type GoalState } from "./goal/types.js";
 import { runGoalDriver } from "./goal/driver.js";
 import { checkQuota, incrementUsage, getUserQuota } from "./resourceLimits.js";
-import { WsMessage, type ServerOutboundType } from "@pocket-code/wire";
+import {
+  WsMessage,
+  type AgentEventType,
+  type ServerOutboundType,
+  type WorkspaceReplicaKindType,
+  type WorkspaceSessionScopeType,
+} from "@pocket-code/wire";
 import { handleSyncPull, handleSyncFile } from "./sync/syncHandler.js";
 import { getSessionStream, type SessionEventStream } from "./eventBuffer.js";
 import { rm } from "fs/promises";
@@ -41,6 +55,8 @@ export interface MessageHandler {
 export interface MessageHandlerOptions {
   /** Pre-injected auth (used by Daemon relay mode to bypass token verification) */
   preAuth?: AuthPayload;
+  /** Direct server defaults to cloud; relay daemon binds workspaces to a dev machine. */
+  replicaKind?: WorkspaceReplicaKindType;
 }
 
 /**
@@ -62,6 +78,29 @@ export function createMessageHandler(
   // P14:本连接订阅的 session 事件流(publish 分配 seq + fan-out;abort 移到 session 级)
   let stream: SessionEventStream | null = null;
   let unsubscribe: (() => void) | null = null;
+  const replicaKind = options?.replicaKind ?? "cloud";
+  let workspaceAuthorityId: string | null = null;
+  const getAuthorityId = () =>
+    (workspaceAuthorityId ??= getWorkspaceAuthorityId());
+
+  const scopeForSession = (value: AgentSession): WorkspaceSessionScopeType | undefined => {
+    const handle = value.workspaceHandle;
+    if (!handle) return undefined;
+    return {
+      projectId: handle.projectId,
+      replicaId: handle.replicaId,
+      sessionId: value.sessionId,
+      workspaceGeneration: handle.generation,
+      authorityId: getAuthorityId(),
+      replicaKind,
+    };
+  };
+
+  const scopeFileEvent = (value: AgentSession, event: AgentEventType): AgentEventType => {
+    if (event.type !== "file-changed") return event;
+    const workspaceScope = scopeForSession(value);
+    return workspaceScope ? { ...event, workspaceScope } : event;
+  };
 
   return {
     async onMessage(raw: string | Buffer) {
@@ -146,12 +185,29 @@ export function createMessageHandler(
                 session = null;
                 return;
               }
+              if (projectId && session.projectId && session.projectId !== projectId) {
+                send({
+                  type: "error",
+                  error: "Session does not belong to this project.",
+                });
+                session = null;
+                return;
+              }
             } else {
-              session = await createSession(sessionId, auth.userId, projectId);
+              try {
+                session = await createSession(sessionId, auth.userId, projectId);
+              } catch (error: any) {
+                send({ type: "error", error: error?.message ?? "Failed to restore session." });
+                session = null;
+                return;
+              }
               sessions.set(sessionId, session);
             }
             activeSessionId = sessionId;
             session.lastActivity = Date.now();
+            if (session.workspaceHandle && msg.projectName) {
+              updateWorkspaceProjectDisplayName(auth.userId, session.projectId, msg.projectName);
+            }
 
             // Docker isolation
             if (isDockerEnabled() && !session.containerId) {
@@ -195,8 +251,28 @@ export function createMessageHandler(
             stream = getSessionStream(session.sessionId);
             unsubscribe?.();
             unsubscribe = stream.subscribe(send);
+            const workspaceScope = scopeForSession(session);
+            const workspaceCatalog =
+              msg.workspaceProtocolVersion === 2
+                ? listWorkspaceProjects(auth.userId).map((project) => ({
+                    projectId: project.projectId,
+                    displayName: project.displayName,
+                    replicaId: project.replicaId,
+                    workspaceGeneration: project.generation,
+                    authorityId: getAuthorityId(),
+                    replicaKind,
+                    updatedAt: project.updatedAt,
+                  }))
+                : undefined;
             send({
               type: "session",
+              ...(msg.workspaceProtocolVersion === 2
+                ? {
+                    workspaceProtocolVersion: 2 as const,
+                    workspaceCatalog,
+                    ...(workspaceScope ? { workspaceScope } : {}),
+                  }
+                : {}),
               sessionId: session.sessionId,
               projectId: session.projectId,
               workspace: session.workspace,
@@ -265,7 +341,7 @@ export function createMessageHandler(
               sess,
               msg.content,
               (event) => {
-                sessStream.publish(event);
+                sessStream.publish(scopeFileEvent(sess, event));
               },
               abort.signal,
               msg.images

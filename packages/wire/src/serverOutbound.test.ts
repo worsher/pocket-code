@@ -44,4 +44,36 @@ describe("ServerOutbound", () => {
       ServerOutbound.safeParse({ type: "resync-required", reason: "other", eventEpoch: "e", currentSeq: 0 }).success
     ).toBe(false);
   });
+
+  it("session optionally carries a server-authoritative workspace scope", () => {
+    const scoped = {
+      type: "session",
+      workspaceProtocolVersion: 2,
+      sessionId: "session-1",
+      projectId: "10ed836e-ae48-4d67-9e26-a74cbf55a52e",
+      workspace: "/w",
+      workspaceScope: {
+        projectId: "10ed836e-ae48-4d67-9e26-a74cbf55a52e",
+        replicaId: "0f3d985e-0a3a-458e-932d-c89dbbf671c6",
+        sessionId: "session-1",
+        workspaceGeneration: 2,
+        authorityId: "ce393574-d077-4ddf-a34a-bd9746277f97",
+        replicaKind: "cloud",
+      },
+      workspaceCatalog: [
+        {
+          projectId: "10ed836e-ae48-4d67-9e26-a74cbf55a52e",
+          displayName: "Remote project",
+          replicaId: "0f3d985e-0a3a-458e-932d-c89dbbf671c6",
+          workspaceGeneration: 2,
+          authorityId: "ce393574-d077-4ddf-a34a-bd9746277f97",
+          replicaKind: "cloud",
+          updatedAt: 100,
+        },
+      ],
+    };
+    const result = SessionMsg.safeParse(scoped);
+    expect(result.success && result.data).toEqual(scoped);
+    expect(SessionMsg.safeParse({ ...scoped, workspaceProtocolVersion: 3 }).success).toBe(false);
+  });
 });

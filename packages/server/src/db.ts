@@ -101,6 +101,7 @@ export async function initDb(): Promise<void> {
       project_id TEXT NOT NULL,
       replica_id TEXT NOT NULL,
       storage_key TEXT NOT NULL UNIQUE,
+      display_name TEXT NOT NULL DEFAULT '',
       generation INTEGER NOT NULL DEFAULT 1,
       created_at INTEGER NOT NULL,
       updated_at INTEGER NOT NULL,
@@ -108,6 +109,20 @@ export async function initDb(): Promise<void> {
     );
   `);
   db.run(`CREATE INDEX IF NOT EXISTS idx_workspace_projects_user ON workspace_projects(user_id);`);
+  try {
+    db.run(`ALTER TABLE workspace_projects ADD COLUMN display_name TEXT NOT NULL DEFAULT ''`);
+  } catch {
+    // Column already exists.
+  }
+
+  // Stable identity for this catalog/database. Clients use it to distinguish
+  // replicas hosted by different cloud servers or developer machines.
+  db.run(`
+    CREATE TABLE IF NOT EXISTS workspace_meta (
+      key TEXT PRIMARY KEY,
+      value TEXT NOT NULL
+    );
+  `);
 
   // User quotas table
   db.run(`
@@ -179,6 +194,7 @@ export interface WorkspaceProjectRecord {
   projectId: string;
   replicaId: string;
   storageKey: string;
+  displayName: string;
   generation: number;
   createdAt: number;
   updatedAt: number;
@@ -312,7 +328,7 @@ export function getWorkspaceProject(
   projectId: string
 ): WorkspaceProjectRecord | null {
   const stmt = db.prepare(
-    `SELECT user_id, project_id, replica_id, storage_key, generation, created_at, updated_at
+    `SELECT user_id, project_id, replica_id, storage_key, display_name, generation, created_at, updated_at
      FROM workspace_projects
      WHERE user_id = ? AND project_id = ?`
   );
@@ -328,10 +344,53 @@ export function getWorkspaceProject(
     projectId: row.project_id as string,
     replicaId: parseReplicaId(row.replica_id as string),
     storageKey: parseStorageKey(row.storage_key as string),
+    displayName: (row.display_name as string) || "",
     generation: row.generation as number,
     createdAt: row.created_at as number,
     updatedAt: row.updated_at as number,
   };
+}
+
+export function listWorkspaceProjects(userId: string): WorkspaceProjectRecord[] {
+  const stmt = db.prepare(
+    `SELECT user_id, project_id, replica_id, storage_key, display_name, generation, created_at, updated_at
+     FROM workspace_projects
+     WHERE user_id = ?
+     ORDER BY created_at ASC`,
+  );
+  stmt.bind([userId]);
+  const records: WorkspaceProjectRecord[] = [];
+  while (stmt.step()) {
+    const row = stmt.getAsObject();
+    records.push({
+      userId: row.user_id as string,
+      projectId: parseProjectId(row.project_id as string),
+      replicaId: parseReplicaId(row.replica_id as string),
+      storageKey: parseStorageKey(row.storage_key as string),
+      displayName: (row.display_name as string) || "",
+      generation: row.generation as number,
+      createdAt: row.created_at as number,
+      updatedAt: row.updated_at as number,
+    });
+  }
+  stmt.free();
+  return records;
+}
+
+export function updateWorkspaceProjectDisplayName(
+  userId: string,
+  projectId: string,
+  displayName: string,
+): void {
+  const normalized = displayName.trim().slice(0, 256);
+  if (!normalized) return;
+  db.run(
+    `UPDATE workspace_projects
+     SET display_name = ?, updated_at = ?
+     WHERE user_id = ? AND project_id = ? AND display_name <> ?`,
+    [normalized, Date.now(), userId, parseProjectId(projectId), normalized],
+  );
+  if (db.getRowsModified() > 0) persist();
 }
 
 export function ensureWorkspaceProject(
@@ -358,6 +417,31 @@ export function ensureWorkspaceProject(
   const created = getWorkspaceProject(userId, safeProjectId);
   if (!created) throw new Error("Failed to create workspace project catalog entry");
   return created;
+}
+
+export function getWorkspaceAuthorityId(
+  uuidFactory: UuidFactory = randomUUID
+): string {
+  const stmt = db.prepare("SELECT value FROM workspace_meta WHERE key = 'authority_id'");
+  let existing: string | null = null;
+  if (stmt.step()) existing = stmt.getAsObject().value as string;
+  stmt.free();
+  if (existing) return parseReplicaId(existing);
+
+  const authorityId = parseReplicaId(uuidFactory());
+  db.run("INSERT OR IGNORE INTO workspace_meta (key, value) VALUES ('authority_id', ?)", [
+    authorityId,
+  ]);
+  if (db.getRowsModified() > 0) persist();
+
+  const saved = db.prepare("SELECT value FROM workspace_meta WHERE key = 'authority_id'");
+  if (!saved.step()) {
+    saved.free();
+    throw new Error("Failed to create workspace authority identity");
+  }
+  const value = parseReplicaId(saved.getAsObject().value as string);
+  saved.free();
+  return value;
 }
 
 // ── User Quotas ─────────────────────────────────────────

@@ -251,6 +251,7 @@ function handleRelayMessage(msg: DaemonInboundType) {
         };
 
         newEntry.handler = createMessageHandler(sendFn, {
+          replicaKind: "dev-binding",
           preAuth: {
             userId: `relay_${device.deviceId}`,
             deviceId: device.deviceId,

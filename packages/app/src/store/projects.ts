@@ -5,6 +5,7 @@ import AsyncStorage from "@react-native-async-storage/async-storage";
 import { randomUUID } from "expo-crypto";
 import {
   createProject as createCatalogProject,
+  createProjectFromRemote,
   resolveStoredCurrentProjectId,
   upgradeProjectCatalog,
   type Project,
@@ -29,6 +30,10 @@ const RUNTIME_FACTORIES: ProjectIdFactories = {
 
 export function createProject(name: string, description?: string, gitUrl?: string): Project {
   return createCatalogProject(name, RUNTIME_FACTORIES, description, gitUrl);
+}
+
+export function adoptRemoteProject(projectId: string, displayName: string): Project {
+  return createProjectFromRemote(projectId, displayName, RUNTIME_FACTORIES);
 }
 
 function parseCatalogJson(raw: string | null): unknown[] | null {

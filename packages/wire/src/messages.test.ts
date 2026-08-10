@@ -19,6 +19,12 @@ describe("wire — WsMessage validation", () => {
     expect(result.success).toBe(true);
   });
 
+  it("negotiates workspace protocol v2 without rejecting v1 clients", () => {
+    expect(WsMessage.safeParse({ type: "init" }).success).toBe(true);
+    expect(WsMessage.safeParse({ type: "init", workspaceProtocolVersion: 2 }).success).toBe(true);
+    expect(WsMessage.safeParse({ type: "init", workspaceProtocolVersion: 3 }).success).toBe(false);
+  });
+
   it("goal-create / goal-control round-trip (P16)", () => {
     const create = WsMessage.safeParse({
       type: "goal-create", content: "清零 lint 错误", acceptance: "pnpm lint 通过",

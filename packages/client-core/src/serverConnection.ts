@@ -4,7 +4,14 @@
 // 入站流式事件即归一化 AgentEvent(server 已切换,P6b Task 3)。
 
 import { RelayClient } from "./relayClient";
-import { AGENT_EVENT_TYPE_NAMES, type AgentEventType } from "@pocket-code/wire";
+import {
+  AGENT_EVENT_TYPE_NAMES,
+  WorkspaceProjectCatalogEntry,
+  WorkspaceSessionScope,
+  type AgentEventType,
+  type WorkspaceSessionScopeType,
+  type WorkspaceProjectCatalogEntryType,
+} from "@pocket-code/wire";
 
 export interface ConnectionConfig {
   getServerUrl(): string;
@@ -24,11 +31,19 @@ export interface ConnectionConfig {
 export interface ConnectionHandlers {
   onAgentEvent(ev: AgentEventType): void;
   onAuth(token: string, userId: string): void;
-  onSession(sessionId: string): void;
+  onSession(
+    sessionId: string,
+    workspaceScope?: WorkspaceSessionScopeType,
+    workspaceCatalog?: WorkspaceProjectCatalogEntryType[]
+  ): void;
   onConnected(): void;
   onDisconnected(): void;
   onAuthError(message: string): void;
-  onFileChanged(path: string, changeType: "created" | "modified" | "deleted"): void;
+  onFileChanged(
+    path: string,
+    changeType: "created" | "modified" | "deleted",
+    workspaceScope?: WorkspaceSessionScopeType
+  ): void;
   /** P14:server 指示全量重建(epoch 变化/缓冲覆盖不足/连续缺口)。宿主应走 loadSession。 */
   onResyncRequired?(reason: string): void;
 }
@@ -51,6 +66,8 @@ export class ServerConnection {
   private cursor: { epoch?: string; lastSeq: number } = { lastSeq: 0 };
   /** 连续缺口计数:第一次断开重连补发,第二次转 resync(spec §5.2) */
   private gapStrikes = 0;
+  /** Latest server-authoritative scope. Undefined keeps v1 servers compatible. */
+  private activeWorkspaceScope?: WorkspaceSessionScopeType;
 
   constructor(
     private config: ConnectionConfig,
@@ -96,6 +113,7 @@ export class ServerConnection {
     this.ws = ws;
 
     ws.onopen = () => {
+      if (this.ws !== ws) return;
       console.log("[Conn] Connected");
       this.reconnectAttempt = 0;
       this.handlers.onConnected();
@@ -118,13 +136,16 @@ export class ServerConnection {
     };
 
     ws.onmessage = (event: MessageEvent<any> | { data: string }) => {
+      if (this.ws !== ws) return;
       const data =
         typeof event.data === "string" ? JSON.parse(event.data) : JSON.parse(event.data.toString());
       this.dispatch(data);
     };
 
     ws.onclose = () => {
+      if (this.ws !== ws) return;
       console.log("[Conn] Closed");
+      this.activeWorkspaceScope = undefined;
       this.handlers.onDisconnected();
       if (this.shouldConnect) this.scheduleReconnect();
     };
@@ -139,6 +160,7 @@ export class ServerConnection {
     this.shouldConnect = false;
     this.clearReconnect();
     if (this.cursor.epoch) this.config.persistEventCursor?.(this.cursor.epoch, this.cursor.lastSeq);
+    this.activeWorkspaceScope = undefined;
     try {
       this.ws?.close();
     } catch {
@@ -184,6 +206,21 @@ export class ServerConnection {
     return true;
   }
 
+  private admitWorkspaceEvent(data: { workspaceScope?: unknown }): boolean {
+    if (data.workspaceScope === undefined) return true;
+    const parsed = WorkspaceSessionScope.safeParse(data.workspaceScope);
+    const expected = this.activeWorkspaceScope;
+    if (!parsed.success || !expected) return false;
+    const actual = parsed.data;
+    return (
+      actual.projectId === expected.projectId &&
+      actual.replicaId === expected.replicaId &&
+      actual.sessionId === expected.sessionId &&
+      actual.workspaceGeneration === expected.workspaceGeneration &&
+      actual.authorityId === expected.authorityId
+    );
+  }
+
   private dispatch(data: any): void {
     switch (true) {
       case data.type === "auth": {
@@ -197,7 +234,47 @@ export class ServerConnection {
         if (typeof data.eventEpoch === "string" && !this.cursor.epoch) {
           this.cursor = { epoch: data.eventEpoch, lastSeq: data.currentSeq ?? 0 };
         }
-        this.handlers.onSession(data.sessionId);
+        let workspaceScope: WorkspaceSessionScopeType | undefined;
+        let workspaceCatalog: WorkspaceProjectCatalogEntryType[] | undefined;
+        if (data.workspaceScope !== undefined) {
+          const parsedScope = WorkspaceSessionScope.safeParse(data.workspaceScope);
+          if (
+            !parsedScope.success ||
+            parsedScope.data.sessionId !== data.sessionId ||
+            parsedScope.data.projectId !== data.projectId
+          ) {
+            this.activeWorkspaceScope = undefined;
+            this.handlers.onAgentEvent({
+              type: "error",
+              message: "Server returned an invalid workspace scope.",
+            });
+            return;
+          }
+          workspaceScope = parsedScope.data;
+        }
+        if (data.workspaceCatalog !== undefined) {
+          if (!Array.isArray(data.workspaceCatalog)) {
+            this.handlers.onAgentEvent({
+              type: "error",
+              message: "Server returned an invalid workspace catalog.",
+            });
+            return;
+          }
+          workspaceCatalog = [];
+          for (const value of data.workspaceCatalog) {
+            const parsedEntry = WorkspaceProjectCatalogEntry.safeParse(value);
+            if (!parsedEntry.success) {
+              this.handlers.onAgentEvent({
+                type: "error",
+                message: "Server returned an invalid workspace catalog.",
+              });
+              return;
+            }
+            workspaceCatalog.push(parsedEntry.data);
+          }
+        }
+        this.activeWorkspaceScope = workspaceScope;
+        this.handlers.onSession(data.sessionId, workspaceScope, workspaceCatalog);
         return;
       }
       case data.type === "resync-required": {
@@ -249,9 +326,12 @@ export class ServerConnection {
         return;
       }
       case AGENT_EVENT_TYPES.has(data.type): {
+        // Scope check must precede seq admission: a stale replica event must
+        // never advance the active session's event cursor.
+        if (data.type === "file-changed" && !this.admitWorkspaceEvent(data)) return;
         if (!this.admitSeq(data)) return;
         if (data.type === "file-changed") {
-          this.handlers.onFileChanged(data.path, data.changeType);
+          this.handlers.onFileChanged(data.path, data.changeType, data.workspaceScope);
         }
         this.handlers.onAgentEvent(data as AgentEventType);
         return;

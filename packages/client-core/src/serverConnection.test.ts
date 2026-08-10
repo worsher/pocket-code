@@ -270,6 +270,122 @@ describe("ServerConnection", () => {
     conn.disconnect();
   });
 
+  it("accepts only file events from the acknowledged workspace scope", () => {
+    const files: string[] = [];
+    const events: string[] = [];
+    const scope = {
+      projectId: "10ed836e-ae48-4d67-9e26-a74cbf55a52e",
+      replicaId: "0f3d985e-0a3a-458e-932d-c89dbbf671c6",
+      sessionId: "session-1",
+      workspaceGeneration: 2,
+      authorityId: "ce393574-d077-4ddf-a34a-bd9746277f97",
+      replicaKind: "cloud",
+    };
+    const conn = new ServerConnection(
+      makeConfig(),
+      makeHandlers({
+        onAgentEvent: (event) => events.push(event.type),
+        onFileChanged: (path) => files.push(path),
+      })
+    );
+    conn.connect();
+    const ws = FakeWebSocket.instances[0];
+    ws.open();
+    ws.receive({
+      type: "session",
+      sessionId: "session-1",
+      projectId: scope.projectId,
+      workspace: "/w",
+      workspaceProtocolVersion: 2,
+      workspaceScope: scope,
+      eventEpoch: "ep_scope",
+      currentSeq: 0,
+    });
+    ws.receive({
+      type: "file-changed",
+      path: "stale.ts",
+      changeType: "modified",
+      seq: 1,
+      workspaceScope: { ...scope, workspaceGeneration: 1 },
+    });
+    ws.receive({
+      type: "file-changed",
+      path: "current.ts",
+      changeType: "modified",
+      seq: 1,
+      workspaceScope: scope,
+    });
+    expect(files).toEqual(["current.ts"]);
+    expect(events).toEqual(["file-changed"]);
+    conn.disconnect();
+  });
+
+  it("keeps unscoped v1 session and file events compatible", () => {
+    const sessions: Array<[string, unknown]> = [];
+    const files: string[] = [];
+    const conn = new ServerConnection(
+      makeConfig(),
+      makeHandlers({
+        onSession: (sessionId, scope) => sessions.push([sessionId, scope]),
+        onFileChanged: (path) => files.push(path),
+      })
+    );
+    conn.connect();
+    const ws = FakeWebSocket.instances[0];
+    ws.open();
+    ws.receive({ type: "session", sessionId: "legacy", projectId: "", workspace: "/w" });
+    ws.receive({ type: "file-changed", path: "legacy.ts", changeType: "created" });
+    expect(sessions).toEqual([["legacy", undefined]]);
+    expect(files).toEqual(["legacy.ts"]);
+    conn.disconnect();
+  });
+
+  it("ignores buffered events from a socket after an explicit project disconnect", () => {
+    const files: string[] = [];
+    const conn = new ServerConnection(
+      makeConfig(),
+      makeHandlers({ onFileChanged: (path) => files.push(path) }),
+    );
+    conn.connect();
+    const oldSocket = FakeWebSocket.instances[0];
+    oldSocket.open();
+    conn.disconnect();
+    oldSocket.receive({ type: "file-changed", path: "old.ts", changeType: "modified" });
+    expect(files).toEqual([]);
+  });
+
+  it("validates and forwards the remote project catalog", () => {
+    const catalogs: unknown[] = [];
+    const conn = new ServerConnection(
+      makeConfig(),
+      makeHandlers({
+        onSession: (_sessionId, _scope, catalog) => catalogs.push(catalog),
+      }),
+    );
+    conn.connect();
+    const ws = FakeWebSocket.instances[0];
+    ws.open();
+    const entry = {
+      projectId: "10ed836e-ae48-4d67-9e26-a74cbf55a52e",
+      displayName: "Remote project",
+      replicaId: "0f3d985e-0a3a-458e-932d-c89dbbf671c6",
+      workspaceGeneration: 2,
+      authorityId: "ce393574-d077-4ddf-a34a-bd9746277f97",
+      replicaKind: "cloud",
+      updatedAt: 100,
+    };
+    ws.receive({
+      type: "session",
+      sessionId: "legacy",
+      projectId: "",
+      workspace: "/w",
+      workspaceProtocolVersion: 2,
+      workspaceCatalog: [entry],
+    });
+    expect(catalogs).toEqual([[entry]]);
+    conn.disconnect();
+  });
+
   it("stops reconnecting and calls onAuthError on Unauthorized error", () => {
     vi.useFakeTimers();
     let authError = "";

@@ -2,6 +2,9 @@ import { beforeAll, describe, expect, it } from "vitest";
 import {
   ensureWorkspaceProject,
   getWorkspaceProject,
+  getWorkspaceAuthorityId,
+  listWorkspaceProjects,
+  updateWorkspaceProjectDisplayName,
   initDb,
 } from "./db.js";
 
@@ -47,5 +50,27 @@ describe("workspace project catalog", () => {
   it("rejects non-UUID project keys in the v2 catalog", () => {
     expect(() => ensureWorkspaceProject("catalog-user", "../escape")).toThrow("UUID");
     expect(() => ensureWorkspaceProject("catalog-user", "default")).toThrow("UUID");
+  });
+
+  it("persists one stable authority id for the catalog", () => {
+    const expected = "3ca2e8bb-4fe5-4e16-a6ca-99840d666870";
+    const first = getWorkspaceAuthorityId(() => expected);
+    const repeated = getWorkspaceAuthorityId(() => {
+      throw new Error("an existing authority must not allocate another UUID");
+    });
+    expect(first).toBe(expected);
+    expect(repeated).toBe(expected);
+  });
+
+  it("lists only the user's projects and retains display metadata", () => {
+    updateWorkspaceProjectDisplayName("catalog-user-a", PROJECT_ID, "Phone project");
+    expect(listWorkspaceProjects("catalog-user-a")).toEqual([
+      expect.objectContaining({
+        userId: "catalog-user-a",
+        projectId: PROJECT_ID,
+        displayName: "Phone project",
+      }),
+    ]);
+    expect(listWorkspaceProjects("catalog-user-b")[0].displayName).toBe("");
   });
 });

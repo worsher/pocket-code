@@ -5,6 +5,7 @@
 
 import { z } from "zod";
 import { AgentEvent } from "./agentEvent.js";
+import { WorkspaceProjectCatalogEntry, WorkspaceSessionScope } from "./workspace.js";
 
 export const AuthMsg = z.object({
   type: z.literal("auth"),
@@ -14,6 +15,10 @@ export const AuthMsg = z.object({
 
 export const SessionMsg = z.object({
   type: z.literal("session"),
+  /** Present only when both sides negotiate Workspace Storage v2. */
+  workspaceProtocolVersion: z.literal(2).optional(),
+  workspaceScope: WorkspaceSessionScope.optional(),
+  workspaceCatalog: z.array(WorkspaceProjectCatalogEntry).optional(),
   sessionId: z.string(),
   projectId: z.string(),
   workspace: z.string(),

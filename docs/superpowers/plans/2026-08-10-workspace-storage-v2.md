@@ -39,11 +39,11 @@
 
 ## 阶段 4：协议与异步作用域
 
-- [ ] 扩展 wire schema：Project/Replica catalog、workspace generation 和 session scope。
-- [ ] 文件事件补全 create/update/delete 与作用域字段。
+- [x] 扩展 wire schema：Project/Replica catalog、workspace generation 和 session scope。
+- [x] 文件事件补全 create/update/delete 与作用域字段。
 - [x] 离线队列按 project/replica/session/generation 分区并在重放前重新验证。
-- [ ] 项目切换时关闭旧订阅并以新 handle 建立连接。
-- [ ] 保持旧协议兼容窗口，加入 mixed-version 测试。
+- [x] 项目切换时关闭旧订阅并以新 handle 建立连接。
+- [x] 保持旧协议兼容窗口，加入 mixed-version 测试。
 
 ## 阶段 5：导入与绑定
 

@@ -85,7 +85,12 @@ function MainScreen() {
     requestNotificationPermissions();
   }, []);
 
-  const { currentProject, currentWorkspaceHandle, currentWorkspaceRoot } = useProject();
+  const {
+    currentProject,
+    currentWorkspaceHandle,
+    currentWorkspaceRoot,
+    registerRemoteReplica,
+  } = useProject();
   const { pushFileChange, pendingFilePath, pendingPreviewUrl, clearPendingPreview } = useWorkspace();
 
   // Auto-switch to Files tab when navigateToFile is called from chat
@@ -145,11 +150,14 @@ function MainScreen() {
     model: currentModel,
     customPrompt: currentProject?.customPrompt,
     projectId: currentProject?.id,
+    projectName: currentProject?.name,
     workspaceReplicaId: currentProject?.localReplica.id,
     workspaceGeneration: currentProject?.localReplica.generation,
+    remoteReplicas: currentProject?.remoteReplicas,
     workspaceHandle: currentWorkspaceHandle,
     workspaceRoot: currentWorkspaceRoot,
     onFileChanged: handleFileChanged,
+    onRemoteReplica: registerRemoteReplica,
   });
 
   const listRef = useRef<FlatList>(null);

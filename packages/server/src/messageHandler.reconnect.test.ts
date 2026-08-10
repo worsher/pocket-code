@@ -13,6 +13,10 @@ interface RunHandle {
   finish: () => void;
 }
 let currentRun: RunHandle | null = null;
+const PROJECT_A = "10ed836e-ae48-4d67-9e26-a74cbf55a52e";
+const PROJECT_B = "018f00d2-8931-7bc0-aad1-1ec83b13f982";
+const REPLICA_ID = "0f3d985e-0a3a-458e-932d-c89dbbf671c6";
+const AUTHORITY_ID = "ce393574-d077-4ddf-a34a-bd9746277f97";
 
 const runAgentMock = vi.fn(
   (_session: unknown, _content: string, onEvent: (e: unknown) => void, signal?: AbortSignal) =>
@@ -22,15 +26,26 @@ const runAgentMock = vi.fn(
 );
 
 vi.mock("./agent.js", () => ({
-  createSession: vi.fn(async (sessionId: string, userId: string, projectId = "") => ({
-    sessionId,
-    userId,
-    projectId,
-    workspace: "/tmp/ws",
-    messages: [],
-    modelKey: "deepseek-v4-flash",
-    lastActivity: Date.now(),
-  })),
+  createSession: vi.fn(async (sessionId: string, userId: string, projectId = "") => {
+    const workspace = "/tmp/ws";
+    return {
+      sessionId,
+      userId,
+      projectId,
+      workspace,
+      workspaceHandle: projectId
+        ? {
+            projectId,
+            replicaId: REPLICA_ID,
+            generation: 2,
+            worktreeRoot: workspace,
+          }
+        : undefined,
+      messages: [],
+      modelKey: "deepseek-v4-flash",
+      lastActivity: Date.now(),
+    };
+  }),
   runAgent: (...args: unknown[]) =>
     runAgentMock(args[0], args[1] as string, args[2] as (e: unknown) => void, args[3] as AbortSignal),
 }));
@@ -39,6 +54,20 @@ vi.mock("./db.js", () => ({
   initDb: vi.fn(async () => {}),
   listUserSessions: vi.fn(() => []),
   deleteSession: vi.fn(() => true),
+  getWorkspaceAuthorityId: vi.fn(() => AUTHORITY_ID),
+  updateWorkspaceProjectDisplayName: vi.fn(),
+  listWorkspaceProjects: vi.fn(() => [
+    {
+      userId: "u1",
+      projectId: PROJECT_A,
+      replicaId: REPLICA_ID,
+      storageKey: "ws_0f3d985e0a3a458e932dc89dbbf671c6",
+      displayName: "Remote A",
+      generation: 2,
+      createdAt: 1,
+      updatedAt: 2,
+    },
+  ]),
 }));
 
 vi.mock("./docker.js", () => ({
@@ -75,6 +104,63 @@ beforeEach(() => {
 });
 
 describe("messageHandler — P14 事件流", () => {
+  it("negotiates an authoritative v2 scope and scopes file events", async () => {
+    const { sent, handler } = makeHandler();
+    await handler.onMessage(
+      msg({
+        type: "init",
+        workspaceProtocolVersion: 2,
+        sessionId: "scope-v2",
+        projectId: PROJECT_A,
+      }),
+    );
+    expect(sent.find((event) => event.type === "session")).toMatchObject({
+      workspaceProtocolVersion: 2,
+      workspaceScope: {
+        projectId: PROJECT_A,
+        replicaId: REPLICA_ID,
+        sessionId: "scope-v2",
+        workspaceGeneration: 2,
+        authorityId: AUTHORITY_ID,
+        replicaKind: "cloud",
+      },
+      workspaceCatalog: [
+        expect.objectContaining({
+          projectId: PROJECT_A,
+          displayName: "Remote A",
+          replicaId: REPLICA_ID,
+        }),
+      ],
+    });
+
+    const turn = handler.onMessage(msg({ type: "message", content: "change file" }));
+    await vi.waitFor(() => expect(currentRun).not.toBeNull());
+    currentRun!.onEvent({ type: "file-changed", path: "a.ts", changeType: "modified" });
+    currentRun!.finish();
+    await turn;
+    expect(sent.find((event) => event.type === "file-changed")).toMatchObject({
+      workspaceScope: {
+        projectId: PROJECT_A,
+        replicaId: REPLICA_ID,
+        workspaceGeneration: 2,
+      },
+    });
+  });
+
+  it("rejects reusing one in-memory session id across projects", async () => {
+    const { sent, handler } = makeHandler();
+    await handler.onMessage(
+      msg({ type: "init", sessionId: "cross-project", projectId: PROJECT_A }),
+    );
+    await handler.onMessage(
+      msg({ type: "init", sessionId: "cross-project", projectId: PROJECT_B }),
+    );
+    expect(sent.at(-1)).toEqual({
+      type: "error",
+      error: "Session does not belong to this project.",
+    });
+  });
+
   it("① events carry strictly increasing seq; session ack carries eventEpoch/currentSeq", async () => {
     const { sent, handler } = makeHandler();
     await handler.onMessage(msg({ type: "init", sessionId: "p14-a" }));

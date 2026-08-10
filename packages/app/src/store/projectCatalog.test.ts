@@ -1,8 +1,10 @@
 import { describe, expect, it } from "vitest";
 import {
   createProject,
+  createProjectFromRemote,
   resolveStoredCurrentProjectId,
   upgradeProjectCatalog,
+  upsertRemoteReplica,
   type ProjectIdFactories,
 } from "./projectCatalog";
 
@@ -26,6 +28,21 @@ describe("mobile project catalog v2", () => {
       storageKey: "ws_74f1d64fbf5946a9aa0b7dcf42b95cab",
       generation: 1,
       layout: "v2",
+    });
+    expect(project.localReplica.storageKey).not.toContain(project.id);
+  });
+
+  it("adopts a remote-created project with a new independent mobile replica", () => {
+    const project = createProjectFromRemote(
+      "10ed836e-ae48-4d67-9e26-a74cbf55a52e",
+      "Cloud project",
+      factories(),
+      100,
+    );
+    expect(project).toMatchObject({
+      id: "10ed836e-ae48-4d67-9e26-a74cbf55a52e",
+      name: "Cloud project",
+      localReplica: { layout: "v2", generation: 1 },
     });
     expect(project.localReplica.storageKey).not.toContain(project.id);
   });
@@ -96,5 +113,43 @@ describe("mobile project catalog v2", () => {
       localReplica: { layout: "v2" },
     });
     expect(result.projects[0].legacyId).toBeUndefined();
+  });
+
+  it("retains one remote replica per authority and connection route", () => {
+    const project = createProject("Existing", factories(), "", undefined, 100);
+    const first = upsertRemoteReplica(project, {
+      id: "151d02d2-93b0-4a26-a50e-9f28eeb323b1",
+      generation: 1,
+      kind: "cloud",
+      authorityId: "3ca2e8bb-4fe5-4e16-a6ca-99840d666870",
+      connectionKey: "cloud:wss://one.example/ws",
+      updatedAt: 200,
+    });
+    const recreated = upsertRemoteReplica(first, {
+      id: "8bb713d6-3408-4f21-8df3-730fd2900c93",
+      generation: 2,
+      kind: "cloud",
+      authorityId: "3ca2e8bb-4fe5-4e16-a6ca-99840d666870",
+      connectionKey: "cloud:wss://one.example/ws",
+      updatedAt: 300,
+    });
+    expect(recreated.remoteReplicas).toEqual([
+      expect.objectContaining({
+        id: "8bb713d6-3408-4f21-8df3-730fd2900c93",
+        generation: 2,
+      }),
+    ]);
+  });
+
+  it("drops corrupt remote entries without replacing the local replica", () => {
+    const project = createProject("Existing", factories(), "", undefined, 100);
+    const result = upgradeProjectCatalog(
+      [{ ...project, remoteReplicas: [{ id: "../escape" }] }],
+      factories(),
+      200,
+    );
+    expect(result.changed).toBe(true);
+    expect(result.projects[0].localReplica).toEqual(project.localReplica);
+    expect(result.projects[0].remoteReplicas).toEqual([]);
   });
 });

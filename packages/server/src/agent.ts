@@ -2,7 +2,7 @@ import "dotenv/config";
 import { anthropic } from "@ai-sdk/anthropic";
 import { createOpenAI } from "@ai-sdk/openai";
 import { google } from "@ai-sdk/google";
-import { getWorkspaceRoot } from "./tools.js";
+import { getWorkspaceHandle, getWorkspaceRoot } from "./tools.js";
 import { mkdir } from "fs/promises";
 import { saveSession, getSession, saveSessionGoal } from "./db.js";
 import { makeUpdateGoalStatusTool, type GoalState } from "./goal/types.js";
@@ -21,6 +21,7 @@ import {
 } from "@pocket-code/agent-core";
 import { createNodeModelClient } from "./nodeModelClient.js";
 import { createNodeBackend } from "./nodeBackend.js";
+import { isUuid, type WorkspaceHandle } from "@pocket-code/workspace-core";
 
 export type ModelProvider = "anthropic" | "openai" | "google" | "siliconflow" | "iflow" | "cli-claude" | "cli-gemini" | "cli-codex";
 
@@ -109,6 +110,8 @@ export interface AgentSession {
   /** Project this session belongs to (empty string = legacy per-session workspace) */
   projectId: string;
   workspace: string;
+  /** Present for UUID projects; legacy sessions remain path-compatible only. */
+  workspaceHandle?: WorkspaceHandle;
   messages: CoreMessage[];
   modelKey: string;
   /** Docker container ID (only set when Docker isolation is enabled) */
@@ -130,21 +133,33 @@ export async function createSession(
   userId: string,
   projectId: string = ''
 ): Promise<AgentSession> {
-  const workspace = getWorkspaceRoot({
+  // Restore ownership/project identity before resolving the physical path. The
+  // old order could restore project B while retaining project A's workspace.
+  const saved = getSession(sessionId);
+  if (saved && saved.userId !== userId) {
+    throw new Error("Session does not belong to this user.");
+  }
+  if (saved?.projectId && projectId && saved.projectId !== projectId) {
+    throw new Error("Session does not belong to this project.");
+  }
+  const effectiveProjectId = saved?.projectId || projectId;
+  const workspaceHandle = effectiveProjectId && isUuid(effectiveProjectId)
+    ? getWorkspaceHandle({ sessionId, projectId: effectiveProjectId, userId })
+    : undefined;
+  const workspace = workspaceHandle?.worktreeRoot ?? getWorkspaceRoot({
     sessionId,
-    projectId: projectId || undefined,
+    projectId: effectiveProjectId || undefined,
     userId,
   });
   await mkdir(workspace, { recursive: true });
 
-  // Try to restore from database
-  const saved = getSession(sessionId);
-  if (saved && saved.userId === userId) {
+  if (saved) {
     const session: AgentSession = {
       sessionId,
       userId,
-      projectId: saved.projectId || projectId,
+      projectId: effectiveProjectId,
       workspace,
+      workspaceHandle,
       messages: saved.messages,
       modelKey: saved.modelKey,
       lastActivity: Date.now(),
@@ -173,6 +188,7 @@ export async function createSession(
     userId,
     projectId,
     workspace,
+    workspaceHandle,
     messages: [],
     modelKey: "deepseek-v4-flash",
     lastActivity: Date.now(),

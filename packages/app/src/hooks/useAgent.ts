@@ -18,7 +18,13 @@ import {
   enqueueMessage,
   getQueueForScope,
   dequeueMessage,
+  rebindProvisionalQueue,
 } from "../services/offlineQueue";
+import {
+  getWorkspaceConnectionKey,
+  usesRemoteWorkspace,
+} from "../services/workspaceConnection";
+import type { RemoteReplicaCatalogEntry } from "../store/projectCatalog";
 import { sendLocalNotification } from "../services/notifications";
 import {
   ServerConnection,
@@ -38,7 +44,11 @@ import type {
 import { createRnModelClient } from "../services/rnModelClient";
 import { createDeviceBackend } from "../services/deviceBackend";
 import { runAgentLoop, compactHistory, buildSystemPrompt, type CoreMessage, type LoopStopReason } from "@pocket-code/agent-core";
-import type { AgentEventType } from "@pocket-code/wire";
+import type {
+  AgentEventType,
+  WorkspaceProjectCatalogEntryType,
+  WorkspaceSessionScopeType,
+} from "@pocket-code/wire";
 
 // ── Public Types(re-export) ───────────────────────────────
 export type { StreamingPhase, Message, ToolCall, ImageAttachment } from "@pocket-code/client-core";
@@ -52,12 +62,20 @@ interface UseAgentOptions {
   model?: string;
   customPrompt?: string;
   projectId?: string;
+  projectName?: string;
   workspaceReplicaId?: string;
   workspaceGeneration?: number;
+  remoteReplicas?: RemoteReplicaCatalogEntry[];
   workspaceHandle?: WorkspaceHandle | null;
   workspaceRoot?: string;
   /** Called when AI modifies a file (writeFile/editFile). Used by WorkspaceContext for auto-refresh. */
   onFileChanged?: (path: string, action: "created" | "modified" | "deleted") => void;
+  /** Persist a server-authoritative replica into the current project catalog. */
+  onRemoteReplica?: (
+    projectId: string,
+    replica: RemoteReplicaCatalogEntry,
+    displayName?: string,
+  ) => void;
 }
 
 // ── Sync filtering ────────────────────────────────────────
@@ -97,11 +115,14 @@ export function useAgent({
   model = "deepseek-v4-flash",
   customPrompt,
   projectId,
+  projectName,
   workspaceReplicaId,
   workspaceGeneration,
+  remoteReplicas,
   workspaceHandle,
   workspaceRoot,
   onFileChanged,
+  onRemoteReplica,
 }: UseAgentOptions) {
   const [messages, setMessages] = useState<Message[]>([]);
   const [isConnected, setIsConnected] = useState(false);
@@ -131,13 +152,18 @@ export function useAgent({
   const modelRef = useRef(model); modelRef.current = model;
   const customPromptRef = useRef(customPrompt); customPromptRef.current = customPrompt;
   const projectIdRef = useRef(projectId); projectIdRef.current = projectId;
+  const projectNameRef = useRef(projectName); projectNameRef.current = projectName;
   const workspaceReplicaIdRef = useRef(workspaceReplicaId);
   workspaceReplicaIdRef.current = workspaceReplicaId;
   const workspaceGenerationRef = useRef(workspaceGeneration);
   workspaceGenerationRef.current = workspaceGeneration;
+  const remoteReplicasRef = useRef(remoteReplicas);
+  remoteReplicasRef.current = remoteReplicas;
   const workspaceHandleRef = useRef(workspaceHandle); workspaceHandleRef.current = workspaceHandle;
   const workspaceRootRef = useRef(workspaceRoot); workspaceRootRef.current = workspaceRoot;
   const onFileChangedRef = useRef(onFileChanged); onFileChangedRef.current = onFileChanged;
+  const onRemoteReplicaRef = useRef(onRemoteReplica);
+  onRemoteReplicaRef.current = onRemoteReplica;
   const workspaceModeRef = useRef(settings.workspaceMode); workspaceModeRef.current = settings.workspaceMode;
   const settingsRef = useRef(settings); settingsRef.current = settings;
   const gitCredentialsRef = useRef(settings.gitCredentials); gitCredentialsRef.current = settings.gitCredentials;
@@ -151,11 +177,31 @@ export function useAgent({
   const authTokenRef = useRef(settings.authToken); authTokenRef.current = settings.authToken;
   const deviceIdRef = useRef(settings.deviceId); deviceIdRef.current = settings.deviceId;
 
+  const activeRemoteReplicaRef = useRef<{
+    connectionKey: string;
+    entry: RemoteReplicaCatalogEntry;
+  } | null>(null);
+
+  const getRetainedRemoteReplica = (): RemoteReplicaCatalogEntry | null => {
+    const connectionKey = getWorkspaceConnectionKey(settingsRef.current);
+    if (!connectionKey) return null;
+    const active = activeRemoteReplicaRef.current;
+    if (active?.connectionKey === connectionKey) return active.entry;
+    return (
+      remoteReplicasRef.current
+        ?.filter((entry) => entry.connectionKey === connectionKey)
+        .sort((a, b) => b.updatedAt - a.updatedAt)[0] ?? null
+    );
+  };
+
   const getCurrentWorkspaceScope = (): WorkspaceScope | null => {
     const currentProjectId = projectIdRef.current;
-    const currentReplicaId = workspaceReplicaIdRef.current;
+    const remoteReplica = usesRemoteWorkspace(settingsRef.current)
+      ? getRetainedRemoteReplica()
+      : null;
+    const currentReplicaId = remoteReplica?.id ?? workspaceReplicaIdRef.current;
     const currentSessionId = sessionIdRef.current;
-    const currentGeneration = workspaceGenerationRef.current;
+    const currentGeneration = remoteReplica?.generation ?? workspaceGenerationRef.current;
     if (
       !currentProjectId ||
       !currentReplicaId ||
@@ -291,8 +337,10 @@ export function useAgent({
       getAuthToken: () => authTokenRef.current,
       getDeviceId,
       buildInitPayload: () => ({
+        workspaceProtocolVersion: 2,
         sessionId: sessionIdRef.current,
         projectId: projectIdRef.current || undefined,
+        projectName: projectNameRef.current || undefined,
         model: modelRef.current,
         gitCredentials: gitCredentialsRef.current?.filter((c) => c.token) || [],
       }),
@@ -350,9 +398,57 @@ export function useAgent({
         updateSettings({ authToken: token, userId });
         authTokenRef.current = token;
       },
-      onSession: (sid: string) => {
+      onSession: (
+        sid: string,
+        workspaceScope?: WorkspaceSessionScopeType,
+        workspaceCatalog?: WorkspaceProjectCatalogEntryType[],
+      ) => {
         sessionIdRef.current = sid;
         setSessionId(sid);
+        const previousScope = getCurrentWorkspaceScope();
+        const connectionKey = getWorkspaceConnectionKey(settingsRef.current);
+        if (connectionKey && workspaceCatalog) {
+          for (const project of workspaceCatalog) {
+            onRemoteReplicaRef.current?.(
+              project.projectId,
+              {
+                id: project.replicaId,
+                generation: project.workspaceGeneration,
+                kind: project.replicaKind,
+                authorityId: project.authorityId,
+                connectionKey,
+                updatedAt: Date.now(),
+              },
+              project.displayName,
+            );
+          }
+        }
+        if (workspaceScope) {
+          if (connectionKey) {
+            const entry: RemoteReplicaCatalogEntry = {
+              id: workspaceScope.replicaId,
+              generation: workspaceScope.workspaceGeneration,
+              kind: workspaceScope.replicaKind,
+              authorityId: workspaceScope.authorityId,
+              connectionKey,
+              updatedAt: Date.now(),
+            };
+            activeRemoteReplicaRef.current = { connectionKey, entry };
+            onRemoteReplicaRef.current?.(
+              workspaceScope.projectId,
+              entry,
+              projectNameRef.current,
+            );
+            const authoritativeScope = createWorkspaceScope(workspaceScope);
+            void (async () => {
+              if (previousScope && !isSameWorkspaceScope(previousScope, authoritativeScope)) {
+                await rebindProvisionalQueue(previousScope, authoritativeScope);
+              }
+              await replayOfflineQueue();
+            })();
+            return;
+          }
+        }
         void replayOfflineQueue();
       },
       onConnected: () => {
@@ -587,7 +683,9 @@ export function useAgent({
           }
           const scope = getCurrentWorkspaceScope();
           if (!scope) throw new Error("Current workspace scope is unavailable");
-          await enqueueMessage(scope, content);
+          const provisional =
+            usesRemoteWorkspace(settingsRef.current) && !getRetainedRemoteReplica();
+          await enqueueMessage(scope, content, { provisional });
           setMessages((prev) => [...prev, { ...mkUserMsg(content, images), pending: true }]);
           return;
         }
@@ -706,6 +804,7 @@ export function useAgent({
     setCompactionNotice(null);
     setEditCutoff(0);
     setGoalState(null);
+    activeRemoteReplicaRef.current = null;
   }, [projectId, workspaceHandle?.generation, workspaceRoot, conn]);
 
   // ── Cleanup ───────────────────────────────────────────

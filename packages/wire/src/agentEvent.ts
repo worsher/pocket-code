@@ -4,6 +4,7 @@
 // 把原生输出归一化到此判别联合。详见 spec 第 3.2 节。
 
 import { z } from "zod";
+import { WorkspaceSessionScope } from "./workspace.js";
 
 // P14:per-session 单调事件序号(server 侧 eventBuffer 分配;spec 2026-07-21 C14-1)。
 // 可选:geek in-process 路径与旧端不带;客户端对带 seq 事件按 (epoch, seq) 去重。
@@ -43,6 +44,8 @@ export const FileChangedEvent = z.object({
   changeType: z.enum(["created", "modified", "deleted"]),
   oldContent: z.string().optional(),
   newContent: z.string().optional(),
+  /** Optional for mixed-version compatibility; v2 servers attach it. */
+  workspaceScope: WorkspaceSessionScope.optional(),
   ...seqField,
 });
 

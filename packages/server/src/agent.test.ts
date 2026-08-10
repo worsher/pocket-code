@@ -24,6 +24,23 @@ vi.mock("./db.js", () => ({
   getSession: (...args: unknown[]) => getSessionMock(...args),
 }));
 
+const getWorkspaceHandleMock = vi.fn((request: { projectId: string }) => ({
+  projectId: request.projectId,
+  replicaId: "0f3d985e-0a3a-458e-932d-c89dbbf671c6",
+  generation: 1,
+  storageUri: "file:///tmp/ws",
+  shellPath: "/tmp/ws",
+  worktreeRoot: `/tmp/ws/${request.projectId}`,
+  stateRoot: "/tmp/state",
+  cacheRoot: "/tmp/cache",
+  capabilities: { read: true, write: true, execute: true, syncBack: true },
+}));
+vi.mock("./tools.js", () => ({
+  getWorkspaceRoot: vi.fn(() => "/tmp/ws"),
+  getWorkspaceHandle: (...args: unknown[]) =>
+    getWorkspaceHandleMock(args[0] as { projectId: string }),
+}));
+
 const createNodeModelClientMock = vi.fn((..._args: unknown[]) => ({ streamStep: vi.fn() }));
 vi.mock("./nodeModelClient.js", () => ({
   createNodeModelClient: (...args: unknown[]) => createNodeModelClientMock(...args),
@@ -71,6 +88,10 @@ beforeEach(() => {
   saveSessionMock.mockReset();
   createNodeModelClientMock.mockClear();
   runCliSessionMock.mockClear();
+  getSessionMock.mockReset();
+  getSessionMock.mockReturnValue(null);
+  saveSessionGoalMock.mockReset();
+  getWorkspaceHandleMock.mockClear();
   // 缺省透传(未压缩):既有用例零改动
   compactHistoryMock.mockReset();
   compactHistoryMock.mockImplementation(async ({ history }: { history: unknown[] }) => ({ history }));
@@ -285,5 +306,46 @@ describe("runAgent", () => {
     expect((session as any).goal.stopReason).toContain("重启");
     expect(saveSessionGoalMock).toHaveBeenCalled(); // 降级态回写
     getSessionMock.mockReturnValue(null);
+  });
+
+  it("createSession resolves a restored session from its saved project before workspace lookup", async () => {
+    const savedProjectId = "10ed836e-ae48-4d67-9e26-a74cbf55a52e";
+    getSessionMock.mockReturnValue({
+      sessionId: "saved",
+      userId: "u1",
+      projectId: savedProjectId,
+      title: "",
+      messages: [],
+      modelKey: "deepseek-v4-flash",
+      goalJson: null,
+      createdAt: 1,
+      updatedAt: 1,
+    });
+
+    const session = await createSession("saved", "u1");
+    expect(getWorkspaceHandleMock).toHaveBeenCalledWith(
+      expect.objectContaining({ projectId: savedProjectId, userId: "u1" }),
+    );
+    expect(session.projectId).toBe(savedProjectId);
+    expect(session.workspace).toBe(`/tmp/ws/${savedProjectId}`);
+  });
+
+  it("createSession rejects restored session reuse by another project or user", async () => {
+    getSessionMock.mockReturnValue({
+      sessionId: "saved",
+      userId: "u1",
+      projectId: "10ed836e-ae48-4d67-9e26-a74cbf55a52e",
+      title: "",
+      messages: [],
+      modelKey: "deepseek-v4-flash",
+      goalJson: null,
+      createdAt: 1,
+      updatedAt: 1,
+    });
+    await expect(
+      createSession("saved", "u1", "018f00d2-8931-7bc0-aad1-1ec83b13f982"),
+    ).rejects.toThrow("project");
+    await expect(createSession("saved", "u2")).rejects.toThrow("user");
+    expect(getWorkspaceHandleMock).not.toHaveBeenCalled();
   });
 });

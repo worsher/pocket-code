@@ -24,9 +24,12 @@ export const RegisterMessage = z.object({
 
 export const InitMessage = z.object({
   type: z.literal("init"),
+  /** Opt-in marker. Missing means a v1 client and remains fully supported. */
+  workspaceProtocolVersion: z.literal(2).optional(),
   token: optStr(),
   sessionId: optStr(128),
   projectId: optStr(128),
+  projectName: optStr(256),
   model: optStr(64),
   customPrompt: optStr(10000),
   // P14:重连补发协商——客户端已应用的最后事件 seq 与其所属 epoch(spec §5.2)

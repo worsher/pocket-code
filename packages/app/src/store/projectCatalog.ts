@@ -20,6 +20,17 @@ export interface MobileReplicaCatalogEntry {
   layout: MobileWorkspaceLayout;
 }
 
+export interface RemoteReplicaCatalogEntry {
+  id: string;
+  generation: number;
+  kind: "cloud" | "dev-binding";
+  /** Stable identity of the remote catalog/database. */
+  authorityId: string;
+  /** Client-side route used to select this replica before reconnecting. */
+  connectionKey: string;
+  updatedAt: number;
+}
+
 export interface Project {
   catalogVersion: typeof PROJECT_CATALOG_VERSION;
   id: string;
@@ -35,6 +46,7 @@ export interface Project {
   lastSyncedCommit?: string;
   cloudProjectId?: string;
   localReplica: MobileReplicaCatalogEntry;
+  remoteReplicas?: RemoteReplicaCatalogEntry[];
   createdAt: number;
   updatedAt: number;
 }
@@ -95,6 +107,51 @@ function isValidV2Project(value: unknown): value is Project {
   } catch {
     return false;
   }
+}
+
+function parseRemoteReplica(value: unknown): RemoteReplicaCatalogEntry | null {
+  if (!isRecord(value)) return null;
+  try {
+    const id = parseReplicaId(String(value.id ?? ""));
+    const authorityId = parseReplicaId(String(value.authorityId ?? ""));
+    const generation = Number(value.generation);
+    const kind = value.kind;
+    const connectionKey = value.connectionKey;
+    const updatedAt = Number(value.updatedAt);
+    if (
+      !Number.isInteger(generation) ||
+      generation < 1 ||
+      (kind !== "cloud" && kind !== "dev-binding") ||
+      typeof connectionKey !== "string" ||
+      !connectionKey ||
+      !Number.isFinite(updatedAt)
+    ) {
+      return null;
+    }
+    return { id, generation, kind, authorityId, connectionKey, updatedAt };
+  } catch {
+    return null;
+  }
+}
+
+export function upsertRemoteReplica(
+  project: Project,
+  replica: RemoteReplicaCatalogEntry,
+): Project {
+  const parsed = parseRemoteReplica(replica);
+  if (!parsed) throw new Error("Invalid remote replica catalog entry");
+  const existing = project.remoteReplicas ?? [];
+  const remoteReplicas = [
+    ...existing.filter(
+      (entry) =>
+        !(
+          entry.authorityId === parsed.authorityId &&
+          entry.connectionKey === parsed.connectionKey
+        ),
+    ),
+    parsed,
+  ];
+  return { ...project, remoteReplicas };
 }
 
 function migrateLegacyProject(
@@ -169,6 +226,23 @@ export function createProject(
   };
 }
 
+export function createProjectFromRemote(
+  projectId: string,
+  displayName: string,
+  factories: ProjectIdFactories,
+  now: number = Date.now(),
+): Project {
+  return {
+    catalogVersion: PROJECT_CATALOG_VERSION,
+    id: parseProjectId(projectId),
+    name: displayName.trim() || "Remote project",
+    description: "",
+    localReplica: createReplicaMetadata("v2", factories),
+    createdAt: now,
+    updatedAt: now,
+  };
+}
+
 export function upgradeProjectCatalog(
   value: unknown,
   factories: ProjectIdFactories,
@@ -180,7 +254,24 @@ export function upgradeProjectCatalog(
 
   for (const item of input) {
     if (isValidV2Project(item)) {
-      projects.push(item);
+      if (item.remoteReplicas === undefined) {
+        projects.push(item);
+      } else if (Array.isArray(item.remoteReplicas)) {
+        const remoteReplicas = item.remoteReplicas
+          .map(parseRemoteReplica)
+          .filter((entry): entry is RemoteReplicaCatalogEntry => entry !== null);
+        if (remoteReplicas.length === item.remoteReplicas.length) {
+          projects.push(item);
+        } else {
+          projects.push({ ...item, remoteReplicas });
+          changed = true;
+        }
+      } else {
+        const repaired = { ...item };
+        delete repaired.remoteReplicas;
+        projects.push(repaired);
+        changed = true;
+      }
       continue;
     }
     const migrated = migrateLegacyProject(item, factories, now);

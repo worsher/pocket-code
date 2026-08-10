@@ -33,6 +33,32 @@ describe("wire — AgentEvent validation", () => {
     expect(r.success).toBe(true);
   });
 
+  it("file-changed accepts an optional authoritative workspace scope", () => {
+    const workspaceScope = {
+      projectId: "10ed836e-ae48-4d67-9e26-a74cbf55a52e",
+      replicaId: "0f3d985e-0a3a-458e-932d-c89dbbf671c6",
+      sessionId: "session-1",
+      workspaceGeneration: 2,
+      authorityId: "ce393574-d077-4ddf-a34a-bd9746277f97",
+      replicaKind: "dev-binding" as const,
+    };
+    const result = AgentEvent.safeParse({
+      type: "file-changed",
+      path: "src/a.ts",
+      changeType: "modified",
+      workspaceScope,
+    });
+    expect(result.success).toBe(true);
+    expect(
+      AgentEvent.safeParse({
+        type: "file-changed",
+        path: "src/a.ts",
+        changeType: "modified",
+        workspaceScope: { ...workspaceScope, workspaceGeneration: 0 },
+      }).success
+    ).toBe(false);
+  });
+
   it("rejects file-changed with invalid changeType", () => {
     const r = AgentEvent.safeParse({
       type: "file-changed",

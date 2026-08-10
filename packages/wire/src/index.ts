@@ -22,6 +22,15 @@ export {
   type WsMessageType,
 } from "./messages.js";
 
+export {
+  WorkspaceReplicaKind,
+  WorkspaceProjectCatalogEntry,
+  WorkspaceSessionScope,
+  type WorkspaceProjectCatalogEntryType,
+  type WorkspaceReplicaKindType,
+  type WorkspaceSessionScopeType,
+} from "./workspace.js";
+
 // Normalized agent event protocol (consumed by the App's render layer)
 export {
   TextDeltaEvent,

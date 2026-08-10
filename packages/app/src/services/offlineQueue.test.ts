@@ -26,6 +26,7 @@ const {
   getQueue,
   getQueueForScope,
   getQuarantinedMessages,
+  rebindProvisionalQueue,
 } = await import("./offlineQueue");
 const { createWorkspaceScope } = await import("@pocket-code/workspace-core");
 
@@ -77,5 +78,21 @@ describe("offline queue scope", () => {
 
     expect(await getQueue()).toEqual([]);
     expect(await getQuarantinedMessages()).toHaveLength(1);
+  });
+
+  it("rebinds only explicitly provisional messages after remote acknowledgement", async () => {
+    const provisional = await enqueueMessage(scope, "waiting", { provisional: true });
+    const fixed = await enqueueMessage(scope, "already bound");
+    const remoteScope = createWorkspaceScope({
+      ...scope,
+      replicaId: "151d02d2-93b0-4a26-a50e-9f28eeb323b1",
+      workspaceGeneration: 1,
+    });
+
+    expect(await rebindProvisionalQueue(scope, remoteScope)).toBe(1);
+    expect(await getQueueForScope(remoteScope)).toEqual([
+      { ...provisional, scope: remoteScope, provisional: false },
+    ]);
+    expect(await getQueueForScope(scope)).toEqual([fixed]);
   });
 });

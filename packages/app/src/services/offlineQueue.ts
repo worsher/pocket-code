@@ -20,6 +20,8 @@ export interface QueuedMessage {
   content: string;
   timestamp: number;
   retries: number;
+  /** Awaiting the first authoritative remote replica acknowledgement. */
+  provisional: boolean;
 }
 
 function parseQueuedMessage(value: unknown): QueuedMessage | null {
@@ -50,6 +52,8 @@ function parseQueuedMessage(value: unknown): QueuedMessage | null {
       content: candidate.content,
       timestamp: candidate.timestamp,
       retries: candidate.retries,
+      // Records written before this field existed were already authoritative.
+      provisional: candidate.provisional === true,
     };
   } catch {
     return null;
@@ -76,6 +80,7 @@ async function quarantine(values: unknown[]): Promise<void> {
 export async function enqueueMessage(
   scopeInput: WorkspaceScopeInput,
   content: string,
+  options?: { provisional?: boolean },
 ): Promise<QueuedMessage> {
   const msg: QueuedMessage = {
     id: `offline_${randomUUID()}`,
@@ -83,12 +88,34 @@ export async function enqueueMessage(
     content,
     timestamp: Date.now(),
     retries: 0,
+    provisional: options?.provisional === true,
   };
 
   const queue = await getQueue();
   queue.push(msg);
   await saveQueue(queue);
   return msg;
+}
+
+/**
+ * Bind first-connect offline messages to the remote replica returned by the
+ * server. Only explicitly provisional records from the exact old scope move.
+ */
+export async function rebindProvisionalQueue(
+  previousScope: WorkspaceScope,
+  authoritativeScope: WorkspaceScope,
+): Promise<number> {
+  const queue = await getQueue();
+  let rebound = 0;
+  const updated = queue.map((message) => {
+    if (!message.provisional || !isSameWorkspaceScope(previousScope, message.scope)) {
+      return message;
+    }
+    rebound++;
+    return { ...message, scope: authoritativeScope, provisional: false };
+  });
+  if (rebound > 0) await saveQueue(updated);
+  return rebound;
 }
 
 /**
