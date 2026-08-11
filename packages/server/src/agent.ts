@@ -77,6 +77,22 @@ const siliconflow = createOpenAI({
   apiKey: process.env.SILICONFLOW_API_KEY || "",
 });
 
+/**
+ * DeepSeek 官方开放平台(platform.deepseek.com,OpenAI 兼容)。
+ * 设置 DEEPSEEK_API_KEY 时 v4 系列优先走官方端点;未设置则回退硅基流动。
+ * 注意官方 key 与硅基流动 key 不通用,不能只换 key 不换端点。
+ */
+const deepseekOfficial = createOpenAI({
+  baseURL: process.env.DEEPSEEK_BASE_URL || "https://api.deepseek.com",
+  apiKey: process.env.DEEPSEEK_API_KEY || "",
+});
+
+/** 官方平台可用模型:硅基流动 modelId → 官方 modelId(v3/r1 官方未提供,始终走硅基流动) */
+const DEEPSEEK_OFFICIAL_IDS: Record<string, string> = {
+  "deepseek-ai/DeepSeek-V4-Pro": "deepseek-v4-pro",
+  "deepseek-ai/DeepSeek-V4-Flash": "deepseek-v4-flash",
+};
+
 /** iFlow (心流) uses OpenAI-compatible API */
 const iflow = createOpenAI({
   baseURL: process.env.IFLOW_BASE_URL || "https://apis.iflow.cn/v1",
@@ -97,8 +113,14 @@ export function getModel(modelKey: string) {
       return openai(config.modelId);
     case "google":
       return google(config.modelId);
-    case "siliconflow":
+    case "siliconflow": {
+      // DeepSeek v4 系列:设置 DEEPSEEK_API_KEY 时走官方端点,否则回退硅基流动
+      const officialId = DEEPSEEK_OFFICIAL_IDS[config.modelId];
+      if (officialId && process.env.DEEPSEEK_API_KEY) {
+        return deepseekOfficial(officialId);
+      }
       return siliconflow(config.modelId);
+    }
     case "iflow":
       return iflow(config.modelId);
     default:
