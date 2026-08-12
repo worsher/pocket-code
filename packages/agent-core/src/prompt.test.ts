@@ -27,6 +27,18 @@ describe("buildSystemPrompt", () => {
     expect(prompt).toContain("\n\n## Project Instructions\n" + customPrompt);
     expect(prompt.endsWith(customPrompt)).toBe(true);
   });
+
+  it("directs the model to credential-aware Git wrappers without exposing keys", () => {
+    const bound = buildSystemPrompt({ hasBoundGitCredential: true });
+    expect(bound).toContain("gitClone, gitPull, and gitPush are the credential-aware wrappers");
+    expect(bound).toContain("NEVER ask for, print, inspect, return, or search for a token/key/password");
+    expect(bound).toContain("has a bound Git credential profile");
+    expect(bound).toContain("Never run git clone, git pull, git fetch, or git push through runCommand");
+
+    const unbound = buildSystemPrompt({ hasBoundGitCredential: false });
+    expect(unbound).toContain("No Git credential profile is currently bound");
+    expect(unbound).toContain("GitHub, Gitee, or GitLab profile");
+  });
 });
 
 describe("buildSystemPrompt 后台能力门控", () => {

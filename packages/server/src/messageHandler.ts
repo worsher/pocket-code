@@ -322,6 +322,7 @@ export function createMessageHandler(
             if (msg.customPrompt !== undefined) {
               session.customPrompt = msg.customPrompt || undefined;
             }
+            session.gitCredentialProfileId = msg.gitCredentialProfileId || undefined;
             // Remove plaintext files produced by pre-v2 versions on every
             // session restore.  One-release legacy payload migration is
             // allowed only on a transport already trusted for plaintext.
@@ -1072,7 +1073,10 @@ export function createMessageHandler(
             const { toolName, args } = msg;
             const callId = msg.callId ?? "";
             const registry = buildToolRegistry(
-              createNodeBackend(session.workspaceHandle ?? session.workspace, session.containerId),
+              createNodeBackend(session.workspaceHandle ?? session.workspace, session.containerId, {
+                userId: session.userId,
+                credentialProfileId: session.gitCredentialProfileId,
+              }),
               session.workspace
             );
             if (!registry.has(toolName)) {

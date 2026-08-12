@@ -13,6 +13,17 @@ import {
   assertWorkspacePathNotSensitive,
   isSensitiveWorkspacePath,
 } from "./sensitiveWorkspacePath.js";
+import {
+  getGitCredentialVault,
+  GitCredentialVaultError,
+  type GitCredentialVault,
+} from "./gitCredentialVault.js";
+import {
+  atomicCloneGitRepository,
+  runGitWorkspaceOperation,
+  toGitRpcError,
+  type GitRpcErrorShape,
+} from "./gitRemote.js";
 
 const execAsync = promisify(exec);
 
@@ -21,6 +32,26 @@ interface NodeExecOpts {
   timeoutMs?: number;
   env?: Record<string, string>;
   isolateHome?: boolean;
+}
+
+export interface NodeGitCredentialContext {
+  userId: string;
+  credentialProfileId?: string;
+  /** 测试注入口；生产环境使用进程级加密 Vault。 */
+  credentialVault?: Pick<GitCredentialVault, "read">;
+}
+
+function credentialAwareGitError(error: unknown): GitRpcErrorShape {
+  if (error instanceof GitCredentialVaultError) {
+    if (error.code === "credential_not_found") {
+      return { code: "credential_not_found", message: "Git credential was not found" };
+    }
+    if (error.code === "invalid_profile") {
+      return { code: "invalid_request", message: error.message };
+    }
+    return { code: "internal_error", message: "Git credential vault is unavailable" };
+  }
+  return toGitRpcError(error);
 }
 
 /**
@@ -146,11 +177,12 @@ function errMessage(err: unknown): string {
 
 export function createNodeBackend(
   workspaceTarget: string | WorkspaceHandle,
-  containerId?: string
+  containerId?: string,
+  gitCredentialContext?: NodeGitCredentialContext
 ): RuntimeBackend {
   const workspace =
     typeof workspaceTarget === "string" ? workspaceTarget : workspaceTarget.worktreeRoot;
-  return {
+  const backend: RuntimeBackend = {
     async readFile(path: string): Promise<string> {
       assertWorkspacePathNotSensitive(path);
       const target = await resolveWorkspaceRealPath(workspace, path, { allowMissing: false });
@@ -205,4 +237,70 @@ export function createNodeBackend(
       await stopManaged(processId);
     },
   };
+
+  if (gitCredentialContext) {
+    backend.runCredentialAwareGit = async (tool, args) => {
+      try {
+        const profileId = gitCredentialContext.credentialProfileId;
+        if (!profileId) {
+          return {
+            success: false,
+            error: {
+              code: "credential_not_found",
+              message: "Bind and test a Git credential profile for this project",
+            },
+          };
+        }
+        const vault = gitCredentialContext.credentialVault ?? getGitCredentialVault();
+        const credential = await vault.read(gitCredentialContext.userId, profileId);
+
+        if (tool === "gitClone") {
+          const repositoryUrl = typeof args.url === "string" ? args.url : "";
+          const targetName = typeof args.dir === "string" ? args.dir : "repo";
+          if (!repositoryUrl) {
+            return {
+              success: false,
+              error: { code: "invalid_request", message: "An HTTPS repository URL is required" },
+            };
+          }
+          const targetWorkspace = await resolveWorkspaceRealPath(workspace, targetName, {
+            allowMissing: true,
+          });
+          const result = await atomicCloneGitRepository({
+            repositoryUrl,
+            credential,
+            targetWorkspace,
+          });
+          return { success: true, ...result };
+        }
+
+        const remote = typeof args.remote === "string" ? args.remote : undefined;
+        const branch = typeof args.branch === "string" ? args.branch : undefined;
+        if ((remote && remote !== "origin") || branch) {
+          return {
+            success: false,
+            error: {
+              code: "invalid_request",
+              message: "Credential-aware pull/push supports origin and the current branch only",
+            },
+          };
+        }
+        const repositoryPath =
+          typeof args.path === "string" && args.path ? args.path : workspace;
+        const repositoryWorkspace = await resolveWorkspaceRealPath(workspace, repositoryPath, {
+          allowMissing: false,
+        });
+        const result = await runGitWorkspaceOperation({
+          workspace: repositoryWorkspace,
+          operation: tool === "gitPull" ? "pull" : "push",
+          credential,
+        });
+        return { success: true, ...result };
+      } catch (error) {
+        return { success: false, error: credentialAwareGitError(error) };
+      }
+    };
+  }
+
+  return backend;
 }

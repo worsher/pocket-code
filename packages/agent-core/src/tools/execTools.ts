@@ -47,7 +47,7 @@ export function buildExecTools(workspace: string): ToolDef[] {
   const runCommandSchema: ToolSchema = {
     name: "runCommand",
     description:
-      "Execute a shell command in the workspace directory. Use for npm, git, build tools, etc.",
+      "Execute a non-Git shell command in the workspace directory. Use the dedicated Git tools for every Git operation, especially clone, pull, and push because they provide private credentials without exposing them.",
     parameters: {
       type: "object",
       properties: {
@@ -108,6 +108,9 @@ export function buildExecTools(workspace: string): ToolDef[] {
         const target = dir || url.split("/").pop()?.replace(/\.git$/, "") || "repo";
         // 防穿越守卫(对照 tools.ts gitClone):target 须校验在 workspace 内,否则抛 "Path traversal not allowed"
         safePath(workspace, target);
+        if (backend.runCredentialAwareGit) {
+          return await backend.runCredentialAwareGit("gitClone", { url, dir: target });
+        }
         // gitClone 在 workspace 根跑,不经 resolveGitCwd(尚不存在仓库可解析)
         const r = await backend.exec(`git clone --depth 1 ${url} ${target}`, {
           cwd: workspace,
@@ -253,6 +256,9 @@ export function buildExecTools(workspace: string): ToolDef[] {
       const path = args.path as string | undefined;
       try {
         const cwd = await resolveGitCwd(backend, path);
+        if (backend.runCredentialAwareGit) {
+          return await backend.runCredentialAwareGit("gitPush", { remote, branch, path: cwd });
+        }
         const cmd = `git push ${remote || "origin"} ${branch || ""}`.trim();
         const r = await backend.exec(cmd, {
           cwd, timeoutMs: 30000, env: GIT_ENV, isolateHome: true,
@@ -289,6 +295,9 @@ export function buildExecTools(workspace: string): ToolDef[] {
       const path = args.path as string | undefined;
       try {
         const cwd = await resolveGitCwd(backend, path);
+        if (backend.runCredentialAwareGit) {
+          return await backend.runCredentialAwareGit("gitPull", { remote, branch, path: cwd });
+        }
         const cmd = `git pull ${remote || "origin"} ${branch || ""}`.trim();
         const r = await backend.exec(cmd, {
           cwd, timeoutMs: 30000, env: GIT_ENV, isolateHome: true,

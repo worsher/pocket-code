@@ -214,6 +214,12 @@ export function createDeviceBackend(opts: CreateDeviceBackendOpts): RuntimeBacke
       return parseExecResult(result);
     },
 
+    async runCredentialAwareGit(tool, args): Promise<unknown> {
+      // 保留专用工具名，让 executeLocalTool/Server 能进入 SecureStore/Vault +
+      // AskPass 通道。secret 只在执行层解析，不会返回 agent-core 或模型。
+      return execTool(tool, args);
+    },
+
     async startProcess(cmd: string, opts?: { cwd?: string }): Promise<{ processId: string }> {
       const result = (await execTool("runInBackground", {
         command: cmd,

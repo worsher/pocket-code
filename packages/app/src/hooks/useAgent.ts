@@ -154,6 +154,24 @@ function assertDirectGitCredentialTransport(serverUrl: string): void {
   throw new Error("Direct 模式安装 Git Key 必须使用 wss://；不允许通过局域网明文 ws:// 发送");
 }
 
+async function installRemoteGitCredential(
+  conn: ServerConnection,
+  profile: GitCredentialProfile,
+  workspaceMode: AppSettings["workspaceMode"],
+  serverUrl: string
+): Promise<GitCredentialResponse> {
+  if (!conn.isOpen) throw new Error("远端尚未连接，无法安装 Git Key");
+  if (workspaceMode !== "relay") assertDirectGitCredentialTransport(serverUrl);
+  const secret = await readGitCredentialSecret(profile);
+  return assertGitCredentialResponse(
+    await conn.upsertGitCredential({
+      profile: toGitCredentialWireProfile(profile),
+      secret,
+      randomBytes: getRandomBytes,
+    })
+  );
+}
+
 function migrationSafeLegacyProjectId(value: string | undefined): string | undefined {
   if (!value) return undefined;
   try {
@@ -450,6 +468,7 @@ export function useAgent({
 
   // ── 单例 ServerConnection(惰性创建) ───────────────────
   const connRef = useRef<ServerConnection | null>(null);
+  const remoteGitCredentialInstallRef = useRef<Promise<void> | null>(null);
   if (!connRef.current) {
     const config: ConnectionConfig = {
       getServerUrl: () => serverUrlRef.current,
@@ -469,6 +488,7 @@ export function useAgent({
         projectId: projectIdRef.current || undefined,
         legacyProjectId: migrationSafeLegacyProjectId(legacyProjectIdRef.current),
         projectName: projectNameRef.current || undefined,
+        gitCredentialProfileId: gitCredentialProfileIdRef.current || undefined,
         model: modelRef.current,
       }),
       isRelayPaired: () => !!(settingsRef.current.relayToken && settingsRef.current.relayMachineId),
@@ -544,6 +564,26 @@ export function useAgent({
       ) => {
         sessionIdRef.current = sid;
         setSessionId(sid);
+        const boundProfile = settingsRef.current.gitCredentialProfiles.find(
+          (profile) => profile.id === gitCredentialProfileIdRef.current && profile.hasSecret
+        );
+        const activeConnection = connRef.current;
+        if (boundProfile && activeConnection) {
+          // session ack 后预装项目绑定的凭据。发送下一条模型消息前会等待该
+          // promise，因此模型首次调用 gitClone/pull/push 也不会与 Vault 安装竞态。
+          remoteGitCredentialInstallRef.current = installRemoteGitCredential(
+            activeConnection,
+            boundProfile,
+            workspaceModeRef.current,
+            serverUrlRef.current
+          )
+            .then(() => undefined)
+            .catch((error) => {
+              console.warn("[Git] Failed to install bound credential profile:", error);
+            });
+        } else {
+          remoteGitCredentialInstallRef.current = null;
+        }
         const previousScope = getCurrentWorkspaceScope();
         const connectionKey = getWorkspaceConnectionKey(settingsRef.current);
         if (connectionKey && workspaceCatalog) {
@@ -594,6 +634,7 @@ export function useAgent({
       },
       onDisconnected: () => {
         setIsConnected(false);
+        remoteGitCredentialInstallRef.current = null;
         // P14:断开不中断 turn——agent 仍在开发机跑,重连后经 seq 补发接续
         if (isStreamingRef.current) {
           setStreamNotice("连接已断开,agent 仍在开发机继续运行,恢复后自动补齐");
@@ -643,6 +684,7 @@ export function useAgent({
 
   // ── Offline queue replay(连接建立后) ─────────────────
   const replayOfflineQueue = useCallback(async () => {
+    await remoteGitCredentialInstallRef.current;
     const replayScope = getCurrentWorkspaceScope();
     if (!replayScope) return;
     const queue = await getQueueForScope(replayScope);
@@ -730,19 +772,12 @@ export function useAgent({
 
   const upsertRemoteGitCredential = useCallback(
     async (profile: GitCredentialProfile): Promise<GitCredentialResponse> => {
-      if (!conn.isOpen) throw new Error("远端尚未连接，无法安装 Git Key");
-      if (workspaceModeRef.current !== "relay") {
-        assertDirectGitCredentialTransport(serverUrlRef.current);
-      }
-      const secret = await readGitCredentialSecret(profile);
-      const response = await conn.upsertGitCredential({
-        profile: toGitCredentialWireProfile(profile),
-        secret,
-        // Relay mode seals inside client-core and never puts this RPC into the
-        // offline queue. Direct mode sends it only on the live WSS connection.
-        randomBytes: getRandomBytes,
-      });
-      return assertGitCredentialResponse(response);
+      return installRemoteGitCredential(
+        conn,
+        profile,
+        workspaceModeRef.current,
+        serverUrlRef.current
+      );
     },
     [conn]
   );
@@ -894,6 +929,9 @@ export function useAgent({
       const abortController = new AbortController();
       abortRef.current = abortController;
       try {
+        // server workspace 的本地模型也会经 tool-exec 调用远程 Git wrapper；
+        // 首轮开始前等待 bound profile 安装，避免 credential_not_found 竞态。
+        await remoteGitCredentialInstallRef.current;
         // P15:turn 边界压缩(与 server 侧同函数;失败静默跳过);modelClient 提升复用(D-P15-2)
         const modelClient = createRnModelClient({ modelConfig, apiKey });
         const { history: compactedHistory, result: compaction } = await compactHistory({
@@ -914,7 +952,10 @@ export function useAgent({
             workspaceRoot: geekWorkspaceRoot,
           }),
           workspace: geekWorkspaceRoot,
-          system: buildSystemPrompt({ customPrompt: customPromptRef.current }),
+          system: buildSystemPrompt({
+            customPrompt: customPromptRef.current,
+            hasBoundGitCredential: !!gitCredentialProfileIdRef.current,
+          }),
           history: coreHistoryRef.current, // newSession/项目切换处重置为 [];loadSession 重建自存档(I1)
           userMessage: content,
           images: images?.map((i) => ({ base64: i.base64, mimeType: i.mimeType })),
@@ -949,6 +990,7 @@ export function useAgent({
         setLastStopReason(null);
         setStreamNotice(null);
         setCompactionNotice(null);
+        await remoteGitCredentialInstallRef.current;
         conn.sendRaw({ type: "goal-create", content: goalContent });
         return;
       }
@@ -968,6 +1010,7 @@ export function useAgent({
           setMessages((prev) => [...prev, { ...mkUserMsg(content, images), pending: true }]);
           return;
         }
+        await remoteGitCredentialInstallRef.current;
         sendCloudMessage(content, images);
       } else {
         sendGeekMessage(content, images);
@@ -1008,6 +1051,7 @@ export function useAgent({
       if (settings.mode === "cloud") {
         await new Promise((r) => setTimeout(r, 50));
         if (!conn.isOpen) return;
+        await remoteGitCredentialInstallRef.current;
         setMessages((prev) => [...prev, mkUserMsg(newContent), mkAssistantMsg()]);
         setIsStreaming(true);
         setStreamingPhase("connecting");

@@ -19,6 +19,20 @@ describe("wire — WsMessage validation", () => {
     expect(result.success).toBe(true);
   });
 
+  it("carries only the bound Git credential profile ID in init", () => {
+    const result = WsMessage.safeParse({
+      type: "init",
+      gitCredentialProfileId: "github-pat",
+    });
+    expect(result.success).toBe(true);
+    if (result.success && result.data.type === "init") {
+      expect(result.data.gitCredentialProfileId).toBe("github-pat");
+    }
+    expect(
+      WsMessage.safeParse({ type: "init", gitCredentialProfileId: "x".repeat(129) }).success
+    ).toBe(false);
+  });
+
   it("negotiates workspace protocol v2 without rejecting v1 clients", () => {
     expect(WsMessage.safeParse({ type: "init" }).success).toBe(true);
     expect(WsMessage.safeParse({ type: "init", workspaceProtocolVersion: 2 }).success).toBe(true);

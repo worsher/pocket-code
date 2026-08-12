@@ -69,6 +69,35 @@ describe("git tools", () => {
     expect(r.stdout.length).toBe(2000);
     expect(r.stderr.length).toBe(2000);
   });
+
+  it("routes remote Git through the credential-aware backend without raw shell fallback", async () => {
+    const exec = vi.fn(async () => ({ stdout: "", stderr: "", exitCode: 0 }));
+    const runCredentialAwareGit = vi.fn(async (tool: string) => ({ success: true, tool }));
+    const be = makeFakeBackend({ exec, runCredentialAwareGit });
+    const registry = buildToolRegistry(be, "/ws");
+
+    await expect(
+      registry.run("gitClone", { url: "https://github.com/acme/private.git", dir: "private" })
+    ).resolves.toEqual({ success: true, tool: "gitClone" });
+    await expect(registry.run("gitPull", {})).resolves.toEqual({ success: true, tool: "gitPull" });
+    await expect(registry.run("gitPush", {})).resolves.toEqual({ success: true, tool: "gitPush" });
+
+    expect(runCredentialAwareGit).toHaveBeenNthCalledWith(1, "gitClone", {
+      url: "https://github.com/acme/private.git",
+      dir: "private",
+    });
+    expect(runCredentialAwareGit).toHaveBeenNthCalledWith(2, "gitPull", {
+      remote: undefined,
+      branch: undefined,
+      path: undefined,
+    });
+    expect(runCredentialAwareGit).toHaveBeenNthCalledWith(3, "gitPush", {
+      remote: undefined,
+      branch: undefined,
+      path: undefined,
+    });
+    expect(exec).not.toHaveBeenCalled();
+  });
 });
 
 describe("stopProcess schema", () => {

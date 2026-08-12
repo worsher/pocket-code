@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createNodeBackend } from "./nodeBackend.js";
 import type { WorkspaceHandle } from "@pocket-code/workspace-core";
+import { GitCredentialVaultError, type ResolvedGitCredential } from "./gitCredentialVault.js";
 
 let ws: string;
 let externalDirectories: string[];
@@ -138,6 +139,54 @@ describe("NodeBackend", () => {
 
     expect(result.exitCode).toBe(127);
     expect(result.stderr).toContain("outside");
+  });
+
+  it("keeps credential secrets inside the secure Git wrapper and rejects a mismatched host", async () => {
+    const credential: ResolvedGitCredential = {
+      profile: {
+        id: "github-pat",
+        provider: "github",
+        authKind: "pat",
+        origin: "https://github.com",
+        username: "oauth2",
+      },
+      secret: "must-not-appear",
+      createdAt: Date.now(),
+      updatedAt: Date.now(),
+    };
+    const be = createNodeBackend(ws, undefined, {
+      userId: "u1",
+      credentialProfileId: "github-pat",
+      credentialVault: { read: vi.fn(async () => credential) },
+    });
+
+    const result = await be.runCredentialAwareGit!("gitClone", {
+      url: "https://gitlab.com/acme/private.git",
+      dir: "private",
+    });
+
+    expect(result).toMatchObject({ success: false, error: { code: "host_mismatch" } });
+    expect(JSON.stringify(result)).not.toContain(credential.secret);
+    expect(existsSync(join(ws, "private"))).toBe(false);
+  });
+
+  it("returns an actionable credential_not_found result instead of falling back to raw git", async () => {
+    const be = createNodeBackend(ws, undefined, {
+      userId: "u1",
+      credentialProfileId: "missing",
+      credentialVault: {
+        read: vi.fn(async () => {
+          throw new GitCredentialVaultError("credential_not_found", "secret path");
+        }),
+      },
+    });
+
+    await expect(
+      be.runCredentialAwareGit!("gitPush", { path: "." })
+    ).resolves.toEqual({
+      success: false,
+      error: { code: "credential_not_found", message: "Git credential was not found" },
+    });
   });
 });
 

@@ -54,6 +54,8 @@ export interface ModelClient {
 
 export interface ExecResult { stdout: string; stderr: string; exitCode: number }
 
+export type CredentialAwareGitTool = "gitClone" | "gitPull" | "gitPush";
+
 export interface RuntimeBackend {
   readFile(path: string): Promise<string>;
   writeFile(path: string, content: string): Promise<{ isNew: boolean }>;
@@ -61,6 +63,14 @@ export interface RuntimeBackend {
   listFiles(path: string): Promise<{ name: string; type: "file" | "dir" }[]>;
   /** 不抛非零:统一返回 exitCode。isolateHome=true 时 HOME 指向工作区等价目录。 */
   exec(cmd: string, opts?: { cwd?: string; timeoutMs?: number; env?: Record<string, string>; isolateHome?: boolean }): Promise<ExecResult>;
+  /**
+   * 远程 Git 的受控凭据通道。实现方从项目绑定的 profile 解析 secret，
+   * 但只返回脱敏的操作结果；模型和 core 永远拿不到 secret。
+   */
+  runCredentialAwareGit?(
+    tool: CredentialAwareGitTool,
+    args: Record<string, unknown>
+  ): Promise<unknown>;
   startProcess?(cmd: string, opts?: { cwd?: string }): Promise<{ processId: string }>;
   stopProcess?(processId: string): Promise<void>;
 }

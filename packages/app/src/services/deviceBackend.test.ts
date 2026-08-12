@@ -197,6 +197,23 @@ describe("createDeviceBackend", () => {
     expect(result).toEqual({ stdout: "", stderr: "boom", exitCode: 1 });
   });
 
+  it("credential-aware Git preserves the dedicated tool name and never becomes runCommand", async () => {
+    const execTool = vi.fn().mockResolvedValue({ success: true });
+    const backend = createDeviceBackend({ execTool, workspaceRoot: DEFAULT_ROOT });
+
+    const result = await backend.runCredentialAwareGit!("gitClone", {
+      url: "https://github.com/acme/private.git",
+      dir: "private",
+    });
+
+    expect(result).toEqual({ success: true });
+    expect(execTool).toHaveBeenCalledWith("gitClone", {
+      url: "https://github.com/acme/private.git",
+      dir: "private",
+    });
+    expect(execTool).not.toHaveBeenCalledWith("runCommand", expect.anything());
+  });
+
   it("M-obs1: exec forwards opts.timeoutMs and a non-root cwd to execTool args", async () => {
     const execTool = vi.fn().mockResolvedValue({ success: true, stdout: "", stderr: "", exitCode: 0 });
     const backend = createDeviceBackend({ execTool, workspaceRoot: DEFAULT_ROOT });

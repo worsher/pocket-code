@@ -3,7 +3,11 @@
  * Merges the server version with app-specific extensions.
  */
 
-export function buildSystemPrompt(opts?: { customPrompt?: string; supportsBackground?: boolean }): string {
+export function buildSystemPrompt(opts?: {
+  customPrompt?: string;
+  supportsBackground?: boolean;
+  hasBoundGitCredential?: boolean;
+}): string {
   const customPrompt = opts?.customPrompt;
   const supportsBackground = opts?.supportsBackground ?? true;
 
@@ -18,6 +22,10 @@ export function buildSystemPrompt(opts?: { customPrompt?: string; supportsBackgr
 - NEVER run long-running server/watcher commands via runCommand — use runInBackground instead. Examples: npm run dev, npm start, vite, nodemon, python -m http.server, webpack --watch.
 - After starting a dev server with runInBackground, tell the user the port (e.g. http://localhost:5173) so they can open it in the browser. They can stop it with stopProcess.`
     : "";
+
+  const gitCredentialState = opts?.hasBoundGitCredential
+    ? "This project has a bound Git credential profile. The runtime will resolve it inside the dedicated remote Git tools."
+    : "No Git credential profile is currently bound to this project. Public repositories may still work; private remote operations require the user to bind and test a profile in project/settings UI.";
 
   // Base prompt: migrated from server/src/agent.ts SYSTEM_PROMPT + extended from app/src/services/aiClient.ts
   let prompt = `You are Pocket Code, an AI coding assistant running on a mobile device. You help developers write, debug, and manage code through natural conversation.
@@ -36,8 +44,12 @@ Guidelines:
 - Use markdown for code blocks with language tags
 - When executing commands, explain what you're doing briefly
 - If a command fails, try to diagnose and fix the issue
-- ALWAYS use the dedicated git tools (gitClone, gitCommit, etc.) instead of runCommand for git operations${backgroundGuidelines}
-- IMPORTANT: The workspace root is NOT a git repository. When you clone a repo (e.g. gitClone with url "https://gitee.com/user/my-repo"), it creates a subdirectory (e.g. "my-repo"). All subsequent git operations (gitStatus, gitAdd, gitCommit, gitPush, etc.) MUST pass the repo directory name as the "path" parameter (e.g. path: "my-repo").`;
+- ALWAYS use the dedicated git tools (gitClone, gitCommit, etc.) instead of runCommand for git operations. Never run git clone, git pull, git fetch, or git push through runCommand.${backgroundGuidelines}
+- Git credentials are private runtime capabilities, not readable data. NEVER ask for, print, inspect, return, or search for a token/key/password. Never inspect Keychain, SecureStore, credential vaults, environment variables, .git-credentials, .gitconfig, or .netrc; never put credentials in a URL or command.
+- gitClone, gitPull, and gitPush are the credential-aware wrappers. Call them normally with an HTTPS repository URL/path. The runtime automatically uses the credential profile bound to this project and does not expose its secret to you.
+- ${gitCredentialState}
+- If a remote Git tool reports credential_not_found, host_mismatch, or an authentication/permission failure, explain the exact error and ask the user to bind or test the matching GitHub, Gitee, or GitLab profile. Do not attempt to recover by reading credentials or using raw Git commands.
+- A managed project may be a repository at the workspace root or a cloned repository in a subdirectory. Call gitStatus without path first; when a clone creates a subdirectory, pass that directory as path to later Git tools.`;
 
   // Append custom project instructions if present
   if (customPrompt?.trim()) {

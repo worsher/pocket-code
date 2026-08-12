@@ -32,6 +32,8 @@ export const InitMessage = z.object({
   /** Legacy catalog key used only by the authenticated migration entrypoint. */
   legacyProjectId: optStr(128),
   projectName: optStr(256),
+  /** Credential profile metadata only. Secrets use the explicit encrypted credential RPC. */
+  gitCredentialProfileId: optStr(128),
   model: optStr(64),
   customPrompt: optStr(10000),
   // P14:重连补发协商——客户端已应用的最后事件 seq 与其所属 epoch(spec §5.2)

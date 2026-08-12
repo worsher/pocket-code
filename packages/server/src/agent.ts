@@ -148,6 +148,8 @@ export interface AgentSession {
   containerId?: string;
   /** Custom project instructions (appended to system prompt) */
   customPrompt?: string;
+  /** Project-bound credential metadata only; the secret stays in the server Vault. */
+  gitCredentialProfileId?: string;
   /** CLI 委托续接会话 id,按 adapter.id 分槽。 */
   cliSessions?: Record<string, string>;
   /** 进行中 turn 的中止控制(session 级:断线重连后任何连接均可 abort,P14 D-P14-3)。 */
@@ -290,7 +292,11 @@ export async function runAgent(
   try {
     const backend = createNodeBackend(
       session.workspaceHandle ?? session.workspace,
-      session.containerId
+      session.containerId,
+      {
+        userId: session.userId,
+        credentialProfileId: session.gitCredentialProfileId,
+      }
     );
     // D-P15-2:modelClient 提升,压缩与 loop 共用
     const modelClient = createNodeModelClient(effectiveModelKey);
@@ -327,6 +333,7 @@ export async function runAgent(
       // 与 execTools 能力门控(需 startProcess && stopProcess)判据对称,
       // 防未来出现只实现其一的 backend 时 prompt 宣传与工具注册分叉。
       supportsBackground: !!(backend.startProcess && backend.stopProcess),
+      hasBoundGitCredential: !!session.gitCredentialProfileId,
     });
     let extraTools: ToolDef[] | undefined;
     if (session.goal?.status === "active") {

@@ -110,6 +110,7 @@ describe("ServerConnection", () => {
         getAuthToken: () => "tok_1",
         buildInitPayload: () => ({
           sessionId: "s1",
+          gitCredentialProfileId: "github-pat",
           gitCredentials: [
             { platform: "github", host: "github.com", username: "u", token: "DO_NOT_SEND" },
           ],
@@ -121,7 +122,12 @@ describe("ServerConnection", () => {
     const ws = FakeWebSocket.instances[0];
     ws.open();
     const init = JSON.parse(ws.sent[0]);
-    expect(init).toMatchObject({ type: "init", token: "tok_1", sessionId: "s1" });
+    expect(init).toMatchObject({
+      type: "init",
+      token: "tok_1",
+      sessionId: "s1",
+      gitCredentialProfileId: "github-pat",
+    });
     expect(init.gitCredentials).toBeUndefined();
     expect(ws.sent[0]).not.toContain("DO_NOT_SEND");
     conn.disconnect();
