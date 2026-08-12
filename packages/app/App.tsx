@@ -13,6 +13,7 @@ import {
   Keyboard,
   Alert,
   type AppStateStatus,
+  type LayoutChangeEvent,
 } from "react-native";
 import { StatusBar } from "expo-status-bar";
 import { SafeAreaProvider, useSafeAreaInsets } from "react-native-safe-area-context";
@@ -41,6 +42,7 @@ import { requestNotificationPermissions } from "./src/services/notifications";
 import { tabsForPlatform } from "./src/utils/tabsForPlatform";
 import { getWorkspaceConnectionKey, usesRemoteWorkspace } from "./src/services/workspaceConnection";
 import { handoffProjectWriterLease } from "./src/store/projectCatalog";
+import { getKeyboardVerticalOffset } from "./src/utils/keyboardLayout";
 
 function MainScreen() {
   const insets = useSafeAreaInsets();
@@ -57,6 +59,7 @@ function MainScreen() {
   const [settings, setSettings] = useState<AppSettings>(DEFAULT_SETTINGS);
   const [settingsLoaded, setSettingsLoaded] = useState(false);
   const [keyboardVisible, setKeyboardVisible] = useState(false);
+  const [headerHeight, setHeaderHeight] = useState(0);
 
   // Track keyboard visibility to hide tab bar
   useEffect(() => {
@@ -373,6 +376,15 @@ function MainScreen() {
 
   const selectedModel = AVAILABLE_MODELS.find((m) => m.key === currentModel);
   const isGeek = settings.mode === "geek";
+  const keyboardVerticalOffset = getKeyboardVerticalOffset(
+    Platform.OS,
+    insets.top,
+    headerHeight
+  );
+
+  const handleHeaderLayout = useCallback((event: LayoutChangeEvent) => {
+    setHeaderHeight(event.nativeEvent.layout.height);
+  }, []);
 
   // Project-specific local workspace root resolved from the catalog.
   const localWorkspaceRoot = currentWorkspaceRoot;
@@ -392,7 +404,7 @@ function MainScreen() {
       <StatusBar style="light" />
 
       {/* Header */}
-      <View style={styles.header}>
+      <View style={styles.header} onLayout={handleHeaderLayout}>
         <View style={styles.headerLeft}>
           {/* Hamburger menu */}
           <TouchableOpacity style={styles.menuBtn} onPress={() => setShowSessionDrawer(true)}>
@@ -444,7 +456,8 @@ function MainScreen() {
         <KeyboardAvoidingView
           style={[styles.flex1, activeTab !== "chat" && styles.hidden]}
           behavior="padding"
-          keyboardVerticalOffset={insets.top}
+          keyboardVerticalOffset={keyboardVerticalOffset}
+          enabled={activeTab === "chat"}
         >
           {/* Messages */}
           {messages.length === 0 ? (
@@ -549,7 +562,8 @@ function MainScreen() {
           <KeyboardAvoidingView
             style={[styles.flex1, activeTab !== "terminal" && styles.hidden]}
             behavior="padding"
-            keyboardVerticalOffset={insets.top}
+            keyboardVerticalOffset={keyboardVerticalOffset}
+            enabled={activeTab === "terminal"}
           >
             <TerminalScreen workspaceTarget={localWorkspaceTarget} />
           </KeyboardAvoidingView>
