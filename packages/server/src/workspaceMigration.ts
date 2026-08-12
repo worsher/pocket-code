@@ -17,6 +17,11 @@ import {
   type WorkspaceProjectRecord,
 } from "./db.js";
 import { ensureServerStorageLayout, getServerV2Root, getWorkspaceRoot } from "./tools.js";
+import {
+  cleanupLegacyWorkspaceCredentials,
+  isGeneratedLegacyWorkspaceCredential,
+} from "./gitCredentials.js";
+import { isLegacyCredentialArtifact } from "./sensitiveWorkspacePath.js";
 
 const MAX_MIGRATION_ENTRIES = 100_000;
 
@@ -105,6 +110,13 @@ export async function snapshotServerDirectory(root: string): Promise<string> {
     );
     if (entries.length === 0 && prefix) manifest.push({ path: prefix, type: "directory" });
     for (const entry of entries) {
+      if (
+        !prefix &&
+        isLegacyCredentialArtifact(entry.name) &&
+        (await isGeneratedLegacyWorkspaceCredential(root, entry.name))
+      ) {
+        continue;
+      }
       entryCount++;
       if (entryCount > MAX_MIGRATION_ENTRIES) {
         throw new Error(`Legacy workspace contains more than ${MAX_MIGRATION_ENTRIES} entries`);
@@ -183,6 +195,7 @@ export async function migrateLegacyServerWorkspace(args: {
     }
     await rm(staging, { recursive: true, force: true });
     await cp(sourceRoot, staging, { recursive: true, force: false, errorOnExist: true });
+    await cleanupLegacyWorkspaceCredentials(staging);
     const stagedSnapshot = await snapshotServerDirectory(staging);
     if (stagedSnapshot !== journal.expectedSnapshot) {
       await rm(staging, { recursive: true, force: true });
@@ -194,6 +207,7 @@ export async function migrateLegacyServerWorkspace(args: {
 
   if (journal.phase === "verified") {
     if (existsSync(targetWorktree)) {
+      await cleanupLegacyWorkspaceCredentials(targetWorktree);
       if ((await snapshotServerDirectory(targetWorktree)) !== journal.expectedSnapshot) {
         throw new Error("Migration target already exists with different content");
       }
@@ -203,6 +217,7 @@ export async function migrateLegacyServerWorkspace(args: {
       await mkdir(projectRoot, { recursive: true });
       await rename(staging, targetWorktree);
     }
+    await cleanupLegacyWorkspaceCredentials(targetWorktree);
     await Promise.all([
       mkdir(join(v2Root, roots.stateRoot), { recursive: true }),
       mkdir(join(v2Root, roots.cacheRoot), { recursive: true }),

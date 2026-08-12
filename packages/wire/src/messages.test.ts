@@ -25,6 +25,17 @@ describe("wire — WsMessage validation", () => {
     expect(WsMessage.safeParse({ type: "init", workspaceProtocolVersion: 3 }).success).toBe(false);
   });
 
+  it("keeps legacy init gitCredentials parse-compatible", () => {
+    expect(
+      WsMessage.safeParse({
+        type: "init",
+        gitCredentials: [
+          { platform: "github", host: "github.com", username: "u", token: "legacy-token" },
+        ],
+      }).success
+    ).toBe(true);
+  });
+
   it("carries a legacy lookup key only as optional migration metadata", () => {
     expect(
       WsMessage.safeParse({
@@ -238,6 +249,112 @@ describe("wire — WsMessage validation", () => {
         projectId: "old-project",
         legacyProjectId: "old-project",
         _reqId: "legacy_1",
+      }).success
+    ).toBe(false);
+  });
+
+  it("validates bounded Git credential RPCs", () => {
+    const profile = {
+      id: "github-main",
+      label: "GitHub",
+      provider: "github",
+      authKind: "pat",
+      origin: "https://github.com",
+      username: "octocat",
+    };
+    expect(
+      WsMessage.safeParse({
+        type: "git-credential-upsert",
+        profile,
+        secret: "github_pat_example",
+        _reqId: "cred_1",
+      }).success
+    ).toBe(true);
+    expect(
+      WsMessage.safeParse({
+        type: "git-credential-upsert",
+        profile,
+        sealedSecret: {
+          version: 1,
+          algorithm: "x25519-xsalsa20-poly1305",
+          keyId: "key_1",
+          profileId: profile.id,
+          origin: profile.origin,
+          issuedAt: 123,
+          bindingNonce: "nonce_1",
+          requestId: "cred_2",
+          ephemeralPublicKey: "a".repeat(44),
+          nonce: "b".repeat(32),
+          ciphertext: "c".repeat(64),
+        },
+        _reqId: "cred_2",
+      }).success
+    ).toBe(true);
+    expect(
+      WsMessage.safeParse({
+        type: "git-credential-test",
+        credentialProfileId: profile.id,
+        repositoryUrl: "https://github.com/acme/private.git",
+        capability: "read",
+        _reqId: "cred_3",
+      }).success
+    ).toBe(true);
+    expect(
+      WsMessage.safeParse({
+        type: "git-credential-delete",
+        credentialProfileId: profile.id,
+        _reqId: "cred_4",
+      }).success
+    ).toBe(true);
+
+    expect(
+      WsMessage.safeParse({
+        type: "git-credential-upsert",
+        profile: { ...profile, id: "x".repeat(129) },
+        secret: "token",
+        _reqId: "cred_5",
+      }).success
+    ).toBe(false);
+    expect(
+      WsMessage.safeParse({
+        type: "git-credential-upsert",
+        profile,
+        secret: "x".repeat(16385),
+        _reqId: "cred_6",
+      }).success
+    ).toBe(false);
+  });
+
+  it("validates remote Git import and workspace operations", () => {
+    const projectId = "10ed836e-ae48-4d67-9e26-a74cbf55a52e";
+    expect(
+      WsMessage.safeParse({
+        type: "workspace-import-git",
+        projectId,
+        displayName: "Private repo",
+        repositoryUrl: "https://gitlab.example.com/team/repo.git",
+        credentialProfileId: "gitlab-company",
+        branch: "main",
+        _reqId: "git_import_1",
+      }).success
+    ).toBe(true);
+    expect(
+      WsMessage.safeParse({
+        type: "git-workspace-operation",
+        projectId,
+        operation: "commit",
+        credentialProfileId: "gitlab-company",
+        commitMessage: "Update from Pocket Code",
+        _reqId: "git_op_1",
+      }).success
+    ).toBe(true);
+    expect(
+      WsMessage.safeParse({
+        type: "git-workspace-operation",
+        projectId,
+        operation: "force-push",
+        credentialProfileId: "gitlab-company",
+        _reqId: "git_op_2",
       }).success
     ).toBe(false);
   });

@@ -7,8 +7,11 @@ export {
   storedToCoreMessages,
 } from "./chatReducer";
 export { RelayClient } from "./relayClient";
-export type { RelayClientOptions, RelayEvent } from "./relayClient";
+export type { RelayClientOptions, RelayEvent, PairDeviceResult } from "./relayClient";
 export { ServerConnection } from "./serverConnection";
+export { sealCredentialSecret } from "./credentialCrypto";
+export type { DaemonEncryptionKey, SecureRandomBytes } from "./credentialCrypto";
+export type { CredentialSecretInput, SealCredentialOptions } from "./credentialCrypto";
 export type {
   ConnectionConfig,
   ConnectionHandlers,
@@ -16,4 +19,10 @@ export type {
   WorkspaceSourceStatusResponse,
   WorkspaceLegacyCleanupResponse,
   WorkspaceWriterReleaseResponse,
+  GitCredentialResponse,
+  GitOperationResponse,
+  GitCredentialUpsertArgs,
+  GitCredentialTestArgs,
+  GitWorkspaceImportArgs,
+  GitWorkspaceOperationArgs,
 } from "./serverConnection";

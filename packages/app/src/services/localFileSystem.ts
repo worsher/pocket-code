@@ -243,7 +243,8 @@ export async function executeLocalTool(
   toolName: string,
   args: Record<string, unknown>,
   settings: AppSettings | undefined,
-  workspaceTarget: MobileWorkspaceTarget
+  workspaceTarget: MobileWorkspaceTarget,
+  credentialProfileId?: string
 ): Promise<unknown | null> {
   const workspaceRoot = getMobileWorkspaceRoot(workspaceTarget);
   switch (toolName) {
@@ -256,7 +257,13 @@ export async function executeLocalTool(
     // ── Git tools ──
     case "gitClone":
       assertWorkspaceCapability(workspaceTarget, "write");
-      return gitClone(args.url as string, args.dir as string | undefined, settings!, workspaceRoot);
+      return gitClone(
+        args.url as string,
+        args.dir as string | undefined,
+        settings!,
+        workspaceRoot,
+        credentialProfileId
+      );
     case "gitStatus":
       assertWorkspaceCapability(workspaceTarget, "read");
       return gitStatus(args.path as string | undefined, workspaceRoot);
@@ -273,7 +280,8 @@ export async function executeLocalTool(
         args.path as string | undefined,
         args.remote as string | undefined,
         args.branch as string | undefined,
-        workspaceRoot
+        workspaceRoot,
+        credentialProfileId
       );
     case "gitPull":
       assertWorkspaceCapability(workspaceTarget, "write");
@@ -282,7 +290,8 @@ export async function executeLocalTool(
         args.path as string | undefined,
         args.remote as string | undefined,
         args.branch as string | undefined,
-        workspaceRoot
+        workspaceRoot,
+        credentialProfileId
       );
     case "gitLog":
       assertWorkspaceCapability(workspaceTarget, "read");

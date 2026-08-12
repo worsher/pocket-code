@@ -11,6 +11,7 @@ import type { ProjectSyncEdge, RemoteReplicaCatalogEntry } from "../store/projec
 import { deleteLocalFile, writeLocalFileBase64 } from "./localFileSystem";
 import { getMobileV2Root } from "./workspaceResolver";
 import { recordWorkspaceMetric } from "./workspaceTelemetry";
+import { isSensitiveGitContentPath } from "./gitSensitivePath";
 
 const SYNC_IGNORED_DIRECTORIES = new Set([
   "node_modules",
@@ -27,6 +28,7 @@ const SYNC_IGNORED_DIRECTORIES = new Set([
   ".venv",
   "venv",
 ]);
+const SYNC_BLOCKED_CREDENTIAL_FILES = new Set([".git-credentials", ".gitconfig", ".netrc"]);
 
 export interface MobileSyncManifestFile {
   path: string;
@@ -90,8 +92,28 @@ function ensureDirectory(directory: Directory): void {
 }
 
 function shouldIgnoreEntry(name: string, directory: boolean): boolean {
+  if (isSensitiveGitContentPath(name)) return true;
   if (directory && SYNC_IGNORED_DIRECTORIES.has(name)) return true;
-  return name === ".DS_Store" || name.endsWith(".log");
+  return (
+    name === ".DS_Store" ||
+    name.endsWith(".log") ||
+    (!directory && SYNC_BLOCKED_CREDENTIAL_FILES.has(name))
+  );
+}
+
+export function isBlockedMobileSyncPath(path: string): boolean {
+  let normalized: string;
+  try {
+    normalized = normalizeWorkspaceRelativePath(path);
+  } catch {
+    return true;
+  }
+  const segments = normalized.split("/");
+  return (
+    isSensitiveGitContentPath(normalized) ||
+    segments.some((segment) => SYNC_IGNORED_DIRECTORIES.has(segment)) ||
+    SYNC_BLOCKED_CREDENTIAL_FILES.has(segments.at(-1) ?? "")
+  );
 }
 
 export async function scanMobileSyncDirectory(root: Directory): Promise<{
@@ -132,6 +154,7 @@ function copyDirectoryContents(source: Directory, destination: Directory): void 
   ensureDirectory(destination);
   if (!source.exists) return;
   for (const entry of source.list()) {
+    if (shouldIgnoreEntry(entry.name, entry instanceof Directory)) continue;
     if (entry instanceof Directory) {
       copyDirectoryContents(entry, new Directory(destination, entry.name));
     } else {
@@ -246,6 +269,9 @@ function validateManifest(manifest: MobileSyncManifest): MobileSyncManifest {
   const files = manifest.files.map((file) => {
     const path = normalizeWorkspaceRelativePath(file.path);
     if (path === "." || seen.has(path)) throw new Error(`Invalid duplicate sync path: ${path}`);
+    if (isBlockedMobileSyncPath(path)) {
+      throw new Error(`Remote sync manifest contains a blocked credential path: ${path}`);
+    }
     seen.add(path);
     if (file.status !== "D" && !/^[0-9a-f]{32}$/i.test(file.digest ?? "")) {
       throw new Error(`Missing transfer digest for ${path}`);

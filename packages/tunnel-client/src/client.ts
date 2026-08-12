@@ -18,6 +18,9 @@ export interface TunnelClientOptions {
   relaySecret: string;
   machineId: string;
   machineName: string;
+  /** Optional daemon public key advertised through relay discovery/pairing. */
+  publicKey?: string;
+  keyId?: string;
   /** 非隧道消息(pair-request/forward-request)委托;未提供时回 tunnel-only 错误帧 */
   onMessage?: (msg: DaemonInboundType, send: (data: unknown) => boolean) => void;
   onConnected?: () => void;
@@ -97,6 +100,8 @@ export function startTunnelClient(opts: TunnelClientOptions): TunnelClientHandle
     relayUrl: opts.relayUrl,
     machineId: opts.machineId,
     machineName: opts.machineName,
+    publicKey: opts.publicKey,
+    keyId: opts.keyId,
     relaySecret: opts.relaySecret,
     onConnected() {
       opts.onConnected?.();

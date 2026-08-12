@@ -11,7 +11,14 @@ import { Paths, Directory } from "expo-file-system";
 import { createFsAdapter } from "./expoFsAdapter";
 import type { AppSettings } from "../store/settings";
 import { normalizeWorkspaceRelativePath } from "@pocket-code/workspace-core";
-import { sanitizeGitRemoteUrl } from "./gitUrl";
+import {
+  createGitCredentialOnAuth,
+  normalizeGitRemoteHttpsUrl,
+  resolveGitCredentialProfile,
+  type GitCredentialProfile,
+} from "./gitCredentialProfiles";
+import { readGitCredentialSecret } from "./gitCredentialVault";
+import { isSensitiveGitContentPath } from "./gitSensitivePath";
 
 export { sanitizeGitRemoteUrl } from "./gitUrl";
 
@@ -37,82 +44,64 @@ function getFsAndDir(workspaceRoot?: string, subDir?: string) {
 
 // ── Auth helper ────────────────────────────────────────
 
-/**
- * Inject credentials directly into an HTTPS URL.
- * e.g. https://gitee.com/user/repo → https://username:token@gitee.com/user/repo
- * This is more reliable than onAuth for some platforms (e.g. Gitee).
- */
-function injectCredentialsIntoUrl(url: string, settings: AppSettings): string {
-  try {
-    // Extract hostname via regex (React Native URL API may not support username/password setters)
-    const match = url.match(/^(https?:\/\/)([^/]+)(\/.*)?$/);
-    if (!match) return url;
+type GitOnAuth =
+  (url: string) => { username: string; password: string } | { cancel: true };
 
-    const [, protocol, hostPart, pathPart = ""] = match;
-    // hostPart could already contain user:pass@, strip it
-    const hostname = hostPart.replace(/^[^@]*@/, "");
+async function resolveOperationAuth(
+  url: string,
+  profiles: readonly GitCredentialProfile[],
+  credentialProfileId?: string
+): Promise<{ safeUrl: string; onAuth?: GitOnAuth }> {
+  const safeUrl = normalizeGitRemoteHttpsUrl(url);
+  const profile = resolveGitCredentialProfile(safeUrl, profiles, credentialProfileId);
+  if (!profile) return { safeUrl };
+  const secret = await readGitCredentialSecret(profile);
+  return {
+    safeUrl,
+    // onAuth may be invoked after a redirect. The pure callback refuses
+    // cross-origin, cross-port, and out-of-prefix credential forwarding.
+    onAuth: createGitCredentialOnAuth(profile, secret),
+  };
+}
 
-    console.log("[Git] Looking for credentials for host:", hostname);
-    console.log(
-      "[Git] Available credentials:",
-      settings.gitCredentials?.map(
-        (c) => `${c.platform}/${c.host} (token: ${c.token ? "yes" : "no"})`
-      )
-    );
-
-    const cred = settings.gitCredentials?.find((c) => c.host === hostname);
-    if (cred?.token) {
-      const username = encodeURIComponent(cred.username || "oauth2");
-      const password = encodeURIComponent(cred.token);
-      console.log(
-        "[Git] Credentials injected for:",
-        cred.platform,
-        "username:",
-        cred.username || "oauth2"
-      );
-      return `${protocol}${username}:${password}@${hostname}${pathPart}`;
-    }
-
-    console.log("[Git] No matching credentials found for host:", hostname);
-    return url;
-  } catch (e) {
-    console.log("[Git] URL injection error:", e);
-    return url;
+async function assertNoSensitiveTrackedPaths(
+  fs: ReturnType<typeof createFsAdapter>,
+  dir: string
+): Promise<void> {
+  const tracked = await git.listFiles({ fs, dir });
+  if (tracked.some(isSensitiveGitContentPath)) {
+    throw new Error("Repository contains a reserved credential path and cannot be imported safely");
   }
 }
 
-function createOnAuth(settings: AppSettings) {
-  return (url: string) => {
-    try {
-      const hostMatch = url.match(/^https?:\/\/(?:[^@]*@)?([^/:]+)/);
-      const host = hostMatch?.[1];
-      if (!host) return { cancel: true };
-      const cred = settings.gitCredentials?.find((c) => c.host === host);
-      if (!cred?.token) return { cancel: true };
-      return {
-        username: cred.username || "oauth2",
-        password: cred.token,
-      };
-    } catch {
-      return { cancel: true };
+async function unstageSensitivePaths(
+  fs: ReturnType<typeof createFsAdapter>,
+  dir: string
+): Promise<void> {
+  const matrix = await git.statusMatrix({ fs, dir });
+  for (const [filepath, , , stage] of matrix) {
+    if (stage !== 0 && isSensitiveGitContentPath(filepath)) {
+      await git.resetIndex({ fs, dir, filepath });
     }
-  };
+  }
 }
 
 export async function probeGitRemote(
   url: string,
-  settings: AppSettings
+  settings: AppSettings,
+  credentialProfileId?: string
 ): Promise<{ url: string; head: string }> {
-  const safeUrl = sanitizeGitRemoteUrl(url);
-  if (!/^https?:\/\//i.test(safeUrl)) {
-    throw new Error("Mobile Git import requires an HTTP(S) remote URL");
-  }
+  const { safeUrl, onAuth } = await resolveOperationAuth(
+    url,
+    settings.gitCredentialProfiles,
+    credentialProfileId
+  );
   const refs = await git.listServerRefs({
     http,
-    url: injectCredentialsIntoUrl(safeUrl, settings),
+    url: safeUrl,
     prefix: "HEAD",
     symrefs: true,
-    onAuth: createOnAuth(settings),
+    ...(onAuth ? { onAuth } : {}),
   });
   const head = refs.find((ref) => ref.ref === "HEAD")?.oid;
   if (!head) throw new Error("Git remote does not advertise a default HEAD");
@@ -122,19 +111,25 @@ export async function probeGitRemote(
 export async function cloneGitIntoWorkspaceRoot(
   url: string,
   settings: AppSettings,
-  workspaceRoot: string
+  workspaceRoot: string,
+  credentialProfileId?: string
 ): Promise<string> {
-  const safeUrl = sanitizeGitRemoteUrl(url);
+  const { safeUrl, onAuth } = await resolveOperationAuth(
+    url,
+    settings.gitCredentialProfiles,
+    credentialProfileId
+  );
   const { fs } = getFsAndDir(workspaceRoot);
   await git.clone({
     fs,
     http,
     dir: "/",
-    url: injectCredentialsIntoUrl(safeUrl, settings),
+    url: safeUrl,
     singleBranch: true,
     depth: 1,
-    onAuth: createOnAuth(settings),
+    ...(onAuth ? { onAuth } : {}),
   });
+  await assertNoSensitiveTrackedPaths(fs, "/");
   await git.setConfig({ fs, dir: "/", path: "remote.origin.url", value: safeUrl });
   return git.resolveRef({ fs, dir: "/", ref: "HEAD" });
 }
@@ -150,7 +145,8 @@ export async function gitClone(
   url: string,
   targetDir: string | undefined,
   settings: AppSettings,
-  workspaceRoot?: string
+  workspaceRoot?: string,
+  credentialProfileId?: string
 ): Promise<{ success: boolean; error?: string }> {
   try {
     // Derive directory name from URL if not specified
@@ -162,22 +158,33 @@ export async function gitClone(
         ?.replace(/\.git$/, "") ||
       "repo";
     const { fs } = getFsAndDir(workspaceRoot);
-    const dir = `/${normalizeWorkspaceRelativePath(dirName)}`;
+    const safeDirName = normalizeWorkspaceRelativePath(dirName);
+    const dir = `/${safeDirName}`;
 
-    const authUrl = injectCredentialsIntoUrl(url, settings);
-    console.log("[Git] Clone original URL:", url);
-    console.log("[Git] Clone auth URL:", authUrl.replace(/\/\/[^@]*@/, "//***@")); // mask credentials
+    const { safeUrl, onAuth } = await resolveOperationAuth(
+      url,
+      settings.gitCredentialProfiles,
+      credentialProfileId
+    );
+    console.log("[Git] Clone remote:", safeUrl);
     console.log("[Git] Clone target dir:", dir);
 
     await git.clone({
       fs,
       http,
       dir,
-      url: authUrl,
+      url: safeUrl,
       singleBranch: true,
       depth: 1,
-      onAuth: createOnAuth(settings),
+      ...(onAuth ? { onAuth } : {}),
     });
+    try {
+      await assertNoSensitiveTrackedPaths(fs, dir);
+    } catch (error) {
+      const target = new Directory(getWorkspaceUri(workspaceRoot), ...safeDirName.split("/"));
+      if (target.exists) target.delete();
+      throw error;
+    }
 
     console.log("[Git] Clone completed successfully");
     return { success: true };
@@ -204,6 +211,7 @@ export async function gitStatus(
         // Filter out unchanged files (1,1,1)
         return !(head === 1 && workdir === 1 && stage === 1);
       })
+      .filter(([filepath]) => !isSensitiveGitContentPath(filepath))
       .map(([filepath, head, workdir, stage]) => {
         let status: string;
         if (head === 0 && workdir === 2 && stage === 0) status = "new, untracked";
@@ -235,10 +243,18 @@ export async function gitAdd(
     const { fs, dir } = getFsAndDir(workspaceRoot, path);
     const safeFilepath = normalizeWorkspaceRelativePath(filepath);
 
+    if (safeFilepath !== "." && isSensitiveGitContentPath(safeFilepath)) {
+      throw new Error("Sensitive credential paths cannot be staged");
+    }
+
     if (safeFilepath === ".") {
       // Stage all changes
       const matrix = await git.statusMatrix({ fs, dir });
       for (const [file, , workdir] of matrix) {
+        if (isSensitiveGitContentPath(file)) {
+          await git.resetIndex({ fs, dir, filepath: file });
+          continue;
+        }
         if (workdir === 0) {
           await git.remove({ fs, dir, filepath: file });
         } else {
@@ -263,6 +279,8 @@ export async function gitCommit(
   try {
     const { fs, dir } = getFsAndDir(workspaceRoot, path);
 
+    await unstageSensitivePaths(fs, dir);
+
     const sha = await git.commit({
       fs,
       dir,
@@ -284,17 +302,33 @@ export async function gitPush(
   path?: string,
   remote?: string,
   branch?: string,
-  workspaceRoot?: string
+  workspaceRoot?: string,
+  credentialProfileId?: string
 ): Promise<{ success: boolean; error?: string }> {
   try {
     const { fs, dir } = getFsAndDir(workspaceRoot, path);
 
-    // Read the remote URL and inject credentials
     const remoteUrl = await git.getConfig({
       fs,
       dir,
       path: `remote.${remote || "origin"}.url`,
     });
+
+    const auth = remoteUrl
+      ? await resolveOperationAuth(
+          remoteUrl as string,
+          settings.gitCredentialProfiles,
+          credentialProfileId
+        )
+      : undefined;
+    if (remoteUrl && auth && auth.safeUrl !== remoteUrl) {
+      await git.setConfig({
+        fs,
+        dir,
+        path: `remote.${remote || "origin"}.url`,
+        value: auth.safeUrl,
+      });
+    }
 
     await git.push({
       fs,
@@ -302,8 +336,8 @@ export async function gitPush(
       dir,
       remote: remote || "origin",
       ref: branch,
-      url: remoteUrl ? injectCredentialsIntoUrl(remoteUrl as string, settings) : undefined,
-      onAuth: createOnAuth(settings),
+      url: auth?.safeUrl,
+      ...(auth?.onAuth ? { onAuth: auth.onAuth } : {}),
     });
 
     return { success: true };
@@ -317,17 +351,33 @@ export async function gitPull(
   path?: string,
   remote?: string,
   branch?: string,
-  workspaceRoot?: string
+  workspaceRoot?: string,
+  credentialProfileId?: string
 ): Promise<{ success: boolean; error?: string }> {
   try {
     const { fs, dir } = getFsAndDir(workspaceRoot, path);
 
-    // Read the remote URL and inject credentials
     const remoteUrl = await git.getConfig({
       fs,
       dir,
       path: `remote.${remote || "origin"}.url`,
     });
+
+    const auth = remoteUrl
+      ? await resolveOperationAuth(
+          remoteUrl as string,
+          settings.gitCredentialProfiles,
+          credentialProfileId
+        )
+      : undefined;
+    if (remoteUrl && auth && auth.safeUrl !== remoteUrl) {
+      await git.setConfig({
+        fs,
+        dir,
+        path: `remote.${remote || "origin"}.url`,
+        value: auth.safeUrl,
+      });
+    }
 
     await git.pull({
       fs,
@@ -336,12 +386,13 @@ export async function gitPull(
       remote: remote || "origin",
       ref: branch,
       singleBranch: true,
+      fastForwardOnly: true,
       author: {
         name: "Pocket Code",
         email: "pocket-code@local",
       },
-      url: remoteUrl ? injectCredentialsIntoUrl(remoteUrl as string, settings) : undefined,
-      onAuth: createOnAuth(settings),
+      url: auth?.safeUrl,
+      ...(auth?.onAuth ? { onAuth: auth.onAuth } : {}),
     });
 
     return { success: true };

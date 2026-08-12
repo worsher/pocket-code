@@ -10,7 +10,7 @@ const base: AppSettings = {
   relayServerUrl: "wss://relay",
   apiKeys: {},
   defaultModel: "auto",
-  gitCredentials: [],
+  gitCredentialProfiles: [],
 };
 
 describe("workspace connection identity", () => {

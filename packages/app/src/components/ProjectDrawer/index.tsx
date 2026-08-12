@@ -6,14 +6,24 @@ import { View, Text, TouchableOpacity, FlatList, TextInput, StyleSheet, Alert } 
 import { randomUUID } from "expo-crypto";
 import { useProject } from "../../contexts/ProjectContext";
 import type { Project } from "../../store/projects";
-import type { AppSettings } from "../../store/settings";
-import { getWorkspaceConnectionKey } from "../../services/workspaceConnection";
+import type { AppSettings, GitCredentialProfile } from "../../store/settings";
+import {
+  getWorkspaceConnectionKey,
+  usesRemoteWorkspace,
+} from "../../services/workspaceConnection";
 import type {
   LinkedWorkspaceImportResponse,
+  GitCredentialResponse,
+  GitOperationResponse,
   WorkspaceLegacyCleanupResponse,
   WorkspaceSourceStatusResponse,
 } from "@pocket-code/client-core";
 import { recordWorkspaceMetric } from "../../services/workspaceTelemetry";
+import {
+  matchingGitCredentialProfiles,
+  normalizeGitRemoteHttpsUrl,
+  resolveGitCredentialProfile,
+} from "../../services/gitCredentialProfiles";
 
 interface Props {
   monitoringEnabled: boolean;
@@ -32,6 +42,24 @@ interface Props {
     projectId: string,
     legacyProjectId: string
   ) => Promise<WorkspaceLegacyCleanupResponse>;
+  onTestGitCredential: (args: {
+    profile: GitCredentialProfile;
+    repositoryUrl: string;
+    capability?: "read" | "write";
+  }) => Promise<GitCredentialResponse>;
+  onImportGitWorkspace: (args: {
+    projectId: string;
+    displayName?: string;
+    repositoryUrl: string;
+    profile: GitCredentialProfile;
+    branch?: string;
+  }) => Promise<LinkedWorkspaceImportResponse>;
+  onRunGitWorkspaceOperation: (args: {
+    projectId: string;
+    operation: "status" | "pull" | "commit" | "push";
+    profile: GitCredentialProfile;
+    commitMessage?: string;
+  }) => Promise<GitOperationResponse>;
 }
 
 type ProjectImportUiResult =
@@ -48,11 +76,15 @@ export default function ProjectDrawer({
   onBindLinkedWorkspace,
   onInspectLinkedSource,
   onCleanupLegacyWorkspace,
+  onTestGitCredential,
+  onImportGitWorkspace,
+  onRunGitWorkspaceOperation,
 }: Props) {
   const {
     projects,
     currentProject,
     switchProject,
+    updateProject,
     createProject,
     deleteProject,
     importDirectoryProject,
@@ -62,6 +94,7 @@ export default function ProjectDrawer({
     previewCopySource,
     applyCopySource,
     commitAndPushGitProject,
+    pullGitProject,
     legacyCleanupAvailable,
     cleanupLegacyStorage,
   } = useProject();
@@ -72,9 +105,11 @@ export default function ProjectDrawer({
   const [isImporting, setIsImporting] = useState(false);
   const [showImport, setShowImport] = useState(false);
   const [gitUrl, setGitUrl] = useState("");
+  const [gitCredentialProfileId, setGitCredentialProfileId] = useState<string | undefined>();
   const [linkedPath, setLinkedPath] = useState("");
   const [linkedName, setLinkedName] = useState("");
   const [gitCommitMessage, setGitCommitMessage] = useState("Update from Pocket Code");
+  const [gitTestCapability, setGitTestCapability] = useState<"read" | "write">("read");
   const [pendingLinkedProjectId, setPendingLinkedProjectId] = useState<string | null>(null);
   const [linkedSourceStatus, setLinkedSourceStatus] = useState<
     WorkspaceSourceStatusResponse | undefined
@@ -82,6 +117,7 @@ export default function ProjectDrawer({
   const linkedStatusStateRef = useRef<WorkspaceSourceStatusResponse["state"] | undefined>(
     undefined
   );
+  const remoteWorkspace = usesRemoteWorkspace(settings);
 
   useEffect(() => {
     if (
@@ -250,10 +286,100 @@ export default function ProjectDrawer({
     if (!gitUrl.trim()) return;
     setIsImporting(true);
     try {
-      const result = await importGitProject(gitUrl.trim(), settings, allowWeakDuplicate);
+      if (remoteWorkspace) {
+        const connectionKey = getWorkspaceConnectionKey(settings);
+        if (!connectionKey) throw new Error("远端 Git 导入需要可用的 Server/Relay 连接");
+        if (!gitCredentialProfileId) {
+          throw new Error("远端 Git 导入一期必须选择已配置 Key 的凭据 Profile");
+        }
+        const repositoryUrl = normalizeGitRemoteHttpsUrl(gitUrl.trim());
+        const profile = resolveGitCredentialProfile(
+          repositoryUrl,
+          settings.gitCredentialProfiles,
+          gitCredentialProfileId
+        );
+        if (!profile) throw new Error("所选 Git Key 不可用");
+        const projectId = randomUUID();
+        const response = await onImportGitWorkspace({
+          projectId,
+          repositoryUrl,
+          profile,
+        });
+        if (response.status === "error") throw new Error(response.error || "Git clone failed");
+        if (response.status === "blocked") {
+          Alert.alert("仓库已导入", "该远端仓库已绑定到现有项目。", [
+            { text: "取消", style: "cancel" },
+            ...(response.existingProjectId && projects.some((p) => p.id === response.existingProjectId)
+              ? [{ text: "打开已有项目", onPress: () => handleSelect(response.existingProjectId!) }]
+              : []),
+          ]);
+          return;
+        }
+        if (response.status !== "imported" || !response.project || !response.importSource) {
+          throw new Error("远端未返回完整的 Git 项目元数据");
+        }
+        await registerLinkedProject({
+          projectId: response.project.projectId,
+          displayName: response.project.displayName,
+          importSource: response.importSource,
+          remoteReplica: {
+            id: response.project.replicaId,
+            generation: response.project.workspaceGeneration,
+            kind: response.project.replicaKind,
+            authorityId: response.project.authorityId,
+            connectionKey,
+            updatedAt: response.project.updatedAt,
+          },
+          gitUrl: repositoryUrl,
+          gitCredentialProfileId: profile.id,
+        });
+        setShowImport(false);
+        onSelectProject?.(response.project.projectId);
+        return;
+      }
+      const result = await importGitProject(
+        gitUrl.trim(),
+        settings,
+        gitCredentialProfileId,
+        allowWeakDuplicate
+      );
       handleImportResult(result, () => void finishGitImport(true));
     } catch (error) {
       showImportError(error);
+    } finally {
+      setIsImporting(false);
+    }
+  };
+
+  const handleGitCredentialTest = async () => {
+    if (!gitUrl.trim() || !gitCredentialProfileId) {
+      Alert.alert("无法测试", "请输入 HTTPS 仓库 URL 并选择一个已保存 Key 的凭据。");
+      return;
+    }
+    setIsImporting(true);
+    try {
+      const repositoryUrl = normalizeGitRemoteHttpsUrl(gitUrl.trim());
+      const profile = resolveGitCredentialProfile(
+        repositoryUrl,
+        settings.gitCredentialProfiles,
+        gitCredentialProfileId
+      );
+      if (!profile) throw new Error("所选 Git Key 不可用");
+      const result = await onTestGitCredential({
+        profile,
+        repositoryUrl,
+        capability: gitTestCapability,
+      });
+      const capabilities = result.capabilities;
+      const detail = capabilities
+        ? `读取 ${capabilities.read ? "通过" : "未通过"}，写入 ${capabilities.write ? "通过" : "未通过"}`
+        : `${gitTestCapability === "write" ? "写入" : "读取"}权限已验证`;
+      Alert.alert("Git Key 验证成功", detail);
+    } catch (error) {
+      Alert.alert(
+        "Git Key 验证失败",
+        error instanceof Error ? error.message : "请检查 Key 权限与仓库 URL"
+      );
     } finally {
       setIsImporting(false);
     }
@@ -388,7 +514,43 @@ export default function ProjectDrawer({
           text: "提交并推送",
           onPress: () => {
             setIsImporting(true);
-            void commitAndPushGitProject(project.id, settings, gitCommitMessage)
+            void (async () => {
+              if (!remoteWorkspace) {
+                return commitAndPushGitProject(project.id, settings, gitCommitMessage);
+              }
+              if (!project.gitUrl || !project.gitCredentialProfileId) {
+                throw new Error("远端 Git 项目必须绑定一个可用的 Key Profile");
+              }
+              const profile = resolveGitCredentialProfile(
+                project.gitUrl,
+                settings.gitCredentialProfiles,
+                project.gitCredentialProfileId
+              );
+              if (!profile) throw new Error("项目绑定的 Git Key 不可用");
+              const committed = await onRunGitWorkspaceOperation({
+                projectId: project.id,
+                operation: "commit",
+                profile,
+                commitMessage: gitCommitMessage.trim(),
+              });
+              const pushed = await onRunGitWorkspaceOperation({
+                projectId: project.id,
+                operation: "push",
+                profile,
+              });
+              const head = pushed.head ?? committed.head;
+              if (!head) throw new Error("远端未返回 Git HEAD");
+              if (project.importSource?.mode === "git") {
+                await updateProject(project.id, {
+                  importSource: {
+                    ...project.importSource,
+                    importedSnapshot: head,
+                    importedAt: Date.now(),
+                  },
+                });
+              }
+              return head;
+            })()
               .then((head) => Alert.alert("推送完成", `HEAD ${head.slice(0, 12)}`))
               .catch(showImportError)
               .finally(() => setIsImporting(false));
@@ -397,6 +559,53 @@ export default function ProjectDrawer({
       ]
     );
   };
+
+  const handleGitPull = (project: Project) => {
+    setIsImporting(true);
+    void (async () => {
+      if (!remoteWorkspace) return pullGitProject(project.id, settings);
+      if (!project.gitUrl || !project.gitCredentialProfileId) {
+        throw new Error("远端 Git 项目必须绑定一个可用的 Key Profile");
+      }
+      const profile = resolveGitCredentialProfile(
+        project.gitUrl,
+        settings.gitCredentialProfiles,
+        project.gitCredentialProfileId
+      );
+      if (!profile) throw new Error("项目绑定的 Git Key 不可用");
+      const result = await onRunGitWorkspaceOperation({
+        projectId: project.id,
+        operation: "pull",
+        profile,
+      });
+      if (!result.head) throw new Error("远端未返回 Git HEAD");
+      if (project.importSource?.mode === "git") {
+        await updateProject(project.id, {
+          importSource: {
+            ...project.importSource,
+            importedSnapshot: result.head,
+            importedAt: Date.now(),
+          },
+        });
+      }
+      return result.head;
+    })()
+      .then((head) => Alert.alert("拉取完成", `HEAD ${head.slice(0, 12)}`))
+      .catch(showImportError)
+      .finally(() => setIsImporting(false));
+  };
+
+  let matchingGitProfiles: AppSettings["gitCredentialProfiles"] = [];
+  if (gitUrl.trim()) {
+    try {
+      matchingGitProfiles = matchingGitCredentialProfiles(
+        gitUrl.trim(),
+        settings.gitCredentialProfiles
+      );
+    } catch {
+      matchingGitProfiles = [];
+    }
+  }
 
   const handleLegacyCleanup = (project: Project) => {
     const legacyProjectId = project.legacyId;
@@ -434,6 +643,17 @@ export default function ProjectDrawer({
 
   const renderItem = ({ item }: { item: Project }) => {
     const isActive = currentProject?.id === item.id;
+    let projectGitProfiles: AppSettings["gitCredentialProfiles"] = [];
+    if (item.gitUrl) {
+      try {
+        projectGitProfiles = matchingGitCredentialProfiles(
+          item.gitUrl,
+          settings.gitCredentialProfiles
+        );
+      } catch {
+        projectGitProfiles = [];
+      }
+    }
     return (
       <TouchableOpacity
         style={[styles.projectItem, isActive && styles.projectItemActive]}
@@ -500,6 +720,38 @@ export default function ProjectDrawer({
           ) : null}
           {isActive && item.importSource?.mode === "git" ? (
             <View style={styles.gitWriteBack}>
+              <Text style={styles.gitCredentialLabel}>当前仓库凭据</Text>
+              {projectGitProfiles.map((profile) => (
+                <TouchableOpacity
+                  key={profile.id}
+                  style={[
+                    styles.gitCredentialOption,
+                    item.gitCredentialProfileId === profile.id &&
+                      styles.gitCredentialOptionActive,
+                  ]}
+                  onPress={() =>
+                    void updateProject(item.id, { gitCredentialProfileId: profile.id }).catch(
+                      showImportError
+                    )
+                  }
+                >
+                  <Text style={styles.gitCredentialOptionText}>{profile.label}</Text>
+                </TouchableOpacity>
+              ))}
+              {projectGitProfiles.length === 0 ? (
+                <Text style={styles.gitCredentialHint}>
+                  {remoteWorkspace
+                    ? "远程模式一期的 Pull/Push 都需要配置并绑定匹配的 Key。"
+                    : "没有匹配该仓库的已配置 Key；公开仓库仍可 Pull，Push 前请先配置并绑定。"}
+                </Text>
+              ) : null}
+              <TouchableOpacity
+                style={styles.gitPullBtn}
+                onPress={() => handleGitPull(item)}
+                disabled={isImporting}
+              >
+                <Text style={styles.gitPullBtnText}>Pull</Text>
+              </TouchableOpacity>
               <TextInput
                 style={styles.gitMessageInput}
                 value={gitCommitMessage}
@@ -602,6 +854,64 @@ export default function ProjectDrawer({
             autoCapitalize="none"
             autoCorrect={false}
           />
+          {gitUrl.trim() ? (
+            <View style={styles.gitCredentialPicker}>
+              <Text style={styles.gitCredentialLabel}>仓库凭据</Text>
+              {!remoteWorkspace ? (
+                <TouchableOpacity
+                  style={[
+                    styles.gitCredentialOption,
+                    !gitCredentialProfileId && styles.gitCredentialOptionActive,
+                  ]}
+                  onPress={() => setGitCredentialProfileId(undefined)}
+                >
+                  <Text style={styles.gitCredentialOptionText}>公开仓库（不使用 Key）</Text>
+                </TouchableOpacity>
+              ) : null}
+              {matchingGitProfiles.map((profile) => (
+                <TouchableOpacity
+                  key={profile.id}
+                  style={[
+                    styles.gitCredentialOption,
+                    gitCredentialProfileId === profile.id && styles.gitCredentialOptionActive,
+                  ]}
+                  onPress={() => setGitCredentialProfileId(profile.id)}
+                >
+                  <Text style={styles.gitCredentialOptionText}>{profile.label}</Text>
+                </TouchableOpacity>
+              ))}
+              {matchingGitProfiles.length === 0 ? (
+                <Text style={styles.gitCredentialHint}>
+                  没有与该 HTTPS Origin/路径匹配的已配置 Key；私有仓库请先到设置中添加。
+                </Text>
+              ) : null}
+              {remoteWorkspace && gitCredentialProfileId ? (
+                <View style={styles.gitTestRow}>
+                  {(["read", "write"] as const).map((capability) => (
+                    <TouchableOpacity
+                      key={capability}
+                      style={[
+                        styles.gitTestCapability,
+                        gitTestCapability === capability && styles.gitCredentialOptionActive,
+                      ]}
+                      onPress={() => setGitTestCapability(capability)}
+                    >
+                      <Text style={styles.gitCredentialOptionText}>
+                        {capability === "read" ? "读权限" : "写权限"}
+                      </Text>
+                    </TouchableOpacity>
+                  ))}
+                  <TouchableOpacity
+                    style={styles.gitTestButton}
+                    onPress={() => void handleGitCredentialTest()}
+                    disabled={isImporting}
+                  >
+                    <Text style={styles.gitTestButtonText}>测试 Key</Text>
+                  </TouchableOpacity>
+                </View>
+              ) : null}
+            </View>
+          ) : null}
           <TouchableOpacity
             style={[styles.createBtn, !gitUrl.trim() && styles.createBtnDisabled]}
             disabled={!gitUrl.trim() || isImporting}
@@ -801,6 +1111,69 @@ const styles = StyleSheet.create({
   gitWriteBack: {
     gap: 6,
     marginTop: 8,
+  },
+  gitPullBtn: {
+    backgroundColor: "#2C2C2E",
+    borderRadius: 7,
+    paddingHorizontal: 10,
+    paddingVertical: 7,
+  },
+  gitPullBtnText: {
+    color: "#0A84FF",
+    fontSize: 12,
+    fontWeight: "600",
+  },
+  gitCredentialPicker: {
+    gap: 6,
+    marginBottom: 2,
+  },
+  gitCredentialLabel: {
+    color: "#8E8E93",
+    fontSize: 12,
+  },
+  gitCredentialOption: {
+    borderWidth: StyleSheet.hairlineWidth,
+    borderColor: "#48484A",
+    borderRadius: 7,
+    paddingHorizontal: 10,
+    paddingVertical: 7,
+  },
+  gitCredentialOptionActive: {
+    borderColor: "#0A84FF",
+    backgroundColor: "#0A84FF22",
+  },
+  gitCredentialOptionText: {
+    color: "#E5E5EA",
+    fontSize: 12,
+  },
+  gitCredentialHint: {
+    color: "#FF9F0A",
+    fontSize: 11,
+    lineHeight: 15,
+  },
+  gitTestRow: {
+    flexDirection: "row",
+    gap: 6,
+  },
+  gitTestCapability: {
+    borderWidth: StyleSheet.hairlineWidth,
+    borderColor: "#48484A",
+    borderRadius: 7,
+    paddingHorizontal: 8,
+    paddingVertical: 7,
+  },
+  gitTestButton: {
+    flex: 1,
+    alignItems: "center",
+    backgroundColor: "#0A84FF",
+    borderRadius: 7,
+    paddingHorizontal: 8,
+    paddingVertical: 7,
+  },
+  gitTestButtonText: {
+    color: "#FFFFFF",
+    fontSize: 12,
+    fontWeight: "600",
   },
   gitMessageInput: {
     backgroundColor: "#1C1C1E",

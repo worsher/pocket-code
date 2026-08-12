@@ -111,8 +111,8 @@ function MainScreen() {
   }, [pendingPreviewUrl, clearPendingPreview]);
 
   const persistSettings = useCallback(async (newSettings: AppSettings) => {
-    setSettings(newSettings);
     await saveSettings(newSettings);
+    setSettings(newSettings);
   }, []);
 
   const reportedHandoffErrorRef = useRef<string | null>(null);
@@ -179,6 +179,11 @@ function MainScreen() {
     inspectWorkspaceSource,
     cleanupLegacyWorkspace,
     bindLinkedWorkspace,
+    upsertRemoteGitCredential,
+    testRemoteGitCredential,
+    deleteRemoteGitCredential,
+    importRemoteGitWorkspace,
+    runRemoteGitWorkspaceOperation,
     deleteProjectWorkspace,
   } = useAgent({
     settings,
@@ -187,6 +192,7 @@ function MainScreen() {
     projectId: currentProject?.id,
     legacyProjectId: currentProject?.legacyId,
     projectName: currentProject?.name,
+    gitCredentialProfileId: currentProject?.gitCredentialProfileId,
     workspaceReplicaId: currentProject?.localReplica.id,
     workspaceGeneration: currentProject?.localReplica.generation,
     remoteReplicas: currentProject?.remoteReplicas,
@@ -195,6 +201,34 @@ function MainScreen() {
     onFileChanged: handleFileChanged,
     onRemoteReplica: registerRemoteReplica,
   });
+
+  const handleRemoteGitCredentialChanges = useCallback(
+    async ({
+      upsertProfiles,
+      deletedProfileIds,
+    }: {
+      upsertProfiles: AppSettings["gitCredentialProfiles"];
+      deletedProfileIds: string[];
+    }) => {
+      if (upsertProfiles.length === 0 && deletedProfileIds.length === 0) return;
+      if (!usesRemoteWorkspace(settings)) return;
+      if (!isConnected) {
+        throw new Error("远端未连接；本机 Key 已保存，下一次 Git 操作会自动安装，删除请连接后重试");
+      }
+      for (const profile of upsertProfiles) {
+        await upsertRemoteGitCredential(profile);
+      }
+      for (const profileId of deletedProfileIds) {
+        await deleteRemoteGitCredential(profileId);
+      }
+    },
+    [
+      settings,
+      isConnected,
+      upsertRemoteGitCredential,
+      deleteRemoteGitCredential,
+    ]
+  );
 
   const handleSaveSettings = useCallback(
     async (newSettings: AppSettings) => {
@@ -289,6 +323,8 @@ function MainScreen() {
     settings.relayServerUrl,
     settings.relayToken,
     settings.relayMachineId,
+    settings.relayCredentialPublicKey,
+    settings.relayCredentialKeyId,
     settings.authToken,
   ].join("|");
   const connIdentityRef = useRef<string | null>(null);
@@ -582,6 +618,9 @@ function MainScreen() {
         onBindLinkedWorkspace={bindLinkedWorkspace}
         onInspectLinkedSource={inspectWorkspaceSource}
         onCleanupLegacyWorkspace={cleanupLegacyWorkspace}
+        onTestGitCredential={testRemoteGitCredential}
+        onImportGitWorkspace={importRemoteGitWorkspace}
+        onRunGitWorkspaceOperation={runRemoteGitWorkspaceOperation}
       />
 
       {/* Project Prompt Editor */}
@@ -654,6 +693,7 @@ function MainScreen() {
           <SettingsScreen
             settings={settings}
             onSave={handleSaveSettings}
+            onRemoteGitCredentialChanges={handleRemoteGitCredentialChanges}
             onClose={() => setShowSettings(false)}
           />
         </View>

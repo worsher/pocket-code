@@ -9,6 +9,10 @@ import { isDockerEnabled, execInContainer } from "./docker.js";
 import { startManaged, stopManaged } from "./processRegistry.js";
 import { resolveWorkspaceRealPath } from "./workspaceRealPath.js";
 import type { WorkspaceHandle } from "@pocket-code/workspace-core";
+import {
+  assertWorkspacePathNotSensitive,
+  isSensitiveWorkspacePath,
+} from "./sensitiveWorkspacePath.js";
 
 const execAsync = promisify(exec);
 
@@ -148,11 +152,13 @@ export function createNodeBackend(
     typeof workspaceTarget === "string" ? workspaceTarget : workspaceTarget.worktreeRoot;
   return {
     async readFile(path: string): Promise<string> {
+      assertWorkspacePathNotSensitive(path);
       const target = await resolveWorkspaceRealPath(workspace, path, { allowMissing: false });
       return readFile(target, "utf-8");
     },
 
     async writeFile(path: string, content: string): Promise<{ isNew: boolean }> {
+      assertWorkspacePathNotSensitive(path);
       const target = await resolveWorkspaceRealPath(workspace, path, { allowMissing: true });
       let isNew = false;
       try {
@@ -167,12 +173,15 @@ export function createNodeBackend(
     },
 
     async listFiles(path: string): Promise<{ name: string; type: "file" | "dir" }[]> {
+      assertWorkspacePathNotSensitive(path);
       const target = await resolveWorkspaceRealPath(workspace, path, { allowMissing: false });
       const entries = await readdir(target, { withFileTypes: true });
-      return entries.map((e) => ({
-        name: e.name,
-        type: e.isDirectory() ? "dir" : "file",
-      }));
+      return entries
+        .filter((entry) => !isSensitiveWorkspacePath(join(path, entry.name)))
+        .map((e) => ({
+          name: e.name,
+          type: e.isDirectory() ? "dir" : "file",
+        }));
     },
 
     async exec(cmd: string, opts?: NodeExecOpts): Promise<ExecResult> {

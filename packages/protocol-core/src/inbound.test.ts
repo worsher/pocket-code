@@ -3,11 +3,27 @@ import { RelayInbound, DaemonInbound, RelayErrorMessage, DaemonRegistered } from
 
 describe("RelayInbound", () => {
   const valid: unknown[] = [
-    { type: "daemon-register", machineId: "m_1", machineName: "Mac", authToken: "ab", timestamp: 1 },
+    {
+      type: "daemon-register",
+      machineId: "m_1",
+      machineName: "Mac",
+      authToken: "ab",
+      timestamp: 1,
+      publicKey: "daemon-public-key",
+      keyId: "daemon-key-1",
+    },
     { type: "daemon-heartbeat", machineId: "m_1", timestamp: 1 },
     { type: "forward-response", requestId: "r1", payload: { type: "done" } },
     { type: "forward-stream", requestId: "r1", payload: { type: "text-delta", text: "x" } },
-    { type: "pair-response", success: true, token: "t", machineId: "m_1", machineName: "Mac" },
+    {
+      type: "pair-response",
+      success: true,
+      token: "t",
+      machineId: "m_1",
+      machineName: "Mac",
+      publicKey: "daemon-public-key",
+      keyId: "daemon-key-1",
+    },
     { type: "pair-response", success: false, error: "bad code" },
     { type: "tunnel-response", tunnelId: "t1", status: 200, headers: {} },
     { type: "tunnel-chunk", tunnelId: "t1", data: "YWJj" },

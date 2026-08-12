@@ -4,6 +4,7 @@ import {
   type ConnectionConfig,
   type ConnectionHandlers,
 } from "./serverConnection";
+import nacl from "tweetnacl";
 
 class FakeWebSocket {
   static OPEN = 1;
@@ -100,6 +101,29 @@ describe("ServerConnection", () => {
     const init = JSON.parse(ws.sent[1]);
     expect(init.type).toBe("init");
     expect(init.token).toBe("tok_1");
+    conn.disconnect();
+  });
+
+  it("never emits deprecated plaintext gitCredentials in current init messages", () => {
+    const conn = new ServerConnection(
+      makeConfig({
+        getAuthToken: () => "tok_1",
+        buildInitPayload: () => ({
+          sessionId: "s1",
+          gitCredentials: [
+            { platform: "github", host: "github.com", username: "u", token: "DO_NOT_SEND" },
+          ],
+        }),
+      }),
+      makeHandlers()
+    );
+    conn.connect();
+    const ws = FakeWebSocket.instances[0];
+    ws.open();
+    const init = JSON.parse(ws.sent[0]);
+    expect(init).toMatchObject({ type: "init", token: "tok_1", sessionId: "s1" });
+    expect(init.gitCredentials).toBeUndefined();
+    expect(ws.sent[0]).not.toContain("DO_NOT_SEND");
     conn.disconnect();
   });
 
@@ -401,6 +425,134 @@ describe("ServerConnection", () => {
       cleaned: true,
     });
     await expect(pending).resolves.toMatchObject({ success: true, cleaned: true });
+    conn.disconnect();
+  });
+
+  it("correlates credential and Git workspace RPC responses", async () => {
+    const conn = new ServerConnection(makeConfig(), makeHandlers());
+    conn.connect();
+    const ws = FakeWebSocket.instances[0];
+    ws.open();
+    const profile = {
+      id: "github-main",
+      provider: "github" as const,
+      authKind: "pat" as const,
+      origin: "https://github.com",
+      username: "octocat",
+    };
+
+    const upsert = conn.upsertGitCredential({ profile, secret: "github_pat_test" });
+    const upsertRequest = JSON.parse(ws.sent.at(-1)!);
+    expect(upsertRequest).toMatchObject({ type: "git-credential-upsert", profile, secret: "github_pat_test" });
+    ws.receive({
+      type: "git-credential-result",
+      _reqId: upsertRequest._reqId,
+      credentialProfileId: profile.id,
+      operation: "upsert",
+      success: true,
+    });
+    await expect(upsert).resolves.toMatchObject({ success: true, operation: "upsert" });
+
+    const projectId = "10ed836e-ae48-4d67-9e26-a74cbf55a52e";
+    const operation = conn.runGitWorkspaceOperation({
+      projectId,
+      operation: "pull",
+      credentialProfileId: profile.id,
+    });
+    const operationRequest = JSON.parse(ws.sent.at(-1)!);
+    expect(operationRequest).toMatchObject({ type: "git-workspace-operation", operation: "pull" });
+    ws.receive({
+      type: "git-operation-result",
+      _reqId: operationRequest._reqId,
+      projectId,
+      operation: "pull",
+      success: true,
+      head: "abc123",
+    });
+    await expect(operation).resolves.toMatchObject({ success: true, head: "abc123" });
+    conn.disconnect();
+  });
+
+  it("automatically seals Relay credential upserts to the pinned daemon key", async () => {
+    const daemonSecret = Uint8Array.from({ length: 32 }, (_, index) => 150 - index);
+    const daemonKey = nacl.box.keyPair.fromSecretKey(daemonSecret);
+    const conn = new ServerConnection(
+      makeConfig({
+        isRelayMode: () => true,
+        isRelayPaired: () => true,
+        getRelayOptions: () => ({
+          machineId: "m_1",
+          deviceId: "d_1",
+          token: "device-token",
+          publicKey: Buffer.from(daemonKey.publicKey).toString("base64"),
+          keyId: "daemon-key-1",
+        }),
+      }),
+      makeHandlers()
+    );
+    conn.connect();
+    const ws = FakeWebSocket.instances[0];
+    ws.open();
+    const profile = {
+      id: "gitlab-company",
+      provider: "gitlab" as const,
+      authKind: "pat" as const,
+      origin: "https://gitlab.company.test",
+    };
+    const pending = conn.upsertGitCredential({
+      profile,
+      secret: "glpat_DO_NOT_EXPOSE",
+      randomBytes: (length) => Uint8Array.from({ length }, (_, index) => index + 1),
+    });
+    const envelope = JSON.parse(ws.sent.at(-1)!);
+    expect(envelope.type).toBe("relay-request");
+    expect(envelope.payload).toMatchObject({ type: "git-credential-upsert", profile });
+    expect(envelope.payload.secret).toBeUndefined();
+    expect(envelope.payload.sealedSecret).toMatchObject({
+      keyId: "daemon-key-1",
+      profileId: profile.id,
+      origin: profile.origin,
+      requestId: envelope.payload._reqId,
+    });
+    expect(ws.sent.at(-1)).not.toContain("glpat_DO_NOT_EXPOSE");
+
+    ws.receive({
+      type: "relay-response",
+      requestId: envelope.requestId,
+      payload: {
+        type: "git-credential-result",
+        _reqId: envelope.payload._reqId,
+        credentialProfileId: profile.id,
+        operation: "upsert",
+        success: true,
+      },
+    });
+    await expect(pending).resolves.toMatchObject({ success: true });
+    conn.disconnect();
+  });
+
+  it("keeps remote Git imports alive beyond the server's ten-minute command timeout", async () => {
+    vi.useFakeTimers();
+    const conn = new ServerConnection(makeConfig(), makeHandlers());
+    conn.connect();
+    const ws = FakeWebSocket.instances[0];
+    ws.open();
+    const pending = conn.importGitWorkspace({
+      projectId: "10ed836e-ae48-4d67-9e26-a74cbf55a52e",
+      repositoryUrl: "https://github.com/acme/large-repo.git",
+      credentialProfileId: "github-main",
+    });
+    let settled = false;
+    void pending.then(
+      () => (settled = true),
+      () => (settled = true)
+    );
+    vi.advanceTimersByTime(10 * 60 * 1000 + 1);
+    await Promise.resolve();
+    expect(settled).toBe(false);
+    const rejection = expect(pending).rejects.toThrow("Git workspace import timed out");
+    vi.advanceTimersByTime(60 * 1000);
+    await rejection;
     conn.disconnect();
   });
 

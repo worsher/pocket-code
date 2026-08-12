@@ -9,6 +9,11 @@ import { promisify } from "node:util";
 import { mkdir, rm, readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { createHash } from "node:crypto";
+import {
+  assertWorkspacePathNotSensitive,
+  isSensitiveWorkspacePath,
+  SENSITIVE_GIT_EXCLUDES,
+} from "../sensitiveWorkspacePath.js";
 
 const exec = promisify(execFile);
 const SNAP_REF = "refs/pocket-code/worktree";
@@ -33,8 +38,9 @@ const DEFAULT_EXCLUDES = [
   "venv/",
   "*.log",
   ".DS_Store",
+  ...SENSITIVE_GIT_EXCLUDES,
 ];
-const EXCLUDE_MARKER = "# pocket-code shadow-snapshot defaults";
+const EXCLUDE_MARKER = "# pocket-code shadow-snapshot defaults v2";
 
 function shadowGitDir(repoDir: string, stateRoot?: string): string {
   return stateRoot ? join(stateRoot, "shadow-snapshot", ".git") : join(repoDir, ".git");
@@ -92,6 +98,24 @@ async function tryGit(repoDir: string, args: string[], stateRoot?: string): Prom
   }
 }
 
+async function snapshotHistoryContainsSensitivePaths(
+  repoDir: string,
+  commit: string,
+  stateRoot?: string
+): Promise<boolean> {
+  const output = await git(
+    repoDir,
+    ["log", "--format=", "--name-only", "-z", commit],
+    undefined,
+    stateRoot
+  );
+  return output
+    .split("\0")
+    .map((path) => path.replace(/^\n+|\n+$/g, ""))
+    .filter(Boolean)
+    .some(isSensitiveWorkspacePath);
+}
+
 export interface SnapshotResult {
   /** 新快照 commit sha */
   commit: string;
@@ -134,7 +158,13 @@ export async function createSnapshot(repoDir: string, stateRoot?: string): Promi
   try {
     await git(repoDir, ["add", "-A"], env, stateRoot);
     const tree = (await git(repoDir, ["write-tree"], env, stateRoot)).trim();
-    const parent = await tryGit(repoDir, ["rev-parse", "--verify", "-q", SNAP_REF], stateRoot);
+    let parent = await tryGit(repoDir, ["rev-parse", "--verify", "-q", SNAP_REF], stateRoot);
+    // A pre-v2 private ref may still point at a plaintext credential.  Make the
+    // next ref an orphan instead of keeping the sensitive commit reachable as
+    // an ancestor.  sync-file independently enforces the path policy too.
+    if (parent && (await snapshotHistoryContainsSensitivePaths(repoDir, parent, stateRoot))) {
+      parent = null;
+    }
     const commitArgs = ["commit-tree", tree];
     if (parent) commitArgs.push("-p", parent);
     commitArgs.push("-m", "pocket snapshot");
@@ -166,6 +196,7 @@ export async function changedFiles(
     return out
       .split("\n")
       .filter(Boolean)
+      .filter((path) => !isSensitiveWorkspacePath(path))
       .map((path) => ({ path, status: "A" as const }));
   }
   // -z: NUL 分隔,稳健处理含空格/特殊字符的路径。
@@ -184,6 +215,7 @@ export async function changedFiles(
   for (let i = 0; i + 1 < parts.length; i += 2) {
     const code = parts[i];
     const path = parts[i + 1];
+    if (isSensitiveWorkspacePath(path)) continue;
     let status: ChangeStatus;
     if (code.startsWith("A")) {
       status = "A";
@@ -208,6 +240,7 @@ export async function readSnapshotFile(
   relPath: string,
   stateRoot?: string
 ): Promise<Buffer> {
+  assertWorkspacePathNotSensitive(relPath);
   const { stdout } = await exec(
     "git",
     gitArgs(repoDir, ["show", `${commit}:${relPath}`], stateRoot),
@@ -239,6 +272,7 @@ export async function describeSnapshot(
   const paths = output
     .split("\0")
     .filter(Boolean)
+    .filter((path) => !isSensitiveWorkspacePath(path))
     .sort((a, b) => (a < b ? -1 : a > b ? 1 : 0));
   const files: SnapshotManifestFile[] = [];
   for (const path of paths) {

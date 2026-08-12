@@ -86,6 +86,8 @@ export interface Project {
   name: string;
   description: string;
   gitUrl?: string;
+  /** Credential metadata binding only. The secret remains in SecureStore/remote Vault. */
+  gitCredentialProfileId?: string;
   lastSessionId?: string;
   customPrompt?: string;
   lastSyncTime?: number;
@@ -474,6 +476,7 @@ function migrateLegacyProject(
     name: optionalString(value.name) ?? "Untitled",
     description: optionalString(value.description) ?? "",
     gitUrl: optionalString(value.gitUrl),
+    gitCredentialProfileId: optionalString(value.gitCredentialProfileId),
     lastSessionId: optionalString(value.lastSessionId),
     customPrompt: optionalString(value.customPrompt),
     lastSyncTime: optionalNumber(value.lastSyncTime),
@@ -593,6 +596,14 @@ export function upgradeProjectCatalog(
           delete repaired.importSource;
           changed = true;
         }
+      }
+      if (
+        item.gitCredentialProfileId !== undefined &&
+        (typeof item.gitCredentialProfileId !== "string" || !item.gitCredentialProfileId)
+      ) {
+        repaired = { ...repaired };
+        delete repaired.gitCredentialProfileId;
+        changed = true;
       }
       if (item.syncEdges !== undefined) {
         const syncEdges = Array.isArray(item.syncEdges)

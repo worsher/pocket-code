@@ -32,6 +32,12 @@ import { ensureServerStorageLayout } from "@pocket-code/server/tools";
 import { shutdownAll } from "@pocket-code/server/processRegistry";
 import { requireRelaySecret } from "./config.js";
 import type { DaemonInboundType, ServerOutboundType } from "@pocket-code/wire";
+import {
+  CredentialDecryptError,
+  CredentialEnvelopeDecryptor,
+  loadOrCreateCredentialKeyPair,
+} from "./credentialCrypto.js";
+import { RequestCorrelationContext } from "./requestCorrelation.js";
 
 // ── Configuration ─────────────────────────────────────
 
@@ -62,6 +68,8 @@ function loadOrGenerateMachineId(): string {
 }
 
 const MACHINE_ID = loadOrGenerateMachineId();
+const CREDENTIAL_KEY_PAIR = loadOrCreateCredentialKeyPair(POCKET_HOME);
+const credentialDecryptor = new CredentialEnvelopeDecryptor(CREDENTIAL_KEY_PAIR);
 
 let RELAY_SECRET: string;
 try {
@@ -131,6 +139,8 @@ const connection: TunnelClientHandle = startTunnelClient({
   machineId: MACHINE_ID,
   machineName: MACHINE_NAME,
   relaySecret: RELAY_SECRET,
+  publicKey: CREDENTIAL_KEY_PAIR.publicKey,
+  keyId: CREDENTIAL_KEY_PAIR.keyId,
 
   onConnected() {
     console.log("[Daemon] Registered with relay. Waiting for connections...");
@@ -152,10 +162,17 @@ const connection: TunnelClientHandle = startTunnelClient({
 interface DeviceHandlerEntry {
   handler: MessageHandler;
   lastActivity: number;
-  currentRequestId: string;
+  lastRequestId: string;
 }
 
 const deviceHandlers = new Map<string, DeviceHandlerEntry>();
+const requestCorrelation = new RequestCorrelationContext();
+
+const TERMINAL_CONTROL_RESPONSES = new Set([
+  "git-credential-result",
+  "git-operation-result",
+  "workspace-import-result",
+]);
 
 const HANDLER_TTL_MS = 30 * 60 * 1000; // 30 minutes (matches server session TTL)
 
@@ -193,6 +210,8 @@ function handleRelayMessage(msg: DaemonInboundType) {
           token: result.token,
           machineId: MACHINE_ID,
           machineName: MACHINE_NAME,
+          publicKey: CREDENTIAL_KEY_PAIR.publicKey,
+          keyId: CREDENTIAL_KEY_PAIR.keyId,
         });
         console.log(`[Daemon] ✅ Device ${msg.deviceName} paired successfully!`);
 
@@ -229,6 +248,16 @@ function handleRelayMessage(msg: DaemonInboundType) {
         `[Daemon] Request from ${device.deviceName}: ${payload?.type} (${requestId.slice(0, 8)}…)`
       );
 
+      const prepared = prepareForwardedPayload(payload, requestId);
+      if (!prepared.ok) {
+        connection.send({
+          type: "forward-response",
+          requestId,
+          payload: prepared.response,
+        });
+        return;
+      }
+
       // Get or create a handler for this device (maintains session state across requests)
       let entry = deviceHandlers.get(device.deviceId);
       if (!entry) {
@@ -236,14 +265,16 @@ function handleRelayMessage(msg: DaemonInboundType) {
         const newEntry: DeviceHandlerEntry = {
           handler: null as any, // will be set below
           lastActivity: Date.now(),
-          currentRequestId: requestId,
+          lastRequestId: requestId,
         };
 
         const sendFn = (data: ServerOutboundType) => {
-          // Dynamically use the current requestId from the entry
+          const correlatedRequestId = requestCorrelation.current(newEntry.lastRequestId);
           connection.send({
-            type: "forward-stream",
-            requestId: newEntry.currentRequestId,
+            type: TERMINAL_CONTROL_RESPONSES.has(data.type)
+              ? "forward-response"
+              : "forward-stream",
+            requestId: correlatedRequestId,
             payload: data,
           });
         };
@@ -262,21 +293,23 @@ function handleRelayMessage(msg: DaemonInboundType) {
       }
 
       // Update the current requestId and activity timestamp
-      entry.currentRequestId = requestId;
+      entry.lastRequestId = requestId;
       entry.lastActivity = Date.now();
 
       // Pass the payload to the handler
-      entry.handler.onMessage(JSON.stringify(payload)).catch((err: any) => {
-        console.error("[Daemon] Error handling forwarded message:", err);
-        // 出错时回 error 响应给 App,避免其挂起等待(审计:原先静默)。
-        const sent = connection.send({
-          type: "forward-response",
-          requestId,
-          payload: { type: "error", error: `Daemon handler error: ${err?.message ?? "unknown"}` },
+      requestCorrelation.run(requestId, () => {
+        entry!.handler.onMessage(JSON.stringify(prepared.payload)).catch((err: any) => {
+          console.error("[Daemon] Error handling forwarded message:", err);
+          // 出错时回 error 响应给 App,避免其挂起等待(审计:原先静默)。
+          const sent = connection.send({
+            type: "forward-response",
+            requestId,
+            payload: { type: "error", error: `Daemon handler error: ${err?.message ?? "unknown"}` },
+          });
+          if (!sent) {
+            console.error("[Daemon] Failed to deliver error response (relay disconnected)");
+          }
         });
-        if (!sent) {
-          console.error("[Daemon] Failed to deliver error response (relay disconnected)");
-        }
       });
       break;
     }
@@ -288,10 +321,93 @@ function handleRelayMessage(msg: DaemonInboundType) {
   }
 }
 
+function prepareForwardedPayload(
+  payload: Record<string, unknown>,
+  outerRequestId: string
+):
+  | { ok: true; payload: Record<string, unknown> }
+  | { ok: false; response: Record<string, unknown> } {
+  if (payload.type === "init" && "gitCredentials" in payload) {
+    // Rolling-upgrade compatibility is parse-only. Relay mode never installs
+    // the deprecated plaintext array into a daemon workspace.
+    const { gitCredentials: _legacyCredentials, ...safeInit } = payload;
+    return { ok: true, payload: safeInit };
+  }
+  if (payload.type !== "git-credential-upsert") return { ok: true, payload };
+
+  const profile =
+    payload.profile && typeof payload.profile === "object"
+      ? (payload.profile as Record<string, unknown>)
+      : undefined;
+  const profileId = typeof profile?.id === "string" ? profile.id : "unknown";
+  const origin = typeof profile?.origin === "string" ? profile.origin : "";
+  const reqId = typeof payload._reqId === "string" ? payload._reqId : outerRequestId;
+  if (reqId !== outerRequestId) {
+    return credentialDecryptFailure(
+      reqId,
+      profileId,
+      "invalid_request",
+      "Credential RPC request id does not match its relay envelope"
+    );
+  }
+  if (!payload.sealedSecret || typeof payload.sealedSecret !== "object") {
+    return credentialDecryptFailure(
+      reqId,
+      profileId,
+      "encryption_required",
+      "Relay credential installation requires an end-to-end encrypted secret"
+    );
+  }
+  if (typeof payload.secret === "string") {
+    return credentialDecryptFailure(
+      reqId,
+      profileId,
+      "encryption_required",
+      "Relay credential installation must not include a plaintext secret"
+    );
+  }
+
+  try {
+    const secret = credentialDecryptor.open(payload.sealedSecret, {
+      profileId,
+      origin,
+      requestId: reqId,
+    });
+    const { sealedSecret: _sealedSecret, ...rest } = payload;
+    return { ok: true, payload: { ...rest, secret } };
+  } catch (error) {
+    const decryptError =
+      error instanceof CredentialDecryptError
+        ? error
+        : new CredentialDecryptError("decryption_failed", "Unable to decrypt credential");
+    return credentialDecryptFailure(reqId, profileId, decryptError.code, decryptError.message);
+  }
+}
+
+function credentialDecryptFailure(
+  reqId: string,
+  credentialProfileId: string,
+  code: string,
+  message: string
+): { ok: false; response: Record<string, unknown> } {
+  return {
+    ok: false,
+    response: {
+      type: "git-credential-result",
+      _reqId: reqId,
+      credentialProfileId,
+      operation: "upsert",
+      success: false,
+      error: { code, message },
+    },
+  };
+}
+
 // ── Graceful Shutdown ─────────────────────────────────
 
 function shutdown() {
   console.log("\n[Daemon] Shutting down...");
+  CREDENTIAL_KEY_PAIR.secretKey.fill(0);
   shutdownAll();
   connection.stop();
   process.exit(0);

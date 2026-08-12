@@ -11,11 +11,11 @@ export function usesRemoteWorkspace(settings: AppSettings): boolean {
 /** Stable client-side route for choosing a retained remote replica pre-ack. */
 export function getWorkspaceConnectionKey(settings: AppSettings): string | null {
   if (!usesRemoteWorkspace(settings)) return null;
-  if (settings.mode === "cloud") {
-    return `cloud:${normalizeEndpoint(settings.cloudServerUrl)}`;
-  }
   if (settings.workspaceMode === "relay") {
     return `relay:${normalizeEndpoint(settings.relayServerUrl)}:${settings.relayMachineId ?? "unpaired"}`;
+  }
+  if (settings.mode === "cloud") {
+    return `cloud:${normalizeEndpoint(settings.cloudServerUrl)}`;
   }
   return `server:${normalizeEndpoint(settings.toolServerUrl)}`;
 }

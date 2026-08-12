@@ -3,10 +3,28 @@
 // Used by both the direct WebSocket server (index.ts) and the relay daemon.
 
 import { createSession, runAgent, type AgentSession } from "./agent.js";
-import { getServerV2Root, getWorkspaceRoot } from "./tools.js";
+import { getServerV2Root, getWorkspaceHandle, getWorkspaceRoot } from "./tools.js";
 import { buildToolRegistry } from "@pocket-code/agent-core";
 import { createNodeBackend } from "./nodeBackend.js";
-import { setupGitCredentials } from "./gitCredentials.js";
+import {
+  cleanupLegacyWorkspaceCredentials,
+  migrateLegacyGitCredentials,
+} from "./gitCredentials.js";
+import {
+  GitCredentialVaultError,
+  getGitCredentialVault,
+  normalizeGitCredentialProfile,
+  type GitCredentialProfile,
+} from "./gitCredentialVault.js";
+import {
+  atomicCloneGitRepository,
+  redactSensitiveText,
+  runGitWorkspaceOperation,
+  testGitCredential,
+  toGitRpcError,
+  type GitRpcErrorShape,
+} from "./gitRemote.js";
+import { assertWorkspacePathNotSensitive } from "./sensitiveWorkspacePath.js";
 import { verifyToken, registerAnonymous, type AuthPayload } from "./auth.js";
 import { isDockerEnabled, getContainer } from "./docker.js";
 import {
@@ -21,6 +39,9 @@ import {
   updateWorkspaceProjectDisplayName,
   releaseWorkspaceProjectWriter,
   isWorkspaceSessionGenerationCurrent,
+  ensureWorkspaceProject,
+  commitGitWorkspaceImport,
+  type WorkspaceImportSourceRecord,
 } from "./db.js";
 import { createGoal, goalUpdatedEvent, clearedEvent, type GoalState } from "./goal/types.js";
 import { runGoalDriver } from "./goal/driver.js";
@@ -35,9 +56,13 @@ import {
 import { handleSyncPull, handleSyncFile } from "./sync/syncHandler.js";
 import { bindLinkedDirectory, inspectLinkedDirectorySource } from "./linkedImport.js";
 import { getSessionStream, type SessionEventStream } from "./eventBuffer.js";
-import { rm } from "fs/promises";
+import { mkdir, rm } from "fs/promises";
 import { join } from "path";
-import { getManagedWorkspaceRelativeRoots, isUuid } from "@pocket-code/workspace-core";
+import {
+  deriveSourceIdentity,
+  getManagedWorkspaceRelativeRoots,
+  isUuid,
+} from "@pocket-code/workspace-core";
 import { getServerWorkspaceFeatureFlags } from "./workspaceFeatureFlags.js";
 import {
   cleanupLegacyServerWorkspace,
@@ -74,6 +99,30 @@ export interface MessageHandlerOptions {
   replicaKind?: WorkspaceReplicaKindType;
   /** Only a trusted desktop daemon may resolve user-supplied host paths. */
   allowLinkedWorkspaceBinding?: boolean;
+  /** Plaintext PATs are accepted only after a secure hop or explicit local development opt-in. */
+  allowPlaintextGitCredentials?: boolean;
+  /** Optional trusted transport hook. Never persist a sealed envelope itself. */
+  resolveSealedGitCredential?: (args: {
+    sealedSecret: unknown;
+    profile: GitCredentialProfile;
+    requestId: string;
+  }) => Promise<string>;
+}
+
+function credentialRpcError(error: unknown): GitRpcErrorShape {
+  if (error instanceof GitCredentialVaultError) {
+    if (error.code === "credential_not_found") {
+      return { code: "credential_not_found", message: error.message };
+    }
+    if (error.code === "invalid_profile") {
+      return { code: "invalid_request", message: error.message };
+    }
+    return {
+      code: "internal_error",
+      message: "Git credential vault is unavailable",
+    };
+  }
+  return toGitRpcError(error);
 }
 
 /**
@@ -97,6 +146,10 @@ export function createMessageHandler(
   let unsubscribe: (() => void) | null = null;
   const replicaKind = options?.replicaKind ?? "cloud";
   const workspaceFlags = getServerWorkspaceFeatureFlags();
+  const credentialVault = getGitCredentialVault();
+  const allowPlaintextGitCredentials =
+    options?.allowPlaintextGitCredentials ??
+    Boolean(options?.preAuth && options?.replicaKind === "dev-binding");
   let workspaceAuthorityId: string | null = null;
   const getAuthorityId = () => (workspaceAuthorityId ??= getWorkspaceAuthorityId());
 
@@ -269,12 +322,27 @@ export function createMessageHandler(
             if (msg.customPrompt !== undefined) {
               session.customPrompt = msg.customPrompt || undefined;
             }
-            if (msg.gitCredentials && msg.gitCredentials.length > 0) {
-              try {
-                await setupGitCredentials(session.workspace, msg.gitCredentials as any);
-              } catch (err: any) {
-                console.error("[Handler] Failed to setup git credentials:", err.message);
+            // Remove plaintext files produced by pre-v2 versions on every
+            // session restore.  One-release legacy payload migration is
+            // allowed only on a transport already trusted for plaintext.
+            try {
+              if (msg.gitCredentials?.length && allowPlaintextGitCredentials) {
+                await migrateLegacyGitCredentials({
+                  workspace: session.workspace,
+                  userId: auth.userId,
+                  credentials: msg.gitCredentials,
+                  vault: credentialVault,
+                });
+              } else {
+                await cleanupLegacyWorkspaceCredentials(session.workspace);
+                if (msg.gitCredentials?.length) {
+                  console.warn(
+                    "[Handler] Ignored legacy Git credentials on a transport that requires encryption"
+                  );
+                }
               }
+            } catch {
+              console.error("[Handler] Failed to migrate legacy Git credential state");
             }
             // ── P14:订阅事件流 + 发 ack(带游标)+ 补发协商 ──
             // 先订阅后补发(D-P14-5):避免"ack 后、订阅前"的事件真空;
@@ -412,6 +480,352 @@ export function createMessageHandler(
               limits: quota.limits as unknown as Record<string, unknown>,
               usage: quota.usage as unknown as Record<string, unknown>,
             });
+            break;
+          }
+
+          // ── Provider-neutral Git credentials ──────────
+          case "git-credential-upsert": {
+            const profileId = msg.profile.id;
+            if (!auth) {
+              send({
+                type: "git-credential-result",
+                _reqId: msg._reqId,
+                credentialProfileId: profileId,
+                operation: "upsert",
+                success: false,
+                error: { code: "auth_required", message: "Not authenticated." },
+              } satisfies ServerOutboundType);
+              break;
+            }
+            try {
+              const profile = normalizeGitCredentialProfile(msg.profile);
+              const supplied = Number(msg.secret !== undefined) + Number(msg.sealedSecret !== undefined);
+              if (supplied !== 1) {
+                throw new GitCredentialVaultError(
+                  "invalid_profile",
+                  "Provide exactly one Git credential secret"
+                );
+              }
+              let secret: string;
+              if (msg.secret !== undefined) {
+                if (!allowPlaintextGitCredentials) {
+                  send({
+                    type: "git-credential-result",
+                    _reqId: msg._reqId,
+                    credentialProfileId: profileId,
+                    operation: "upsert",
+                    success: false,
+                    error: {
+                      code: "encryption_required",
+                      message: "Plaintext Git credentials require WSS or explicit local development mode",
+                    },
+                  } satisfies ServerOutboundType);
+                  break;
+                }
+                secret = msg.secret;
+              } else {
+                if (!options?.resolveSealedGitCredential) {
+                  send({
+                    type: "git-credential-result",
+                    _reqId: msg._reqId,
+                    credentialProfileId: profileId,
+                    operation: "upsert",
+                    success: false,
+                    error: {
+                      code: "encryption_required",
+                      message: "Encrypted Git credential must be opened by the trusted daemon transport",
+                    },
+                  } satisfies ServerOutboundType);
+                  break;
+                }
+                if (
+                  msg.sealedSecret!.profileId !== profile.id ||
+                  msg.sealedSecret!.origin !== profile.origin ||
+                  (msg.sealedSecret!.requestId && msg.sealedSecret!.requestId !== msg._reqId)
+                ) {
+                  send({
+                    type: "git-credential-result",
+                    _reqId: msg._reqId,
+                    credentialProfileId: profileId,
+                    operation: "upsert",
+                    success: false,
+                    error: {
+                      code: "encryption_key_mismatch",
+                      message: "Encrypted Git credential binding does not match the request",
+                    },
+                  } satisfies ServerOutboundType);
+                  break;
+                }
+                secret = await options.resolveSealedGitCredential({
+                  sealedSecret: msg.sealedSecret,
+                  profile,
+                  requestId: msg._reqId,
+                });
+              }
+              await credentialVault.upsert(auth.userId, profile, secret);
+              send({
+                type: "git-credential-result",
+                _reqId: msg._reqId,
+                credentialProfileId: profile.id,
+                operation: "upsert",
+                success: true,
+              } satisfies ServerOutboundType);
+            } catch (error) {
+              send({
+                type: "git-credential-result",
+                _reqId: msg._reqId,
+                credentialProfileId: profileId,
+                operation: "upsert",
+                success: false,
+                error: credentialRpcError(error),
+              } satisfies ServerOutboundType);
+            }
+            break;
+          }
+
+          case "git-credential-test": {
+            if (!auth) {
+              send({
+                type: "git-credential-result",
+                _reqId: msg._reqId,
+                credentialProfileId: msg.credentialProfileId,
+                operation: "test",
+                success: false,
+                error: { code: "auth_required", message: "Not authenticated." },
+              } satisfies ServerOutboundType);
+              break;
+            }
+            try {
+              const credential = await credentialVault.read(auth.userId, msg.credentialProfileId);
+              const capabilities = await testGitCredential({
+                credential,
+                repositoryUrl: msg.repositoryUrl,
+                capability: msg.capability,
+              });
+              send({
+                type: "git-credential-result",
+                _reqId: msg._reqId,
+                credentialProfileId: msg.credentialProfileId,
+                operation: "test",
+                success: true,
+                capabilities,
+              } satisfies ServerOutboundType);
+            } catch (error) {
+              send({
+                type: "git-credential-result",
+                _reqId: msg._reqId,
+                credentialProfileId: msg.credentialProfileId,
+                operation: "test",
+                success: false,
+                error: credentialRpcError(error),
+              } satisfies ServerOutboundType);
+            }
+            break;
+          }
+
+          case "git-credential-delete": {
+            if (!auth) {
+              send({
+                type: "git-credential-result",
+                _reqId: msg._reqId,
+                credentialProfileId: msg.credentialProfileId,
+                operation: "delete",
+                success: false,
+                error: { code: "auth_required", message: "Not authenticated." },
+              } satisfies ServerOutboundType);
+              break;
+            }
+            try {
+              await credentialVault.delete(auth.userId, msg.credentialProfileId);
+              send({
+                type: "git-credential-result",
+                _reqId: msg._reqId,
+                credentialProfileId: msg.credentialProfileId,
+                operation: "delete",
+                success: true,
+              } satisfies ServerOutboundType);
+            } catch (error) {
+              send({
+                type: "git-credential-result",
+                _reqId: msg._reqId,
+                credentialProfileId: msg.credentialProfileId,
+                operation: "delete",
+                success: false,
+                error: credentialRpcError(error),
+              } satisfies ServerOutboundType);
+            }
+            break;
+          }
+
+          // ── Explicit remote Git import / operations ───
+          case "workspace-import-git": {
+            if (!auth) {
+              send({
+                type: "workspace-import-result",
+                _reqId: msg._reqId,
+                status: "error",
+                error: "[auth_required] Not authenticated.",
+              } satisfies ServerOutboundType);
+              break;
+            }
+            const existing = getWorkspaceProject(auth.userId, msg.projectId);
+            let created = false;
+            let cloned = false;
+            let catalogCommitted = false;
+            let targetWorkspace: string | undefined;
+            try {
+              const credential = await credentialVault.read(auth.userId, msg.credentialProfileId);
+              const project = existing ?? ensureWorkspaceProject(auth.userId, msg.projectId);
+              created = !existing;
+              if (project.worktreePath || project.importSource) {
+                throw new Error("Git import target is already bound or imported");
+              }
+              const handle = getWorkspaceHandle({
+                sessionId: "",
+                userId: auth.userId,
+                projectId: msg.projectId,
+              });
+              targetWorkspace = handle.worktreeRoot;
+              const clone = await atomicCloneGitRepository({
+                repositoryUrl: msg.repositoryUrl,
+                credential,
+                targetWorkspace: handle.worktreeRoot,
+                branch: msg.branch,
+              });
+              cloned = true;
+              const canonicalLocator = new URL(msg.repositoryUrl).toString();
+              const sourceDeviceId = getAuthorityId();
+              const identity = deriveSourceIdentity({
+                importMode: "git",
+                sourceKind: "git",
+                sourceDeviceId,
+                canonicalLocator,
+                gitRemote: canonicalLocator,
+                contentFingerprint: clone.head,
+              });
+              const importSource: WorkspaceImportSourceRecord = {
+                mode: "git",
+                sourceKind: "git",
+                sourceDeviceId,
+                canonicalLocator,
+                identity,
+                importedSnapshot: clone.head,
+                importedAt: Date.now(),
+                writeBackPolicy: "git",
+              };
+              const committed = commitGitWorkspaceImport({
+                userId: auth.userId,
+                projectId: msg.projectId,
+                displayName: msg.displayName || project.displayName || "Git project",
+                importSource,
+              });
+              catalogCommitted = true;
+              send({
+                type: "workspace-import-result",
+                _reqId: msg._reqId,
+                status: "imported",
+                project: {
+                  projectId: committed.projectId,
+                  displayName: committed.displayName,
+                  replicaId: committed.replicaId,
+                  workspaceGeneration: committed.generation,
+                  authorityId: getAuthorityId(),
+                  replicaKind,
+                  updatedAt: committed.updatedAt,
+                  importSource: {
+                    ...importSource,
+                    identity: { ...identity, weakKeys: [...identity.weakKeys] },
+                  },
+                },
+                importSource: {
+                  ...importSource,
+                  identity: { ...identity, weakKeys: [...identity.weakKeys] },
+                },
+              } satisfies ServerOutboundType);
+            } catch (error) {
+              if (!catalogCommitted && cloned && targetWorkspace) {
+                await rm(targetWorkspace, { recursive: true, force: true }).catch(() => undefined);
+                if (!created) {
+                  await mkdir(targetWorkspace, { recursive: true }).catch(() => undefined);
+                }
+              }
+              if (!catalogCommitted && created) {
+                const createdProject = getWorkspaceProject(auth.userId, msg.projectId);
+                if (createdProject) {
+                  const roots = getManagedWorkspaceRelativeRoots(createdProject.storageKey);
+                  await rm(join(getServerV2Root(), roots.projectRoot), {
+                    recursive: true,
+                    force: true,
+                  }).catch(() => undefined);
+                  deleteWorkspaceProject(auth.userId, msg.projectId);
+                }
+              }
+              const failure = credentialRpcError(error);
+              send({
+                type: "workspace-import-result",
+                _reqId: msg._reqId,
+                status: "error",
+                error: `[${failure.code}] ${failure.message}`,
+              } satisfies ServerOutboundType);
+            }
+            break;
+          }
+
+          case "git-workspace-operation": {
+            if (!auth) {
+              send({
+                type: "git-operation-result",
+                _reqId: msg._reqId,
+                projectId: msg.projectId,
+                operation: msg.operation,
+                success: false,
+                error: { code: "auth_required", message: "Not authenticated." },
+              } satisfies ServerOutboundType);
+              break;
+            }
+            try {
+              const project = getWorkspaceProject(auth.userId, msg.projectId);
+              if (!project) {
+                send({
+                  type: "git-operation-result",
+                  _reqId: msg._reqId,
+                  projectId: msg.projectId,
+                  operation: msg.operation,
+                  success: false,
+                  error: { code: "repo_not_found", message: "Git workspace was not found" },
+                } satisfies ServerOutboundType);
+                break;
+              }
+              const credential = await credentialVault.read(auth.userId, msg.credentialProfileId);
+              const handle = getWorkspaceHandle({
+                sessionId: "",
+                userId: auth.userId,
+                projectId: msg.projectId,
+              });
+              const result = await runGitWorkspaceOperation({
+                workspace: handle.worktreeRoot,
+                operation: msg.operation,
+                credential,
+                commitMessage: msg.commitMessage,
+              });
+              send({
+                type: "git-operation-result",
+                _reqId: msg._reqId,
+                projectId: msg.projectId,
+                operation: msg.operation,
+                success: true,
+                ...result,
+              } satisfies ServerOutboundType);
+            } catch (error) {
+              send({
+                type: "git-operation-result",
+                _reqId: msg._reqId,
+                projectId: msg.projectId,
+                operation: msg.operation,
+                success: false,
+                error: credentialRpcError(error),
+              } satisfies ServerOutboundType);
+            }
             break;
           }
 
@@ -688,6 +1102,18 @@ export function createMessageHandler(
               send({ type: "error", error: "No session. Send init first." });
               return;
             }
+            try {
+              assertWorkspacePathNotSensitive(msg.path || ".");
+            } catch {
+              send({
+                type: "file-list",
+                path: msg.path || ".",
+                _reqId: msg._reqId,
+                success: false,
+                error: "Sensitive workspace path is not accessible",
+              });
+              break;
+            }
             const listRegistry = buildToolRegistry(
               createNodeBackend(session.workspaceHandle ?? session.workspace, session.containerId),
               session.workspace
@@ -718,6 +1144,18 @@ export function createMessageHandler(
             if (!session) {
               send({ type: "error", error: "No session. Send init first." });
               return;
+            }
+            try {
+              assertWorkspacePathNotSensitive(msg.path);
+            } catch {
+              send({
+                type: "file-content",
+                path: msg.path,
+                _reqId: msg._reqId,
+                success: false,
+                error: "Sensitive workspace path is not accessible",
+              });
+              break;
             }
             const readRegistry = buildToolRegistry(
               createNodeBackend(session.workspaceHandle ?? session.workspace, session.containerId),
@@ -789,6 +1227,17 @@ export function createMessageHandler(
             if (!session) {
               send({ type: "error", error: "No session. Send init first." });
               return;
+            }
+            try {
+              assertWorkspacePathNotSensitive(msg.path);
+            } catch {
+              send({
+                type: "sync-file-content",
+                path: msg.path,
+                error: "Sensitive workspace path is not accessible",
+                _reqId: msg._reqId,
+              } satisfies ServerOutboundType);
+              break;
             }
             try {
               await handleSyncFile(
@@ -997,8 +1446,9 @@ export function createMessageHandler(
           }
         }
       } catch (err: any) {
-        console.error("[Handler] Error:", err.message);
-        send({ type: "error", error: `Server error: ${err.message}` });
+        const message = redactSensitiveText(String(err?.message ?? "Unknown server error"));
+        console.error("[Handler] Error:", message);
+        send({ type: "error", error: `Server error: ${message}` });
       }
     },
 

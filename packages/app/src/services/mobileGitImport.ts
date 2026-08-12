@@ -31,6 +31,7 @@ function projectNameFromRemote(normalizedRemote: string): string {
 export async function importMobileGit(args: {
   url: string;
   settings: AppSettings;
+  credentialProfileId?: string;
   sourceDeviceId: string;
   projects: readonly Project[];
   allowWeakDuplicate?: boolean;
@@ -42,7 +43,7 @@ export async function importMobileGit(args: {
     allowWeakDuplicate: args.allowWeakDuplicate,
     adapter: {
       async probe(url): Promise<MobileGitProbe> {
-        const remote = await probeGitRemote(url, args.settings);
+        const remote = await probeGitRemote(url, args.settings, args.credentialProfileId);
         const normalizedRemote = normalizeGitRemote(remote.url);
         return {
           importMode: "git",
@@ -65,7 +66,8 @@ export async function importMobileGit(args: {
           const stagedSnapshot = await cloneGitIntoWorkspaceRoot(
             probe.gitUrl,
             args.settings,
-            staging.uri
+            staging.uri,
+            args.credentialProfileId
           );
           return { directory: staging, stagedSnapshot };
         } catch (error) {
@@ -84,6 +86,7 @@ export async function importMobileGit(args: {
           verifiedSnapshot,
           writeBackPolicy: "git",
           gitUrl: probe.gitUrl,
+          gitCredentialProfileId: args.credentialProfileId,
           commitProject: args.commitProject,
         });
       },

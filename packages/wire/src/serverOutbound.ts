@@ -10,6 +10,7 @@ import {
   WorkspaceProjectCatalogEntry,
   WorkspaceSessionScope,
 } from "./workspace.js";
+import { GitWorkspaceOperation } from "./messages.js";
 
 export const AuthMsg = z.object({
   type: z.literal("auth"),
@@ -156,6 +157,58 @@ export const WorkspaceLegacyCleanedMsg = z.object({
   error: z.string().optional(),
 });
 
+export const GitRpcErrorCode = z.enum([
+  "auth_required",
+  "credential_not_found",
+  "permission_denied",
+  "token_expired",
+  "host_mismatch",
+  "tls_error",
+  "repo_not_found",
+  "network_error",
+  "dirty_worktree",
+  "conflict",
+  "non_fast_forward",
+  "unsupported",
+  "invalid_request",
+  "encryption_required",
+  "encryption_key_mismatch",
+  "decryption_failed",
+  "internal_error",
+]);
+
+export const GitRpcError = z.object({
+  code: GitRpcErrorCode,
+  message: z.string().min(1).max(4096),
+  retryable: z.boolean().optional(),
+});
+
+export const GitCredentialResultMsg = z.object({
+  type: z.literal("git-credential-result"),
+  _reqId: z.string().min(1).max(128),
+  credentialProfileId: z.string().min(1).max(128),
+  operation: z.enum(["upsert", "test", "delete"]),
+  success: z.boolean(),
+  capabilities: z
+    .object({
+      read: z.boolean(),
+      write: z.boolean(),
+    })
+    .optional(),
+  error: GitRpcError.optional(),
+});
+
+export const GitOperationResultMsg = z.object({
+  type: z.literal("git-operation-result"),
+  _reqId: z.string().min(1).max(128),
+  projectId: z.string().uuid(),
+  operation: GitWorkspaceOperation,
+  success: z.boolean(),
+  head: z.string().min(1).max(128).optional(),
+  summary: z.string().max(4096).optional(),
+  error: GitRpcError.optional(),
+});
+
 export const ServerErrorMsg = z.object({
   type: z.literal("error"),
   error: z.string(),
@@ -179,7 +232,13 @@ export const ServerOutbound = z.union([
   WorkspaceImportResultMsg,
   WorkspaceSourceStatusMsg,
   WorkspaceLegacyCleanedMsg,
+  GitCredentialResultMsg,
+  GitOperationResultMsg,
   ServerErrorMsg,
   ResyncRequiredMsg,
 ]);
 export type ServerOutboundType = z.infer<typeof ServerOutbound>;
+export type GitRpcErrorCodeType = z.infer<typeof GitRpcErrorCode>;
+export type GitRpcErrorType = z.infer<typeof GitRpcError>;
+export type GitCredentialResultMsgType = z.infer<typeof GitCredentialResultMsg>;
+export type GitOperationResultMsgType = z.infer<typeof GitOperationResultMsg>;

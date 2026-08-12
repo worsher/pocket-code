@@ -12,6 +12,8 @@ interface DaemonConnection {
   machineId: string;
   machineName: string;
   lastHeartbeat: number;
+  publicKey?: string;
+  keyId?: string;
 }
 
 interface PendingPairRequest {
@@ -32,7 +34,9 @@ const pendingPairs = new Map<string, PendingPairRequest[]>();
 export function registerDaemon(
   socket: WebSocket,
   machineId: string,
-  machineName: string
+  machineName: string,
+  publicKey?: string,
+  keyId?: string
 ): void {
   // If a daemon with the same machineId is already connected, close the old one
   const existing = daemons.get(machineId);
@@ -50,6 +54,8 @@ export function registerDaemon(
     machineId,
     machineName,
     lastHeartbeat: Date.now(),
+    publicKey,
+    keyId,
   });
 
   console.log(
@@ -80,12 +86,16 @@ export function getOnlineMachines(): Array<{
   machineName: string;
   online: boolean;
   lastSeen: number;
+  publicKey?: string;
+  keyId?: string;
 }> {
   return Array.from(daemons.values()).map((d) => ({
     machineId: d.machineId,
     machineName: d.machineName,
     online: d.socket.readyState === WebSocket.OPEN,
     lastSeen: d.lastHeartbeat,
+    ...(d.publicKey ? { publicKey: d.publicKey } : {}),
+    ...(d.keyId ? { keyId: d.keyId } : {}),
   }));
 }
 

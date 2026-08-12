@@ -42,7 +42,7 @@ describe("Relay Routing & Discovery", () => {
     const ws1 = new MockWebSocket() as unknown as WebSocket;
     const ws2 = new MockWebSocket() as unknown as WebSocket;
 
-    registerDaemon(ws1, "m_1", "MacBook");
+    registerDaemon(ws1, "m_1", "MacBook", "daemon-public-key", "daemon-key-1");
     registerDaemon(ws2, "m_2", "iMac");
 
     const machines = getOnlineMachines();
@@ -52,6 +52,7 @@ describe("Relay Routing & Discovery", () => {
     expect(m1).toBeDefined();
     expect(m1?.machineName).toBe("MacBook");
     expect(m1?.online).toBe(true);
+    expect(m1).toMatchObject({ publicKey: "daemon-public-key", keyId: "daemon-key-1" });
 
     expect(m2).toBeDefined();
 
@@ -107,7 +108,13 @@ describe("Relay Routing & Discovery", () => {
     expect(mDaemonWs.sent[0].pairingCode).toBe("123456");
 
     // 2. Daemon sends PairResponse
-    const responsePayload = { type: "pair-response", success: true, token: "xxx" };
+    const responsePayload = {
+      type: "pair-response",
+      success: true,
+      token: "xxx",
+      publicKey: "daemon-public-key",
+      keyId: "daemon-key-1",
+    };
     const resForwarded = forwardPairResponse("m_pair", responsePayload);
 
     expect(resForwarded).toBe(true);

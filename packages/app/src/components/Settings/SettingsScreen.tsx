@@ -7,25 +7,39 @@ import {
     ScrollView,
     StyleSheet,
     Alert,
-    Image,
     Platform,
 } from "react-native";
-import type { AppSettings } from "../../store/settings";
-import { GIT_PLATFORMS, type GitCredential } from "../../store/settings";
+import { randomUUID } from "expo-crypto";
+import type { AppSettings, GitCredentialProfile } from "../../store/settings";
 import { clearAllHistory } from "../../store/chatHistory";
-import { startGitHubOAuth } from "../../services/oauth";
 import { RelayClient } from "@pocket-code/client-core";
+import {
+    normalizeGitCredentialProfile,
+    secretRefForGitCredentialProfile,
+} from "../../services/gitCredentialProfiles";
+import { persistGitCredentialProfileChanges } from "../../services/gitCredentialVault";
 
 interface Props {
     settings: AppSettings;
     onSave: (settings: AppSettings) => Promise<void> | void;
     onClose: () => void;
+    onRemoteGitCredentialChanges?: (args: {
+        upsertProfiles: GitCredentialProfile[];
+        deletedProfileIds: string[];
+    }) => Promise<void>;
 }
 
-export default function SettingsScreen({ settings, onSave, onClose }: Props) {
+export default function SettingsScreen({
+    settings,
+    onSave,
+    onClose,
+    onRemoteGitCredentialChanges,
+}: Props) {
     const [draft, setDraft] = useState<AppSettings>({ ...settings });
     const [pairingCode, setPairingCode] = useState("");
     const [isPairing, setIsPairing] = useState(false);
+    const [gitSecretDrafts, setGitSecretDrafts] = useState<Record<string, string>>({});
+    const [clearedGitProfileIds, setClearedGitProfileIds] = useState<string[]>([]);
 
     const updateDraft = (partial: Partial<AppSettings>) => {
         setDraft((prev) => ({ ...prev, ...partial }));
@@ -43,19 +57,94 @@ export default function SettingsScreen({ settings, onSave, onClose }: Props) {
         }));
     };
 
-    const updateGitToken = (platform: GitCredential["platform"], host: string, token: string) => {
+    const updateGitProfile = (id: string, partial: Partial<GitCredentialProfile>) => {
         setDraft((prev) => {
-            const existing = prev.gitCredentials.filter((c) => c.platform !== platform);
-            if (token) {
-                existing.push({ platform, host, username: "oauth2", token });
-            }
-            return { ...prev, gitCredentials: existing };
+            const gitCredentialProfiles = prev.gitCredentialProfiles.map((profile) =>
+                profile.id === id ? { ...profile, ...partial } : profile
+            );
+            return { ...prev, gitCredentialProfiles };
         });
+    };
+
+    const updateGitSecretDraft = (id: string, value: string) => {
+        setGitSecretDrafts((previous) => ({ ...previous, [id]: value }));
+        if (value.trim()) {
+            setClearedGitProfileIds((previous) => previous.filter((profileId) => profileId !== id));
+        }
+    };
+
+    const clearGitCredential = (id: string) => {
+        setGitSecretDrafts((previous) => ({ ...previous, [id]: "" }));
+        setClearedGitProfileIds((previous) =>
+            previous.includes(id) ? previous : [...previous, id]
+        );
+        updateGitProfile(id, { hasSecret: false });
+    };
+
+    const addCustomGitLabProfile = () => {
+        const id = `gitlab-custom-${randomUUID()}`;
+        const profile: GitCredentialProfile = {
+            id,
+            label: "Custom GitLab",
+            provider: "gitlab",
+            authKind: "pat",
+            origin: "https://gitlab.example.com",
+            username: "oauth2",
+            secretRef: secretRefForGitCredentialProfile(id),
+            hasSecret: false,
+        };
+        setDraft((previous) => ({
+            ...previous,
+            gitCredentialProfiles: [...previous.gitCredentialProfiles, profile],
+        }));
+    };
+
+    const removeCustomGitLabProfile = (id: string) => {
+        setDraft((previous) => ({
+            ...previous,
+            gitCredentialProfiles: previous.gitCredentialProfiles.filter(
+                (profile) => profile.id !== id
+            ),
+        }));
+        setGitSecretDrafts((previous) => {
+            const next = { ...previous };
+            delete next[id];
+            return next;
+        });
+        setClearedGitProfileIds((previous) =>
+            previous.includes(id) ? previous : [...previous, id]
+        );
     };
 
     const handleSave = async () => {
         try {
-            await onSave(draft);
+            const normalizedProfiles = draft.gitCredentialProfiles.map(normalizeGitCredentialProfile);
+            const persistedProfiles = await persistGitCredentialProfileChanges({
+                profiles: normalizedProfiles,
+                secretDrafts: gitSecretDrafts,
+                clearedProfileIds: clearedGitProfileIds,
+                persistMetadata: async (gitCredentialProfiles) => {
+                    await onSave({ ...draft, gitCredentialProfiles });
+                },
+            });
+            if (onRemoteGitCredentialChanges) {
+                const upsertIds = new Set(
+                    Object.entries(gitSecretDrafts)
+                        .filter(([, secret]) => !!secret.trim())
+                        .map(([id]) => id)
+                );
+                try {
+                    await onRemoteGitCredentialChanges({
+                        upsertProfiles: persistedProfiles.filter((profile) => upsertIds.has(profile.id)),
+                        deletedProfileIds: clearedGitProfileIds.filter((id) => !upsertIds.has(id)),
+                    });
+                } catch (error) {
+                    Alert.alert(
+                        "Key 已保存，远端同步失败",
+                        error instanceof Error ? error.message : "请连接远端后重试"
+                    );
+                }
+            }
             onClose();
         } catch (error) {
             Alert.alert(
@@ -63,44 +152,6 @@ export default function SettingsScreen({ settings, onSave, onClose }: Props) {
                 error instanceof Error ? error.message : "写者切换失败，请稍后重试"
             );
         }
-    };
-
-    const [oauthLoading, setOauthLoading] = useState(false);
-
-    const handleGitHubLogin = async () => {
-        const serverUrl = draft.cloudServerUrl;
-        if (!serverUrl) {
-            Alert.alert("请先设置 Server 地址");
-            return;
-        }
-        setOauthLoading(true);
-        try {
-            const result = await startGitHubOAuth(serverUrl);
-            if (result) {
-                setDraft((prev) => ({
-                    ...prev,
-                    authToken: result.token,
-                    userId: result.userId,
-                    githubLogin: result.githubLogin,
-                    avatarUrl: result.avatarUrl,
-                }));
-                Alert.alert("登录成功", `已登录为 ${result.githubLogin}`);
-            }
-        } catch (err: any) {
-            Alert.alert("登录失败", err.message);
-        } finally {
-            setOauthLoading(false);
-        }
-    };
-
-    const handleGitHubLogout = () => {
-        setDraft((prev) => ({
-            ...prev,
-            authToken: undefined,
-            userId: undefined,
-            githubLogin: undefined,
-            avatarUrl: undefined,
-        }));
     };
 
     const handleClearHistory = () => {
@@ -134,43 +185,52 @@ export default function SettingsScreen({ settings, onSave, onClose }: Props) {
 
         setIsPairing(true);
         
+        let client: RelayClient | undefined;
         try {
             // Use a temporary client just for the pairing flow
-            const client = new RelayClient({
+            const pairingClient = new RelayClient({
                 relayUrl: draft.relayServerUrl,
                 machineId: "", // Target unspecified initially
                 deviceId: draft.deviceId || "unknown",
                 deviceName: "Pocket Code App",
             });
+            client = pairingClient;
 
             // Wait for connection
             await new Promise<void>((resolve, reject) => {
                 const timeout = setTimeout(() => reject(new Error("连接中继服务器超时")), 5000);
-                client.onopen = () => {
+                pairingClient.onopen = () => {
                     clearTimeout(timeout);
                     resolve();
                 };
-                client.onerror = () => {
+                pairingClient.onerror = () => {
                     clearTimeout(timeout);
                     reject(new Error("连接中继服务器失败"));
                 };
-                client.connect();
+                pairingClient.connect();
             });
 
             // Send Pair Request
-            const response = await client.pairDevice(pairingCode);
+            const response = await pairingClient.pairDevice(pairingCode);
             
             if (response.success && response.token && response.machineId) {
+                if (!response.publicKey || !response.keyId) {
+                    throw new Error("Daemon 版本不支持 Git Key 端到端加密，请更新 Daemon 后重新配对");
+                }
                 // Success! 立即持久化(不只是 draft),并让运行中的连接刷新:
                 // onSave 会更新上层 settings,App 监听 relay 身份变化后用新 machineId 重连。
                 const merged: AppSettings = {
                     ...draft,
                     relayToken: response.token,
                     relayMachineId: response.machineId,
+                    relayCredentialPublicKey: response.publicKey,
+                    relayCredentialKeyId: response.keyId,
                 };
                 updateDraft({
                     relayToken: response.token,
                     relayMachineId: response.machineId,
+                    relayCredentialPublicKey: response.publicKey,
+                    relayCredentialKeyId: response.keyId,
                 });
                 await onSave(merged);
                 Alert.alert("配对成功", `已连接到机器: ${response.machineName || response.machineId}`);
@@ -179,11 +239,10 @@ export default function SettingsScreen({ settings, onSave, onClose }: Props) {
                 Alert.alert("配对失败", response.error || "未知错误");
             }
             
-            client.close();
-            
         } catch (err: any) {
             Alert.alert("配对失败", err.message);
         } finally {
+            client?.close();
             setIsPairing(false);
         }
     };
@@ -332,7 +391,12 @@ export default function SettingsScreen({ settings, onSave, onClose }: Props) {
                                             <Text style={styles.machineIdText}>{draft.relayMachineId}</Text>
                                             <TouchableOpacity 
                                                 style={styles.unpairBtn}
-                                                onPress={() => updateDraft({ relayToken: undefined, relayMachineId: undefined })}
+                                                onPress={() => updateDraft({
+                                                    relayToken: undefined,
+                                                    relayMachineId: undefined,
+                                                    relayCredentialPublicKey: undefined,
+                                                    relayCredentialKeyId: undefined,
+                                                })}
                                             >
                                                 <Text style={styles.unpairBtnText}>解除配对</Text>
                                             </TouchableOpacity>
@@ -475,79 +539,119 @@ export default function SettingsScreen({ settings, onSave, onClose }: Props) {
 
                 {/* ── Git 认证 ─────────────────────────────── */}
                 <Text style={styles.sectionTitle}>Git 认证</Text>
-                <View style={styles.card}>
-                    {GIT_PLATFORMS.map((p, idx) => {
-                        const cred = draft.gitCredentials.find(
-                            (c) => c.platform === p.platform
-                        );
-                        return (
-                            <View key={p.platform}>
-                                {idx > 0 && <View style={styles.separator} />}
-                                <Text style={styles.inputLabel}>
-                                    {p.label}{" "}
-                                    <Text style={styles.inputLabelDim}>({p.host})</Text>
+                {draft.gitCredentialProfiles.map((profile) => {
+                    const isCustomGitLab = profile.provider === "gitlab" &&
+                        profile.id !== "gitlab-com-pat";
+                    const hasPendingSecret = !!gitSecretDrafts[profile.id]?.trim();
+                    return (
+                        <View style={styles.card} key={profile.id}>
+                            <View style={styles.gitProfileHeader}>
+                                <Text style={styles.gitProfileTitle}>{profile.label}</Text>
+                                <Text style={profile.hasSecret || hasPendingSecret
+                                    ? styles.gitProfileReady
+                                    : styles.gitProfileMissing}>
+                                    {profile.hasSecret || hasPendingSecret ? "Key 已配置" : "未配置"}
                                 </Text>
-                                <TextInput
-                                    style={styles.input}
-                                    value={cred?.token || ""}
-                                    onChangeText={(v) =>
-                                        updateGitToken(p.platform, p.host, v)
-                                    }
-                                    placeholder={`${p.label} Personal Access Token`}
-                                    placeholderTextColor="#636366"
-                                    secureTextEntry
-                                    autoCapitalize="none"
-                                    autoCorrect={false}
-                                />
                             </View>
-                        );
-                    })}
-                    <Text style={styles.inputHint}>
-                        PAT 用于 git clone/push 操作的认证，会同步到连接的 Server
-                    </Text>
-                </View>
-
-                {/* ── GitHub Account ──────────────────────── */}
-                <Text style={styles.sectionTitle}>GitHub 账号</Text>
-                <View style={styles.card}>
-                    {draft.githubLogin ? (
-                        <View style={styles.githubRow}>
-                            {draft.avatarUrl ? (
-                                <Image
-                                    source={{ uri: draft.avatarUrl }}
-                                    style={styles.githubAvatar}
-                                />
+                            {isCustomGitLab ? (
+                                <>
+                                    <Text style={styles.inputLabel}>配置名称</Text>
+                                    <TextInput
+                                        style={styles.input}
+                                        value={profile.label}
+                                        onChangeText={(label) => updateGitProfile(profile.id, { label })}
+                                        placeholder="Company GitLab"
+                                        placeholderTextColor="#636366"
+                                    />
+                                    <Text style={styles.inputLabel}>HTTPS Origin</Text>
+                                    <TextInput
+                                        style={styles.input}
+                                        value={profile.origin}
+                                        onChangeText={(origin) => updateGitProfile(profile.id, { origin })}
+                                        placeholder="https://gitlab.company.com:8443"
+                                        placeholderTextColor="#636366"
+                                        autoCapitalize="none"
+                                        autoCorrect={false}
+                                    />
+                                    <Text style={styles.inputLabel}>路径前缀（可选）</Text>
+                                    <TextInput
+                                        style={styles.input}
+                                        value={profile.pathPrefix || ""}
+                                        onChangeText={(pathPrefix) =>
+                                            updateGitProfile(profile.id, { pathPrefix })
+                                        }
+                                        placeholder="/gitlab 或 /team-a"
+                                        placeholderTextColor="#636366"
+                                        autoCapitalize="none"
+                                        autoCorrect={false}
+                                    />
+                                </>
                             ) : (
-                                <View style={[styles.githubAvatar, styles.githubAvatarPlaceholder]}>
-                                    <Text style={styles.githubAvatarText}>
-                                        {draft.githubLogin.charAt(0).toUpperCase()}
-                                    </Text>
-                                </View>
+                                <Text style={styles.gitProfileOrigin}>{profile.origin}</Text>
                             )}
-                            <View style={styles.githubInfo}>
-                                <Text style={styles.githubName}>{draft.githubLogin}</Text>
-                                <Text style={styles.githubHint}>已通过 GitHub 登录</Text>
+                            <Text style={styles.inputLabel}>用户名</Text>
+                            <TextInput
+                                style={styles.input}
+                                value={profile.username || ""}
+                                onChangeText={(username) =>
+                                    updateGitProfile(profile.id, { username })
+                                }
+                                placeholder={profile.provider === "gitee" ? "Gitee 用户名" : "oauth2"}
+                                placeholderTextColor="#636366"
+                                autoCapitalize="none"
+                                autoCorrect={false}
+                            />
+                            {profile.provider === "gitee" && (
+                                <Text style={styles.inputHint}>
+                                    Gitee 环境可能要求真实用户名，请在测试仓库前填写。
+                                </Text>
+                            )}
+                            <Text style={styles.inputLabel}>API Key / Personal Access Token</Text>
+                            <TextInput
+                                style={styles.input}
+                                value={gitSecretDrafts[profile.id] || ""}
+                                onChangeText={(value) => updateGitSecretDraft(profile.id, value)}
+                                placeholder={profile.hasSecret
+                                    ? "已安全保存；留空不会修改"
+                                    : "输入 API Key / PAT"}
+                                placeholderTextColor="#636366"
+                                secureTextEntry
+                                autoCapitalize="none"
+                                autoCorrect={false}
+                            />
+                            <View style={styles.gitProfileActions}>
+                                {(profile.hasSecret || hasPendingSecret) && (
+                                    <TouchableOpacity
+                                        style={styles.gitClearBtn}
+                                        onPress={() => clearGitCredential(profile.id)}
+                                    >
+                                        <Text style={styles.gitClearText}>清除 Key</Text>
+                                    </TouchableOpacity>
+                                )}
+                                {isCustomGitLab && (
+                                    <TouchableOpacity
+                                        style={styles.gitRemoveBtn}
+                                        onPress={() => removeCustomGitLabProfile(profile.id)}
+                                    >
+                                        <Text style={styles.gitRemoveText}>删除配置</Text>
+                                    </TouchableOpacity>
+                                )}
                             </View>
-                            <TouchableOpacity
-                                style={styles.githubLogoutBtn}
-                                onPress={handleGitHubLogout}
-                            >
-                                <Text style={styles.githubLogoutText}>退出</Text>
-                            </TouchableOpacity>
                         </View>
-                    ) : (
-                        <TouchableOpacity
-                            style={styles.githubLoginBtn}
-                            onPress={handleGitHubLogin}
-                            disabled={oauthLoading}
-                        >
-                            <Text style={styles.githubLoginText}>
-                                {oauthLoading ? "登录中..." : "使用 GitHub 登录"}
-                            </Text>
-                        </TouchableOpacity>
-                    )}
+                    );
+                })}
+                <View style={styles.card}>
+                    <TouchableOpacity
+                        style={styles.githubLoginBtn}
+                        onPress={addCustomGitLabProfile}
+                    >
+                        <Text style={styles.githubLoginText}>＋ 添加自定义 GitLab</Text>
+                    </TouchableOpacity>
                     <Text style={styles.inputHint}>
-                        登录后可自动获取 Git 认证和高级配额
+                        Key 仅保存在系统 Keychain/Keystore，不会回填到输入框或写入项目设置。
+                    </Text>
+                    <Text style={styles.inputHint}>
+                        权限以目标仓库实际 Clone/Pull/Push 测试结果为准。
                     </Text>
                 </View>
 
@@ -754,6 +858,58 @@ const styles = StyleSheet.create({
         color: "#FF453A",
         fontSize: 13,
         fontWeight: "500",
+    },
+    gitProfileHeader: {
+        flexDirection: "row",
+        alignItems: "center",
+        justifyContent: "space-between",
+        marginBottom: 8,
+    },
+    gitProfileTitle: {
+        color: "#FFFFFF",
+        fontSize: 16,
+        fontWeight: "600",
+        flex: 1,
+    },
+    gitProfileReady: {
+        color: "#30D158",
+        fontSize: 12,
+        marginLeft: 8,
+    },
+    gitProfileMissing: {
+        color: "#8E8E93",
+        fontSize: 12,
+        marginLeft: 8,
+    },
+    gitProfileOrigin: {
+        color: "#8E8E93",
+        fontSize: 12,
+        marginBottom: 12,
+    },
+    gitProfileActions: {
+        flexDirection: "row",
+        justifyContent: "flex-end",
+        gap: 8,
+    },
+    gitClearBtn: {
+        paddingHorizontal: 12,
+        paddingVertical: 7,
+        borderRadius: 7,
+        backgroundColor: "#2C2C2E",
+    },
+    gitClearText: {
+        color: "#FF9F0A",
+        fontSize: 13,
+    },
+    gitRemoveBtn: {
+        paddingHorizontal: 12,
+        paddingVertical: 7,
+        borderRadius: 7,
+        backgroundColor: "#2C2C2E",
+    },
+    gitRemoveText: {
+        color: "#FF453A",
+        fontSize: 13,
     },
     // ── GitHub ──
     githubRow: {

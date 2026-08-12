@@ -1,4 +1,7 @@
 // Define local events so useAgent can listen to them
+import type { MachineInfoType } from "@pocket-code/wire";
+import type { DaemonEncryptionKey } from "./credentialCrypto";
+
 export type RelayEvent =
   | { type: "open" }
   | { type: "close"; code: number; reason: string }
@@ -14,6 +17,19 @@ export interface RelayClientOptions {
   token?: string;
   /** 配对成功后由宿主持久化 token(RN: updateSettings 包装;Web: localStorage) */
   onTokenPersist?: (token: string, machineId: string) => void;
+  /** TOFU pin loaded from secure settings; key changes require explicit re-pairing. */
+  pinnedEncryptionKey?: DaemonEncryptionKey;
+  onEncryptionKeyPersist?: (key: DaemonEncryptionKey, machineId: string) => void;
+}
+
+export interface PairDeviceResult {
+  success: boolean;
+  token?: string;
+  error?: string;
+  machineId?: string;
+  machineName?: string;
+  publicKey?: string;
+  keyId?: string;
 }
 
 /**
@@ -65,8 +81,13 @@ export class RelayClient {
           case "pair-response": {
             const req = this.pendingRequests.get("pairing");
             if (req) {
-              req.resolve(raw);
               this.pendingRequests.delete("pairing");
+              try {
+                this.pinPairingKey(raw as PairDeviceResult);
+                req.resolve(raw);
+              } catch (error) {
+                req.reject(error);
+              }
             }
             break;
           }
@@ -160,7 +181,7 @@ export class RelayClient {
   // ── Specific Protocol Commands ──────────────────────────────────────────
 
   /** Fetch online machines from relay */
-  public getOnlineMachines(): Promise<Array<any>> {
+  public getOnlineMachines(): Promise<MachineInfoType[]> {
     return new Promise((resolve, reject) => {
       if (!this.ws || this.ws.readyState !== WebSocket.OPEN) {
         return reject(new Error("Socket not open"));
@@ -181,7 +202,7 @@ export class RelayClient {
   }
 
   /** Initiate pairing flow */
-  public pairDevice(pairingCode: string, targetMachineId?: string): Promise<{ success: boolean; token?: string; error?: string; machineId?: string; machineName?: string }> {
+  public pairDevice(pairingCode: string, targetMachineId?: string): Promise<PairDeviceResult> {
     return new Promise((resolve, reject) => {
       if (!this.ws || this.ws.readyState !== WebSocket.OPEN) {
         return reject(new Error("Socket not open"));
@@ -212,6 +233,27 @@ export class RelayClient {
     this.opts.token = token;
     this.opts.machineId = machineId;
     this.opts.onTokenPersist?.(token, machineId);
+  }
+
+  private pinPairingKey(response: PairDeviceResult): void {
+    if (!response.success) return;
+    const hasPublicKey = typeof response.publicKey === "string" && response.publicKey.length > 0;
+    const hasKeyId = typeof response.keyId === "string" && response.keyId.length > 0;
+    if (hasPublicKey !== hasKeyId) throw new Error("Daemon returned incomplete encryption key metadata");
+
+    const pinned = this.opts.pinnedEncryptionKey;
+    if (pinned) {
+      if (!hasPublicKey || pinned.keyId !== response.keyId || pinned.publicKey !== response.publicKey) {
+        throw new Error("Daemon encryption key changed; remove the pinned device and pair again");
+      }
+      return;
+    }
+    if (hasPublicKey && hasKeyId && response.machineId) {
+      this.opts.onEncryptionKeyPersist?.(
+        { publicKey: response.publicKey!, keyId: response.keyId! },
+        response.machineId
+      );
+    }
   }
 }
 

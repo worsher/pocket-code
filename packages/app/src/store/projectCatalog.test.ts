@@ -37,6 +37,16 @@ describe("mobile project catalog v2", () => {
     expect(project.localReplica.storageKey).not.toContain(project.id);
   });
 
+  it("persists only the Git credential profile ID with a project", () => {
+    const created = {
+      ...createProject("Private repo", factories(), "", "https://github.com/acme/private.git", 100),
+      gitCredentialProfileId: "github-pat",
+    };
+    const upgraded = upgradeProjectCatalog([created], factories(), 200);
+    expect(upgraded.projects[0].gitCredentialProfileId).toBe("github-pat");
+    expect(JSON.stringify(upgraded.projects[0])).not.toContain("token");
+  });
+
   it("adopts a remote-created project with a new independent mobile replica", () => {
     const project = createProjectFromRemote(
       "10ed836e-ae48-4d67-9e26-a74cbf55a52e",

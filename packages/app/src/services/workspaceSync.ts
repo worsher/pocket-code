@@ -9,6 +9,7 @@
 import { RelayClient } from "@pocket-code/client-core";
 import { writeLocalFile, type MobileWorkspaceTarget } from "./localFileSystem";
 import { updateSettings, type AppSettings } from "../store/settings";
+import { isSensitiveGitContentPath } from "./gitSensitivePath";
 
 export interface SyncResult {
   success: boolean;
@@ -211,7 +212,6 @@ function sendInit(
       projectId,
       model: settings.defaultModel || "deepseek-v4-flash",
       ...(authToken ? { token: authToken } : {}),
-      gitCredentials: settings.gitCredentials?.filter((c) => c.token) || [],
     })
   );
 }
@@ -247,7 +247,6 @@ function initSession(
           type: "init",
           projectId,
           model: settings.defaultModel || "deepseek-v4-flash",
-          gitCredentials: settings.gitCredentials?.filter((c) => c.token) || [],
         })
       );
     } else {
@@ -314,6 +313,7 @@ async function listAllFiles(
       const items: FileItem[] = res?.items || [];
       for (const item of items) {
         const fullPath = dirPath === "." ? item.name : `${dirPath}/${item.name}`;
+        if (isSensitiveGitContentPath(fullPath)) continue;
 
         // Skip common large/unnecessary directories
         if (

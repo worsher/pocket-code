@@ -742,6 +742,51 @@ describe("mobile replica sync transaction", () => {
     return { snapshot: scanned.snapshot, file };
   }
 
+  it("never includes credential files in a mobile snapshot", async () => {
+    const root = new Directory("file:///credential-scan");
+    root.create({ intermediates: true });
+    new File(root, "safe.txt").write("safe");
+    new File(root, ".git-credentials").write("https://token@example.com");
+    new File(root, ".gitconfig").write("[credential]");
+    new File(root, ".netrc").write("machine example.com password token");
+    const ssh = new Directory(root, ".ssh");
+    ssh.create();
+    new File(ssh, "id_ed25519").write("private-key");
+    const internal = new Directory(root, ".pocket-code-credentials");
+    internal.create();
+    new File(internal, "token").write("secret");
+
+    const scanned = await scanMobileSyncDirectory(root);
+
+    expect(scanned.files.map((file) => file.path)).toEqual(["safe.txt"]);
+  });
+
+  it("rejects a remote manifest that names a blocked credential path", async () => {
+    new Directory(worktreeRoot).create({ intermediates: true });
+    await expect(
+      pullMobileReplicaTransaction({
+        workspaceHandle: handle as any,
+        remoteReplica,
+        requestSyncPull: async () => ({
+          commit: "a".repeat(40),
+          snapshot: "b".repeat(64),
+          parent: null,
+          full: true,
+          files: [
+            {
+              path: ".netrc",
+              status: "A",
+              size: 1,
+              digest: "c".repeat(32),
+            },
+          ],
+        }),
+        requestSyncFile: async () => ({ path: ".netrc", content: btoa("secret") }),
+        persistEdge: async () => undefined,
+      })
+    ).rejects.toThrow("blocked credential path");
+  });
+
   it("verifies staging before atomically advancing the replica edge", async () => {
     new Directory(worktreeRoot).create({ intermediates: true });
     const remote = await remoteFileSnapshot("new");

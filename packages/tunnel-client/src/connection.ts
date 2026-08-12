@@ -11,6 +11,8 @@ export interface ConnectionOptions {
   relayUrl: string;
   machineId: string;
   machineName: string;
+  publicKey?: string;
+  keyId?: string;
   /** 与 relay 共享的注册密钥(必填,启动时已校验) */
   relaySecret: string;
   onMessage: (msg: DaemonInboundType) => void;
@@ -83,6 +85,8 @@ export class RelayConnection {
         type: "daemon-register",
         machineId: this.opts.machineId,
         machineName: this.opts.machineName,
+        publicKey: this.opts.publicKey,
+        keyId: this.opts.keyId,
         authToken: hmac,
         timestamp,
       });

@@ -7,6 +7,7 @@ import {
   updateWorkspaceProjectDisplayName,
   releaseWorkspaceProjectWriter,
   isWorkspaceSessionGenerationCurrent,
+  commitGitWorkspaceImport,
   initDb,
 } from "./db.js";
 
@@ -107,5 +108,31 @@ describe("workspace project catalog", () => {
         expectedGeneration: record.generation,
       })
     ).toThrow("generation is stale");
+  });
+
+  it("commits Git import metadata once and preserves its source identity", () => {
+    const userId = `catalog-git-user-${Date.now()}`;
+    const projectId = "8ec534af-ef2a-4e57-9212-d4db31e638df";
+    ensureWorkspaceProject(userId, projectId);
+    const source = {
+      mode: "git" as const,
+      sourceKind: "git" as const,
+      sourceDeviceId: "authority-id",
+      canonicalLocator: "https://git.example.com/team/project.git",
+      identity: {
+        importMode: "git" as const,
+        sourceKind: "git" as const,
+        weakKeys: ['["git","git.example.com/team/project"]'],
+      },
+      importedSnapshot: "0123456789012345678901234567890123456789",
+      importedAt: Date.now(),
+      writeBackPolicy: "git" as const,
+    };
+    expect(
+      commitGitWorkspaceImport({ userId, projectId, displayName: "Git project", importSource: source })
+    ).toMatchObject({ displayName: "Git project", importSource: source });
+    expect(() =>
+      commitGitWorkspaceImport({ userId, projectId, displayName: "Again", importSource: source })
+    ).toThrow("already bound or imported");
   });
 });

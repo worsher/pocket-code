@@ -98,4 +98,63 @@ describe("RelayClient", () => {
     client.updateToken("tok_1", "m_1");
     expect(persisted).toEqual([["tok_1", "m_1"]]);
   });
+
+  it("TOFU-pins the daemon encryption key returned by authenticated pairing", async () => {
+    vi.useFakeTimers();
+    const persisted: unknown[] = [];
+    const client = new RelayClient({
+      relayUrl: "wss://aigc.zj.cn/relay",
+      machineId: "",
+      deviceId: "d_1",
+      deviceName: "Pocket Code App",
+      onEncryptionKeyPersist: (key, machineId) => persisted.push({ key, machineId }),
+    });
+    client.connect();
+    const socket = FakeWebSocket.instances[0];
+    socket.readyState = FakeWebSocket.OPEN;
+    const pairing = client.pairDevice("ABCD2345");
+    socket.onmessage?.({
+      data: JSON.stringify({
+        type: "pair-response",
+        success: true,
+        token: "token",
+        machineId: "m_1",
+        machineName: "Mac",
+        publicKey: "public-key",
+        keyId: "key-1",
+      }),
+    });
+    await expect(pairing).resolves.toMatchObject({ keyId: "key-1" });
+    expect(persisted).toEqual([
+      { key: { publicKey: "public-key", keyId: "key-1" }, machineId: "m_1" },
+    ]);
+  });
+
+  it("rejects a pairing response that changes a pinned daemon key", async () => {
+    vi.useFakeTimers();
+    const client = new RelayClient({
+      relayUrl: "wss://aigc.zj.cn/relay",
+      machineId: "",
+      deviceId: "d_1",
+      deviceName: "Pocket Code App",
+      pinnedEncryptionKey: { publicKey: "old-public-key", keyId: "old-key" },
+    });
+    client.connect();
+    const socket = FakeWebSocket.instances[0];
+    socket.readyState = FakeWebSocket.OPEN;
+    const pairing = client.pairDevice("ABCD2345");
+    const assertion = expect(pairing).rejects.toThrow("encryption key changed");
+    socket.onmessage?.({
+      data: JSON.stringify({
+        type: "pair-response",
+        success: true,
+        token: "token",
+        machineId: "m_1",
+        machineName: "Mac",
+        publicKey: "new-public-key",
+        keyId: "new-key",
+      }),
+    });
+    await assertion;
+  });
 });

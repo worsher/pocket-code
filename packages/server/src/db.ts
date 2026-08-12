@@ -641,6 +641,50 @@ export function bindLinkedWorkspaceProject(
   return created;
 }
 
+/**
+ * Commits metadata only after a managed Git clone has been verified and moved
+ * into its final worktree.  The guarded update prevents Git import from
+ * replacing a linked or previously imported project binding.
+ */
+export function commitGitWorkspaceImport(args: {
+  userId: string;
+  projectId: string;
+  displayName: string;
+  importSource: WorkspaceImportSourceRecord;
+}): WorkspaceProjectRecord {
+  if (!args.userId) throw new Error("User ID is required for a Git workspace import");
+  const projectId = parseProjectId(args.projectId);
+  const importSource = parseWorkspaceImportSource(args.importSource);
+  if (
+    !importSource ||
+    importSource.mode !== "git" ||
+    importSource.sourceKind !== "git" ||
+    importSource.writeBackPolicy !== "git"
+  ) {
+    throw new Error("Invalid Git workspace source metadata");
+  }
+  db.run(
+    `UPDATE workspace_projects
+     SET display_name = ?, import_source_json = ?, updated_at = ?
+     WHERE user_id = ? AND project_id = ? AND worktree_path IS NULL
+       AND (import_source_json IS NULL OR import_source_json = '')`,
+    [
+      args.displayName.trim().slice(0, 256),
+      JSON.stringify(importSource),
+      Date.now(),
+      args.userId,
+      projectId,
+    ]
+  );
+  if (db.getRowsModified() !== 1) {
+    throw new Error("Git workspace import target is already bound or imported");
+  }
+  persist();
+  const committed = getWorkspaceProject(args.userId, projectId);
+  if (!committed) throw new Error("Git workspace import catalog commit failed");
+  return committed;
+}
+
 export function deleteWorkspaceProject(userId: string, projectId: string): boolean {
   db.run("DELETE FROM workspace_projects WHERE user_id = ? AND project_id = ?", [
     userId,

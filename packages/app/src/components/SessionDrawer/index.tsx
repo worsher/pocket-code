@@ -18,8 +18,10 @@ import {
 } from "../../store/chatHistory";
 import { useProject } from "../../contexts/ProjectContext";
 import ProjectDrawer from "../ProjectDrawer";
-import type { AppSettings } from "../../store/settings";
+import type { AppSettings, GitCredentialProfile } from "../../store/settings";
 import type {
+  GitCredentialResponse,
+  GitOperationResponse,
   LinkedWorkspaceImportResponse,
   WorkspaceLegacyCleanupResponse,
   WorkspaceSourceStatusResponse,
@@ -48,6 +50,24 @@ interface Props {
     projectId: string,
     legacyProjectId: string
   ) => Promise<WorkspaceLegacyCleanupResponse>;
+  onTestGitCredential: (args: {
+    profile: GitCredentialProfile;
+    repositoryUrl: string;
+    capability?: "read" | "write";
+  }) => Promise<GitCredentialResponse>;
+  onImportGitWorkspace: (args: {
+    projectId: string;
+    displayName?: string;
+    repositoryUrl: string;
+    profile: GitCredentialProfile;
+    branch?: string;
+  }) => Promise<LinkedWorkspaceImportResponse>;
+  onRunGitWorkspaceOperation: (args: {
+    projectId: string;
+    operation: "status" | "pull" | "commit" | "push";
+    profile: GitCredentialProfile;
+    commitMessage?: string;
+  }) => Promise<GitOperationResponse>;
 }
 
 export default function SessionDrawer({
@@ -62,6 +82,9 @@ export default function SessionDrawer({
   onBindLinkedWorkspace,
   onInspectLinkedSource,
   onCleanupLegacyWorkspace,
+  onTestGitCredential,
+  onImportGitWorkspace,
+  onRunGitWorkspaceOperation,
 }: Props) {
   const [sessions, setSessions] = useState<SessionInfo[]>([]);
   const slideAnim = useRef(new Animated.Value(-DRAWER_WIDTH)).current;
@@ -181,6 +204,9 @@ export default function SessionDrawer({
             onBindLinkedWorkspace={onBindLinkedWorkspace}
             onInspectLinkedSource={onInspectLinkedSource}
             onCleanupLegacyWorkspace={onCleanupLegacyWorkspace}
+            onTestGitCredential={onTestGitCredential}
+            onImportGitWorkspace={onImportGitWorkspace}
+            onRunGitWorkspaceOperation={onRunGitWorkspaceOperation}
           />
 
           {/* Divider */}

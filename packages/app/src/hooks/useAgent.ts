@@ -3,7 +3,7 @@
 // /phaseFor)。云端与 geek 共用同一 reducer,对外 API 面保持不变。
 import { useState, useRef, useCallback, useEffect } from "react";
 import { AppState } from "react-native";
-import { randomUUID } from "expo-crypto";
+import { getRandomBytes, randomUUID } from "expo-crypto";
 import {
   createWorkspaceScope,
   isSameWorkspaceScope,
@@ -14,7 +14,11 @@ import {
 import { WORKSPACE_FEATURE_FLAGS } from "../services/workspaceFeatureFlags";
 import { recordWorkspaceMetric } from "../services/workspaceTelemetry";
 import { getModelConfig, getApiKeyField, MODELS } from "../services/modelConfig";
-import { updateSettings, type AppSettings } from "../store/settings";
+import {
+  updateSettings,
+  type AppSettings,
+  type GitCredentialProfile,
+} from "../store/settings";
 import { saveChatHistory, loadChatHistory } from "../store/chatHistory";
 import { deleteLocalFile, executeLocalTool, writeLocalFile } from "../services/localFileSystem";
 import {
@@ -40,7 +44,16 @@ import type {
   StoredMessage,
   Message,
   ImageAttachment,
+  GitCredentialResponse,
+  GitOperationResponse,
+  LinkedWorkspaceImportResponse,
 } from "@pocket-code/client-core";
+import {
+  normalizeGitRemoteHttpsUrl,
+  toGitCredentialWireProfile,
+} from "../services/gitCredentialProfiles";
+import { readGitCredentialSecret } from "../services/gitCredentialVault";
+import { isSensitiveGitContentPath } from "../services/gitSensitivePath";
 import { createRnModelClient } from "../services/rnModelClient";
 import { createDeviceBackend } from "../services/deviceBackend";
 import {
@@ -79,6 +92,7 @@ interface UseAgentOptions {
   projectId?: string;
   legacyProjectId?: string;
   projectName?: string;
+  gitCredentialProfileId?: string;
   workspaceReplicaId?: string;
   workspaceGeneration?: number;
   remoteReplicas?: RemoteReplicaCatalogEntry[];
@@ -108,8 +122,37 @@ const SYNC_IGNORE_DIRS = [
   "vendor",
 ];
 const SYNC_IGNORE_EXTENSIONS = [".lock", ".log"];
-const SYNC_IGNORE_FILES = [".gitconfig", ".git-credentials"];
+const SYNC_IGNORE_FILES = [".gitconfig", ".git-credentials", ".netrc"];
 const MAX_SYNC_FILE_SIZE = 512 * 1024; // 512KB
+
+function assertGitCredentialResponse(response: GitCredentialResponse): GitCredentialResponse {
+  if (!response.success) {
+    const detail = response.error;
+    throw new Error(detail ? `${detail.message} (${detail.code})` : "Git credential operation failed");
+  }
+  return response;
+}
+
+function assertGitOperationResponse(response: GitOperationResponse): GitOperationResponse {
+  if (!response.success) {
+    const detail = response.error;
+    throw new Error(detail ? `${detail.message} (${detail.code})` : "Git operation failed");
+  }
+  return response;
+}
+
+function assertDirectGitCredentialTransport(serverUrl: string): void {
+  let parsed: URL;
+  try {
+    parsed = new URL(serverUrl);
+  } catch {
+    throw new Error("Git Key 只能发送到有效的 WSS Server 地址");
+  }
+  if (parsed.protocol === "wss:") return;
+  const loopbackHosts = new Set(["localhost", "127.0.0.1", "::1"]);
+  if (parsed.protocol === "ws:" && loopbackHosts.has(parsed.hostname)) return;
+  throw new Error("Direct 模式安装 Git Key 必须使用 wss://；不允许通过局域网明文 ws:// 发送");
+}
 
 function migrationSafeLegacyProjectId(value: string | undefined): string | undefined {
   if (!value) return undefined;
@@ -121,6 +164,7 @@ function migrationSafeLegacyProjectId(value: string | undefined): string | undef
 }
 
 function shouldSyncFile(filePath: string): boolean {
+  if (isSensitiveGitContentPath(filePath)) return false;
   const parts = filePath.split("/");
   if (parts.some((p) => SYNC_IGNORE_DIRS.includes(p))) return false;
   if (SYNC_IGNORE_EXTENSIONS.some((ext) => filePath.endsWith(ext))) return false;
@@ -167,6 +211,7 @@ export function useAgent({
   projectId,
   legacyProjectId,
   projectName,
+  gitCredentialProfileId,
   workspaceReplicaId,
   workspaceGeneration,
   remoteReplicas,
@@ -210,6 +255,8 @@ export function useAgent({
   legacyProjectIdRef.current = legacyProjectId;
   const projectNameRef = useRef(projectName);
   projectNameRef.current = projectName;
+  const gitCredentialProfileIdRef = useRef(gitCredentialProfileId);
+  gitCredentialProfileIdRef.current = gitCredentialProfileId;
   const workspaceReplicaIdRef = useRef(workspaceReplicaId);
   workspaceReplicaIdRef.current = workspaceReplicaId;
   const workspaceGenerationRef = useRef(workspaceGeneration);
@@ -228,8 +275,6 @@ export function useAgent({
   workspaceModeRef.current = settings.workspaceMode;
   const settingsRef = useRef(settings);
   settingsRef.current = settings;
-  const gitCredentialsRef = useRef(settings.gitCredentials);
-  gitCredentialsRef.current = settings.gitCredentials;
   const sessionIdRef = useRef(sessionId);
   sessionIdRef.current = sessionId;
   const messagesRef = useRef(messages);
@@ -301,16 +346,19 @@ export function useAgent({
   const coreHistoryRef = useRef<CoreMessage[]>([]);
 
   const serverUrl =
-    settings.mode === "geek"
-      ? settings.toolServerUrl
-      : settings.workspaceMode === "relay"
-        ? settings.relayServerUrl || "wss://relay.your-vps.com"
+    settings.workspaceMode === "relay"
+      ? settings.relayServerUrl || "wss://relay.your-vps.com"
+      : settings.mode === "geek"
+        ? settings.toolServerUrl
         : settings.cloudServerUrl;
   const serverUrlRef = useRef(serverUrl);
   serverUrlRef.current = serverUrl;
 
   // 需自动连接:cloud 恒真;geek+server(Termux)恒真;geek+local 否(runCommand 惰性回退)
-  const needsAutoConnect = settings.mode === "cloud" || settings.workspaceMode === "server";
+  const needsAutoConnect =
+    settings.mode === "cloud" ||
+    settings.workspaceMode === "server" ||
+    settings.workspaceMode === "relay";
 
   /** Generate or retrieve a persistent deviceId */
   const getDeviceId = useCallback((): string => {
@@ -410,6 +458,8 @@ export function useAgent({
         machineId: settingsRef.current.relayMachineId || "",
         deviceId: getDeviceId(),
         token: settingsRef.current.relayToken,
+        publicKey: settingsRef.current.relayCredentialPublicKey,
+        keyId: settingsRef.current.relayCredentialKeyId,
       }),
       getAuthToken: () => authTokenRef.current,
       getDeviceId,
@@ -420,11 +470,23 @@ export function useAgent({
         legacyProjectId: migrationSafeLegacyProjectId(legacyProjectIdRef.current),
         projectName: projectNameRef.current || undefined,
         model: modelRef.current,
-        gitCredentials: gitCredentialsRef.current?.filter((c) => c.token) || [],
       }),
       isRelayPaired: () => !!(settingsRef.current.relayToken && settingsRef.current.relayMachineId),
       onTokenPersist: (token, machineId) =>
         updateSettings({ relayToken: token, relayMachineId: machineId }),
+      onEncryptionKeyPersist: (key, machineId) => {
+        const current = settingsRef.current;
+        if (current.relayMachineId && current.relayMachineId !== machineId) return;
+        const partial = {
+          relayMachineId: machineId,
+          relayCredentialPublicKey: key.publicKey,
+          relayCredentialKeyId: key.keyId,
+        };
+        // Update the connection's source synchronously; persistence is metadata-only
+        // and intentionally does not pass through an offline message queue.
+        settingsRef.current = { ...current, ...partial };
+        void updateSettings(partial);
+      },
     };
 
     const handlers: ConnectionHandlers = {
@@ -622,7 +684,8 @@ export function useAgent({
           toolName,
           args,
           settingsRef.current,
-          localWorkspace
+          localWorkspace,
+          gitCredentialProfileIdRef.current
         );
         if (localResult !== null) return localResult;
       }
@@ -663,6 +726,94 @@ export function useAgent({
       allowWeakDuplicate?: boolean;
     }) => conn.bindLinkedWorkspace(args),
     [conn]
+  );
+
+  const upsertRemoteGitCredential = useCallback(
+    async (profile: GitCredentialProfile): Promise<GitCredentialResponse> => {
+      if (!conn.isOpen) throw new Error("远端尚未连接，无法安装 Git Key");
+      if (workspaceModeRef.current !== "relay") {
+        assertDirectGitCredentialTransport(serverUrlRef.current);
+      }
+      const secret = await readGitCredentialSecret(profile);
+      const response = await conn.upsertGitCredential({
+        profile: toGitCredentialWireProfile(profile),
+        secret,
+        // Relay mode seals inside client-core and never puts this RPC into the
+        // offline queue. Direct mode sends it only on the live WSS connection.
+        randomBytes: getRandomBytes,
+      });
+      return assertGitCredentialResponse(response);
+    },
+    [conn]
+  );
+
+  const testRemoteGitCredential = useCallback(
+    async (args: {
+      profile: GitCredentialProfile;
+      repositoryUrl: string;
+      capability?: "read" | "write";
+    }): Promise<GitCredentialResponse> => {
+      const repositoryUrl = normalizeGitRemoteHttpsUrl(args.repositoryUrl);
+      await upsertRemoteGitCredential(args.profile);
+      const response = await conn.testGitCredential({
+        credentialProfileId: args.profile.id,
+        repositoryUrl,
+        capability: args.capability,
+      });
+      return assertGitCredentialResponse(response);
+    },
+    [conn, upsertRemoteGitCredential]
+  );
+
+  const deleteRemoteGitCredential = useCallback(
+    async (credentialProfileId: string): Promise<GitCredentialResponse> => {
+      if (!conn.isOpen) throw new Error("远端尚未连接，无法删除远端 Git Key");
+      return assertGitCredentialResponse(
+        await conn.deleteGitCredential(credentialProfileId)
+      );
+    },
+    [conn]
+  );
+
+  const importRemoteGitWorkspace = useCallback(
+    async (args: {
+      projectId: string;
+      displayName?: string;
+      repositoryUrl: string;
+      profile: GitCredentialProfile;
+      branch?: string;
+    }): Promise<LinkedWorkspaceImportResponse> => {
+      const repositoryUrl = normalizeGitRemoteHttpsUrl(args.repositoryUrl);
+      await upsertRemoteGitCredential(args.profile);
+      return conn.importGitWorkspace({
+        projectId: args.projectId,
+        displayName: args.displayName,
+        repositoryUrl,
+        credentialProfileId: args.profile.id,
+        branch: args.branch,
+      });
+    },
+    [conn, upsertRemoteGitCredential]
+  );
+
+  const runRemoteGitWorkspaceOperation = useCallback(
+    async (args: {
+      projectId: string;
+      operation: "status" | "pull" | "commit" | "push";
+      profile: GitCredentialProfile;
+      commitMessage?: string;
+    }): Promise<GitOperationResponse> => {
+      await upsertRemoteGitCredential(args.profile);
+      return assertGitOperationResponse(
+        await conn.runGitWorkspaceOperation({
+          projectId: args.projectId,
+          operation: args.operation,
+          credentialProfileId: args.profile.id,
+          commitMessage: args.commitMessage,
+        })
+      );
+    },
+    [conn, upsertRemoteGitCredential]
   );
 
   const deleteProjectWorkspace = useCallback(
@@ -977,6 +1128,11 @@ export function useAgent({
     inspectWorkspaceSource,
     cleanupLegacyWorkspace,
     bindLinkedWorkspace,
+    upsertRemoteGitCredential,
+    testRemoteGitCredential,
+    deleteRemoteGitCredential,
+    importRemoteGitWorkspace,
+    runRemoteGitWorkspaceOperation,
     deleteProjectWorkspace,
   };
 }

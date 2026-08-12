@@ -9,6 +9,10 @@ import { getSession } from "./db.js";
 import { getWorkspaceHandle, getWorkspaceRoot } from "./tools.js";
 import { resolveWorkspaceEntryChecked } from "./workspacePath.js";
 import { isUuid, type WorkspaceHandle } from "@pocket-code/workspace-core";
+import {
+  assertWorkspacePathNotSensitive,
+  isSensitiveWorkspacePath,
+} from "./sensitiveWorkspacePath.js";
 
 const MAX_UPLOAD_SIZE = parseInt(process.env.MAX_UPLOAD_SIZE || "52428800", 10); // 50MB
 const MAX_SYNC_SIZE = 50 * 1024 * 1024; // 50MB total for workspace sync
@@ -83,6 +87,21 @@ export async function handleFileUpload(req: IncomingMessage, res: ServerResponse
     return;
   }
 
+  // Determine and validate the destination before accepting an arbitrary body.
+  let fileName = url.searchParams.get("fileName") || "upload";
+  const disposition = req.headers["content-disposition"];
+  if (disposition) {
+    const match = disposition.match(/filename="?([^";\n]+)"?/);
+    if (match) fileName = match[1];
+  }
+  const relativeTarget = [targetPath, fileName].filter(Boolean).join("/");
+  try {
+    assertWorkspacePathNotSensitive(relativeTarget);
+  } catch {
+    sendJson(res, 400, { error: "Sensitive workspace path is not writable" });
+    return;
+  }
+
   // Read raw body
   const chunks: Buffer[] = [];
   let totalSize = 0;
@@ -108,21 +127,13 @@ export async function handleFileUpload(req: IncomingMessage, res: ServerResponse
 
   const body = Buffer.concat(chunks);
 
-  // Determine file name from Content-Disposition or query param
-  let fileName = url.searchParams.get("fileName") || "upload";
-  const disposition = req.headers["content-disposition"];
-  if (disposition) {
-    const match = disposition.match(/filename="?([^";\n]+)"?/);
-    if (match) fileName = match[1];
-  }
-
   // Resolve workspace using project-aware path (consistent with tools.ts)
   const workspace = worktreeRoot(resolveWorkspace(sessionId, auth.userId, session.projectId));
   let fullTarget: string;
   try {
     fullTarget = await resolveWorkspaceEntryChecked(
       workspace,
-      [targetPath, fileName].filter(Boolean).join("/"),
+      relativeTarget,
       { allowMissing: true }
     );
   } catch {
@@ -172,6 +183,12 @@ export async function handleFileDownload(
 
   if (!sessionId || !filePath) {
     sendJson(res, 400, { error: "sessionId and path are required" });
+    return;
+  }
+  try {
+    assertWorkspacePathNotSensitive(filePath);
+  } catch {
+    sendJson(res, 404, { error: "File not found" });
     return;
   }
 
@@ -305,6 +322,7 @@ function collectFiles(
 
     const fullPath = join(dir, entry.name);
     const relPath = relative(baseDir, fullPath);
+    if (isSensitiveWorkspacePath(relPath)) continue;
 
     if (entry.isDirectory()) {
       collectFiles(fullPath, baseDir, files, sizeAccumulator);

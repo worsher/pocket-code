@@ -26,13 +26,18 @@ function hmac(machineId: string, ts: number, secret = SECRET) {
 }
 
 /** 注册一个 daemon,返回其 socket 与连接状态 */
-function registerDaemonVia(deps: RouterDeps, machineId: string) {
+function registerDaemonVia(
+  deps: RouterDeps,
+  machineId: string,
+  encryption?: { publicKey: string; keyId: string }
+) {
   const ws = new MockWs();
   const state = createConnState();
   const ts = Date.now();
   handleRelayInbound(asWs(ws), JSON.stringify({
     type: "daemon-register", machineId, machineName: "M-" + machineId,
     authToken: hmac(machineId, ts), timestamp: ts,
+    ...encryption,
   }), state, deps);
   return { ws, state };
 }
@@ -52,6 +57,28 @@ describe("registration (强制鉴权)", () => {
     expect(state.machineId).toBe("m_reg1");
     expect(ws.sent.at(-1)).toEqual({ type: "daemon-registered", machineId: "m_reg1" });
     expect(getOnlineMachines().some((m) => m.machineId === "m_reg1")).toBe(true);
+  });
+
+  it("publishes daemon credential-encryption metadata in machine discovery", () => {
+    const deps = makeDeps();
+    const { ws } = registerDaemonVia(deps, "m_crypto", {
+      publicKey: "daemon-public-key",
+      keyId: "daemon-key-1",
+    });
+    cleanups.push(ws);
+    expect(getOnlineMachines().find((machine) => machine.machineId === "m_crypto")).toMatchObject({
+      publicKey: "daemon-public-key",
+      keyId: "daemon-key-1",
+    });
+    const app = new MockWs();
+    handleRelayInbound(asWs(app), JSON.stringify({ type: "list-machines" }), createConnState(), deps);
+    expect(app.sent.at(-1).machines).toContainEqual(
+      expect.objectContaining({
+        machineId: "m_crypto",
+        publicKey: "daemon-public-key",
+        keyId: "daemon-key-1",
+      })
+    );
   });
 
   it("rejects registration without authToken", () => {
@@ -179,6 +206,21 @@ describe("boundary validation (safeParse)", () => {
     expect(ws.sent.at(-1)).toEqual({ type: "error", error: "Invalid JSON" });
     handleRelayInbound(asWs(ws), JSON.stringify({ type: "hack-the-planet" }), state, deps);
     expect(ws.sent.at(-1).type).toBe("error");
+  });
+
+  it("never logs a raw malformed frame that may contain a credential", () => {
+    const deps = makeDeps();
+    const ws = new MockWs();
+    const state = createConnState();
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    handleRelayInbound(
+      asWs(ws),
+      JSON.stringify({ type: "unknown", secret: "github_pat_DO_NOT_LOG" }),
+      state,
+      deps
+    );
+    expect(warn.mock.calls.flat().join(" ")).not.toContain("github_pat_DO_NOT_LOG");
+    warn.mockRestore();
   });
 
   it("replies pair-response(success:false) to malformed pair-request", () => {

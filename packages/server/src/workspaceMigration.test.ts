@@ -43,6 +43,8 @@ afterEach(() => {
 describe("legacy server workspace migration", () => {
   it("stages, verifies, atomically registers, and preserves the old root", async () => {
     const userId = `migration-user-${Date.now()}`;
+    writeFileSync(join(source, ".git-credentials"), "https://oauth2:sentinel@example.com\n");
+    writeFileSync(join(source, ".gitconfig"), "[credential]\n\thelper = store\n");
     saveSession("legacy-session", userId, [], "deepseek-v4-flash", "old-project");
     const record = await migrateLegacyServerWorkspace({
       userId,
@@ -52,12 +54,11 @@ describe("legacy server workspace migration", () => {
     });
     expect(record).not.toBeNull();
     const roots = getManagedWorkspaceRelativeRoots(record!.storageKey);
-    const migratedFile = join(
-      process.env.POCKET_CODE_DATA_ROOT!,
-      roots.worktreeRoot,
-      "src/index.ts"
-    );
+    const migratedWorktree = join(process.env.POCKET_CODE_DATA_ROOT!, roots.worktreeRoot);
+    const migratedFile = join(migratedWorktree, "src/index.ts");
     expect(readFileSync(migratedFile, "utf8")).toBe("export const migrated = true\n");
+    expect(existsSync(join(migratedWorktree, ".git-credentials"))).toBe(false);
+    expect(existsSync(join(migratedWorktree, ".gitconfig"))).toBe(false);
     expect(existsSync(source)).toBe(true);
     expect(getSession("legacy-session")?.projectId).toBe(PROJECT_ID);
     expect(getWorkspaceProject(userId, PROJECT_ID)).toMatchObject({

@@ -79,10 +79,32 @@ function send(ws: WebSocket, data: unknown) {
   }
 }
 
-wss.on("connection", (ws: WebSocket) => {
+function isLoopbackAddress(address: string | undefined): boolean {
+  return (
+    address === "127.0.0.1" ||
+    address === "::1" ||
+    address?.startsWith("::ffff:127.") === true
+  );
+}
+
+function acceptsPlaintextGitCredential(req: IncomingMessage): boolean {
+  if (process.env.ALLOW_INSECURE_GIT_CREDENTIALS === "1") return true;
+  if (isLoopbackAddress(req.socket.remoteAddress) && process.env.NODE_ENV !== "production") {
+    return true;
+  }
+  const forwardedProto = req.headers["x-forwarded-proto"];
+  return (
+    process.env.TRUST_PROXY === "1" &&
+    (Array.isArray(forwardedProto) ? forwardedProto[0] : forwardedProto) === "https"
+  );
+}
+
+wss.on("connection", (ws: WebSocket, req: IncomingMessage) => {
   console.log("[WS] Client connected");
 
-  const handler = createMessageHandler((data) => send(ws, data));
+  const handler = createMessageHandler((data) => send(ws, data), {
+    allowPlaintextGitCredentials: acceptsPlaintextGitCredential(req),
+  });
 
   ws.on("message", async (raw: Buffer) => {
     await handler.onMessage(raw);

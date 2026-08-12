@@ -97,7 +97,10 @@ vi.mock("./resourceLimits.js", () => ({
   getUserQuota: vi.fn(() => ({ userId: "u1", tier: "free", limits: {}, usage: {} })),
 }));
 
-vi.mock("./gitCredentials.js", () => ({ setupGitCredentials: vi.fn() }));
+vi.mock("./gitCredentials.js", () => ({
+  cleanupLegacyWorkspaceCredentials: vi.fn(async () => 0),
+  migrateLegacyGitCredentials: vi.fn(async () => []),
+}));
 vi.mock("./nodeBackend.js", () => ({ createNodeBackend: vi.fn(() => ({})) }));
 vi.mock("./sync/syncHandler.js", () => ({ handleSyncPull: vi.fn(), handleSyncFile: vi.fn() }));
 

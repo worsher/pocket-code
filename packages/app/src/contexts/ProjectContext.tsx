@@ -54,7 +54,14 @@ import {
   type CopySourceDirection,
   type CopySourcePreview,
 } from "../services/copySourceSync";
-import { gitAdd, gitCommit, gitPush, resolveGitWorkspaceHead } from "../services/gitService";
+import {
+  gitAdd,
+  gitCommit,
+  gitPull,
+  gitPush,
+  gitStatus,
+  resolveGitWorkspaceHead,
+} from "../services/gitService";
 import { WORKSPACE_FEATURE_FLAGS } from "../services/workspaceFeatureFlags";
 import {
   cleanupMigratedLegacyMobileStorage,
@@ -90,6 +97,7 @@ interface ProjectContextValue {
     settings: AppSettings,
     message: string
   ) => Promise<string>;
+  pullGitProject: (projectId: string, settings: AppSettings) => Promise<string>;
   registerRemoteReplica: (
     projectId: string,
     replica: RemoteReplicaCatalogEntry,
@@ -103,6 +111,7 @@ interface ProjectContextValue {
   importGitProject: (
     url: string,
     settings: AppSettings,
+    credentialProfileId?: string,
     allowWeakDuplicate?: boolean
   ) => Promise<MobileGitImportResult>;
   registerLinkedProject: (args: {
@@ -110,6 +119,8 @@ interface ProjectContextValue {
     displayName: string;
     importSource: ProjectImportSource;
     remoteReplica: RemoteReplicaCatalogEntry;
+    gitUrl?: string;
+    gitCredentialProfileId?: string;
   }) => Promise<Project>;
   legacyCleanupAvailable: boolean;
   cleanupLegacyStorage: (projectId?: string) => Promise<number>;
@@ -138,6 +149,9 @@ const ProjectContext = createContext<ProjectContextValue>({
     throw new Error("Project provider is unavailable");
   },
   commitAndPushGitProject: async () => {
+    throw new Error("Project provider is unavailable");
+  },
+  pullGitProject: async () => {
     throw new Error("Project provider is unavailable");
   },
   registerRemoteReplica: () => {},
@@ -170,7 +184,10 @@ export function ProjectProvider({ children }: { children: React.ReactNode }) {
   const pendingArchiveRef = useRef<NonNullable<
     Awaited<ReturnType<typeof pickMobileProjectArchive>>
   > | null>(null);
-  const pendingGitUrlRef = useRef<string | null>(null);
+  const pendingGitImportRef = useRef<{
+    url: string;
+    credentialProfileId?: string;
+  } | null>(null);
   projectsRef.current = projects;
 
   useEffect(() => {
@@ -312,6 +329,9 @@ export function ProjectProvider({ children }: { children: React.ReactNode }) {
       source.description,
       source.gitUrl
     );
+    if (source.gitCredentialProfileId) {
+      copy.gitCredentialProfileId = source.gitCredentialProfileId;
+    }
     const sourceHandle = ensureMobileWorkspaceHandle(source);
     const copyHandle = ensureMobileWorkspaceHandle(copy);
     try {
@@ -415,12 +435,57 @@ export function ProjectProvider({ children }: { children: React.ReactNode }) {
       if (!summary) throw new Error("Commit message must not be empty");
       const staged = await gitAdd(".", undefined, handle.worktreeRoot);
       if (!staged.success) throw new Error(staged.error ?? "Unable to stage Git changes");
-      const committed = await gitCommit(summary, undefined, handle.worktreeRoot);
-      if (!committed.success || !committed.sha) {
-        throw new Error(committed.error ?? "Unable to commit Git changes");
+      const status = await gitStatus(undefined, handle.worktreeRoot);
+      if (!status.success) throw new Error(status.error ?? "Unable to inspect staged Git changes");
+      if (status.files?.length) {
+        const committed = await gitCommit(summary, undefined, handle.worktreeRoot);
+        if (!committed.success || !committed.sha) {
+          throw new Error(committed.error ?? "Unable to commit Git changes");
+        }
       }
-      const pushed = await gitPush(settings, undefined, "origin", undefined, handle.worktreeRoot);
+      const pushed = await gitPush(
+        settings,
+        undefined,
+        "origin",
+        undefined,
+        handle.worktreeRoot,
+        project.gitCredentialProfileId
+      );
       if (!pushed.success) throw new Error(pushed.error ?? "Unable to push Git changes");
+      const head = await resolveGitWorkspaceHead(handle.worktreeRoot);
+      await persistProjectImportSource(projectId, {
+        ...project.importSource,
+        importedSnapshot: head,
+        importedAt: Date.now(),
+      });
+      return head;
+    },
+    [persistProjectImportSource]
+  );
+
+  const pullGitProject = useCallback(
+    async (projectId: string, settings: AppSettings): Promise<string> => {
+      const project = projectsRef.current.find((entry) => entry.id === projectId);
+      if (
+        !project ||
+        project.localReplica.layout !== "v2" ||
+        project.importSource?.mode !== "git"
+      ) {
+        throw new Error("Project is not a managed Git import");
+      }
+      const handle = ensureMobileWorkspaceHandle(project);
+      if (!handle.capabilities.write) {
+        throw new Error("Switch the project writer to this phone before pulling");
+      }
+      const pulled = await gitPull(
+        settings,
+        undefined,
+        "origin",
+        undefined,
+        handle.worktreeRoot,
+        project.gitCredentialProfileId
+      );
+      if (!pulled.success) throw new Error(pulled.error ?? "Unable to pull Git changes");
       const head = await resolveGitWorkspaceHead(handle.worktreeRoot);
       await persistProjectImportSource(projectId, {
         ...project.importSource,
@@ -528,25 +593,32 @@ export function ProjectProvider({ children }: { children: React.ReactNode }) {
     async (
       url: string,
       settings: AppSettings,
+      credentialProfileId?: string,
       allowWeakDuplicate: boolean = false
     ): Promise<MobileGitImportResult> => {
       if (!WORKSPACE_FEATURE_FLAGS.importV2) throw new Error("Workspace v2 import is disabled");
-      const sourceUrl =
-        allowWeakDuplicate && pendingGitUrlRef.current ? pendingGitUrlRef.current : url;
-      pendingGitUrlRef.current = sourceUrl;
+      const pending = allowWeakDuplicate ? pendingGitImportRef.current : null;
+      const sourceUrl = pending?.url ?? url;
+      const selectedCredentialProfileId =
+        pending?.credentialProfileId ?? credentialProfileId;
+      pendingGitImportRef.current = {
+        url: sourceUrl,
+        credentialProfileId: selectedCredentialProfileId,
+      };
       const result = await importMobileGit({
         url: sourceUrl,
         settings,
+        credentialProfileId: selectedCredentialProfileId,
         sourceDeviceId: await getOrCreateSourceDeviceId(),
         projects: projectsRef.current,
         allowWeakDuplicate,
         commitProject: commitImportedProject,
       });
       if (result.status === "imported") {
-        pendingGitUrlRef.current = null;
+        pendingGitImportRef.current = null;
         switchProject(result.committed.id);
       } else if (result.status === "blocked") {
-        pendingGitUrlRef.current = null;
+        pendingGitImportRef.current = null;
       }
       return result;
     },
@@ -559,11 +631,17 @@ export function ProjectProvider({ children }: { children: React.ReactNode }) {
       displayName: string;
       importSource: ProjectImportSource;
       remoteReplica: RemoteReplicaCatalogEntry;
+      gitUrl?: string;
+      gitCredentialProfileId?: string;
     }): Promise<Project> => {
       const project: Project = {
         ...adoptRemoteProject(args.projectId, args.displayName),
         importSource: args.importSource,
         remoteReplicas: [args.remoteReplica],
+        ...(args.gitUrl ? { gitUrl: args.gitUrl } : {}),
+        ...(args.gitCredentialProfileId
+          ? { gitCredentialProfileId: args.gitCredentialProfileId }
+          : {}),
       };
       await commitImportedProject(project);
       switchProject(project.id);
@@ -600,6 +678,7 @@ export function ProjectProvider({ children }: { children: React.ReactNode }) {
         previewCopySource,
         applyCopySource,
         commitAndPushGitProject,
+        pullGitProject,
         registerRemoteReplica,
         importDirectoryProject,
         importArchiveProject,

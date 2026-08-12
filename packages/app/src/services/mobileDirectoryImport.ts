@@ -13,6 +13,7 @@ import {
   ensureMobileWorkspaceHandle,
   getMobileV2Root,
 } from "./workspaceResolver";
+import { isSensitiveGitContentPath } from "./gitSensitivePath";
 
 export const MIN_FREE_SPACE_BUFFER = 16 * 1024 * 1024;
 export const MAX_IMPORT_FILES = 100_000;
@@ -58,6 +59,7 @@ export async function scanMobileDirectory(root: Directory): Promise<{
         throw new Error(`Directory contains more than ${MAX_IMPORT_FILES} entries`);
       }
       const path = prefix ? `${prefix}/${entry.name}` : entry.name;
+      if (isSensitiveGitContentPath(path)) continue;
       if (entry instanceof Directory) {
         await visit(entry, path);
         continue;
@@ -102,6 +104,7 @@ export async function commitManagedMobileImport(args: {
   verifiedSnapshot: string;
   writeBackPolicy: "explicit" | "git";
   gitUrl?: string;
+  gitCredentialProfileId?: string;
   commitProject(project: Project): Promise<void>;
 }): Promise<Project> {
   const project = {
@@ -116,6 +119,9 @@ export async function commitManagedMobileImport(args: {
       writeBackPolicy: args.writeBackPolicy,
     }),
     ...(args.gitUrl ? { gitUrl: args.gitUrl } : {}),
+    ...(args.gitCredentialProfileId
+      ? { gitCredentialProfileId: args.gitCredentialProfileId }
+      : {}),
   };
   const handle = ensureMobileWorkspaceHandle(project);
   const worktree = new Directory(handle.worktreeRoot);
@@ -141,6 +147,7 @@ export function copyMobileDirectoryContents(
 ): void {
   if (!destination.exists) destination.create({ idempotent: true, intermediates: true });
   for (const entry of source.list()) {
+    if (isSensitiveGitContentPath(entry.name)) continue;
     state.entries++;
     if (state.entries > MAX_IMPORT_FILES) {
       throw new Error(`Directory contains more than ${MAX_IMPORT_FILES} entries`);

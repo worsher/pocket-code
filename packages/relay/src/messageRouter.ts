@@ -69,7 +69,8 @@ export function handleRelayInbound(
       relayLog("Rejected invalid pair-request format");
       sendJSON(ws, { type: "pair-response", success: false, error: "Invalid pairing request format" });
     } else {
-      console.warn(`[Relay] Rejected invalid message (type=${String(t)}): ${raw.slice(0, 200)}`);
+      // Malformed envelopes may still contain credentials; never log raw frames.
+      console.warn(`[Relay] Rejected invalid message (type=${String(t)})`);
       sendJSON(ws, { type: "error", error: `Invalid message${typeof t === "string" ? `: ${t}` : ""}` });
     }
     return;
@@ -98,7 +99,7 @@ export function handleRelayInbound(
       }
       state.role = "daemon";
       state.machineId = msg.machineId;
-      registerDaemon(ws, msg.machineId, msg.machineName);
+      registerDaemon(ws, msg.machineId, msg.machineName, msg.publicKey, msg.keyId);
       sendJSON(ws, { type: "daemon-registered", machineId: msg.machineId });
       return;
     }

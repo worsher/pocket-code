@@ -25,6 +25,9 @@ export const PairResponseSuccess = z.object({
   token: z.string(),
   machineId: z.string(),
   machineName: z.string(),
+  /** Daemon credential-encryption key (optional for rolling upgrades). */
+  publicKey: z.string().min(1).max(128).optional(),
+  keyId: z.string().min(1).max(128).optional(),
 });
 
 export const PairResponseError = z.object({
@@ -51,6 +54,9 @@ export const DaemonRegister = z.object({
   authToken: z.string().optional(),
   /** Unix timestamp (ms) used in HMAC computation, for replay prevention */
   timestamp: z.number().optional(),
+  /** Public metadata used by Apps to seal secrets end-to-end to this daemon. */
+  publicKey: z.string().min(1).max(128).optional(),
+  keyId: z.string().min(1).max(128).optional(),
 });
 
 export type DaemonRegisterType = z.infer<typeof DaemonRegister>;
@@ -78,6 +84,8 @@ export const MachineInfo = z.object({
   machineName: z.string(),
   online: z.boolean(),
   lastSeen: z.number().optional(),
+  publicKey: z.string().min(1).max(128).optional(),
+  keyId: z.string().min(1).max(128).optional(),
 });
 
 export type MachineInfoType = z.infer<typeof MachineInfo>;

@@ -198,4 +198,23 @@ describe("shadowSnapshot", () => {
       rmSync(fresh, { recursive: true, force: true });
     }
   });
+
+  it("orphans a legacy sensitive history and hard-rejects old snapshot reads", async () => {
+    writeFileSync(join(repo, ".git-credentials"), "https://user:sentinel@example.com\n");
+    git(repo, "add", "-f", ".git-credentials");
+    git(repo, "commit", "-qm", "legacy sensitive snapshot");
+    const legacyCommit = git(repo, "rev-parse", "HEAD");
+    git(repo, "update-ref", "refs/pocket-code/worktree", legacyCommit);
+    rmSync(join(repo, ".git-credentials"));
+
+    const sanitized = await createSnapshot(repo);
+    expect(sanitized.parent).toBeNull();
+    expect(git(repo, "rev-list", "--count", sanitized.commit)).toBe("1");
+    expect(git(repo, "ls-tree", "-r", "--name-only", sanitized.commit)).not.toContain(
+      ".git-credentials"
+    );
+    await expect(readSnapshotFile(repo, legacyCommit, ".git-credentials")).rejects.toThrow(
+      "Sensitive workspace path"
+    );
+  });
 });

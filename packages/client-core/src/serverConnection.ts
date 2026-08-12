@@ -4,6 +4,7 @@
 // 入站流式事件即归一化 AgentEvent(server 已切换,P6b Task 3)。
 
 import { RelayClient } from "./relayClient";
+import { sealCredentialSecret, type SecureRandomBytes } from "./credentialCrypto";
 import {
   AGENT_EVENT_TYPE_NAMES,
   WorkspaceProjectCatalogEntry,
@@ -12,6 +13,11 @@ import {
   type WorkspaceSessionScopeType,
   type WorkspaceProjectCatalogEntryType,
   type WorkspaceImportSourceType,
+  type GitCredentialProfileType,
+  type SealedSecretEnvelopeType,
+  type GitCredentialResultMsgType,
+  type GitOperationResultMsgType,
+  type GitWorkspaceOperationType,
 } from "@pocket-code/wire";
 
 export interface LinkedWorkspaceImportResponse {
@@ -56,16 +62,61 @@ export interface WorkspaceLegacyCleanupResponse {
   _reqId: string;
 }
 
+export type GitCredentialResponse = GitCredentialResultMsgType;
+export type GitOperationResponse = GitOperationResultMsgType;
+
+export interface GitCredentialUpsertArgs {
+  profile: GitCredentialProfileType;
+  /** Direct WSS only. Use sealedSecret for Relay mode. */
+  secret?: string;
+  sealedSecret?: SealedSecretEnvelopeType;
+  /** RN callers should pass expo-crypto getRandomBytes for Relay sealing. */
+  randomBytes?: SecureRandomBytes;
+  /** Allows callers that pre-seal to bind the envelope to the same RPC id. */
+  requestId?: string;
+}
+
+export interface GitCredentialTestArgs {
+  credentialProfileId: string;
+  repositoryUrl: string;
+  capability?: "read" | "write";
+}
+
+export interface GitWorkspaceImportArgs {
+  projectId: string;
+  displayName?: string;
+  repositoryUrl: string;
+  credentialProfileId: string;
+  branch?: string;
+}
+
+export interface GitWorkspaceOperationArgs {
+  projectId: string;
+  operation: GitWorkspaceOperationType;
+  credentialProfileId: string;
+  commitMessage?: string;
+}
+
 export interface ConnectionConfig {
   getServerUrl(): string;
   isRelayMode(): boolean;
-  getRelayOptions(): { machineId: string; deviceId: string; token?: string };
+  getRelayOptions(): {
+    machineId: string;
+    deviceId: string;
+    token?: string;
+    publicKey?: string;
+    keyId?: string;
+  };
   getAuthToken(): string | undefined;
   getDeviceId(): string;
   buildInitPayload(): Record<string, unknown>;
   isRelayPaired(): boolean;
   /** 配对成功后由宿主持久化 token(RN: updateSettings 包装;Web: localStorage) */
   onTokenPersist?: (token: string, machineId: string) => void;
+  onEncryptionKeyPersist?: (
+    key: { publicKey: string; keyId: string },
+    machineId: string
+  ) => void;
   /** P14 D-P14-4 预留:宿主持久化事件游标;缺省内存态(冷启动走全量 loadSession)。 */
   getEventCursor?: () => { epoch: string; lastSeq: number } | undefined;
   persistEventCursor?: (epoch: string, lastSeq: number) => void;
@@ -98,6 +149,8 @@ const AGENT_EVENT_TYPES = new Set<string>(AGENT_EVENT_TYPE_NAMES);
 
 const RECONNECT_BASE_MS = 2000;
 const RECONNECT_MAX_MS = 30000;
+/** Server Git subprocesses may run for 10 minutes; leave response delivery headroom. */
+const REMOTE_GIT_TIMEOUT_MS = 11 * 60 * 1000;
 
 export class ServerConnection {
   private ws: WebSocket | RelayClient | null = null;
@@ -149,7 +202,12 @@ export class ServerConnection {
         deviceId: relay.deviceId,
         deviceName: "Pocket Code App",
         token: relay.token,
+        pinnedEncryptionKey:
+          relay.publicKey && relay.keyId
+            ? { publicKey: relay.publicKey, keyId: relay.keyId }
+            : undefined,
         onTokenPersist: this.config.onTokenPersist,
+        onEncryptionKeyPersist: this.config.onEncryptionKeyPersist,
       });
       ws.connect();
     } else {
@@ -168,7 +226,7 @@ export class ServerConnection {
         if (this.config.isRelayPaired()) {
           this.sendRaw({
             type: "init",
-            ...this.config.buildInitPayload(),
+            ...this.buildCurrentInitPayload(),
             ...this.cursorInitFields(),
           });
         } else {
@@ -222,9 +280,15 @@ export class ServerConnection {
     this.sendRaw({
       type: "init",
       token,
-      ...this.config.buildInitPayload(),
+      ...this.buildCurrentInitPayload(),
       ...this.cursorInitFields(),
     });
+  }
+
+  /** Never emit the deprecated plaintext credential array from current clients. */
+  private buildCurrentInitPayload(): Record<string, unknown> {
+    const { gitCredentials: _legacyCredentials, ...payload } = this.config.buildInitPayload();
+    return payload;
   }
 
   /** init 携带的补发协商字段(仅当有 epoch,即此前收过带序事件)。 */
@@ -349,7 +413,9 @@ export class ServerConnection {
         data.type === "workspace-import-result" ||
         data.type === "workspace-writer-released" ||
         data.type === "workspace-source-status" ||
-        data.type === "workspace-legacy-cleaned": {
+        data.type === "workspace-legacy-cleaned" ||
+        data.type === "git-credential-result" ||
+        data.type === "git-operation-result": {
         const resolver = data._reqId && this.resolvers.get(data._reqId);
         if (resolver) {
           resolver(data);
@@ -524,6 +590,90 @@ export class ServerConnection {
       reqId,
       30_000,
       "Legacy workspace cleanup"
+    );
+  }
+
+  upsertGitCredential(args: GitCredentialUpsertArgs): Promise<GitCredentialResponse> {
+    const reqId =
+      args.requestId ??
+      args.sealedSecret?.requestId ??
+      `cred_upsert_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+    let secret = args.secret;
+    let sealedSecret = args.sealedSecret;
+    if (this.config.isRelayMode() && secret) {
+      if (sealedSecret) return Promise.reject(new Error("Provide either secret or sealedSecret, not both"));
+      const relay = this.config.getRelayOptions();
+      if (!relay.publicKey || !relay.keyId) {
+        return Promise.reject(
+          new Error("Paired daemon has no pinned encryption key; pair again before installing credentials")
+        );
+      }
+      sealedSecret = sealCredentialSecret(
+        { secret, profile: args.profile, requestId: reqId },
+        { publicKey: relay.publicKey, keyId: relay.keyId },
+        { randomBytes: args.randomBytes }
+      );
+      secret = undefined;
+    }
+    if (
+      sealedSecret &&
+      (sealedSecret.requestId !== reqId ||
+        sealedSecret.profileId !== args.profile.id ||
+        sealedSecret.origin !== args.profile.origin)
+    ) {
+      return Promise.reject(new Error("Encrypted credential binding does not match the upsert request"));
+    }
+    return this.request(
+      {
+        type: "git-credential-upsert",
+        _reqId: reqId,
+        profile: args.profile,
+        ...(secret ? { secret } : {}),
+        ...(sealedSecret ? { sealedSecret } : {}),
+      },
+      reqId,
+      15_000,
+      "Git credential upsert"
+    );
+  }
+
+  testGitCredential(args: GitCredentialTestArgs): Promise<GitCredentialResponse> {
+    const reqId = `cred_test_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+    return this.request(
+      { type: "git-credential-test", _reqId: reqId, ...args },
+      reqId,
+      30_000,
+      "Git credential test"
+    );
+  }
+
+  deleteGitCredential(credentialProfileId: string): Promise<GitCredentialResponse> {
+    const reqId = `cred_delete_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+    return this.request(
+      { type: "git-credential-delete", credentialProfileId, _reqId: reqId },
+      reqId,
+      15_000,
+      "Git credential delete"
+    );
+  }
+
+  importGitWorkspace(args: GitWorkspaceImportArgs): Promise<LinkedWorkspaceImportResponse> {
+    const reqId = `git_import_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+    return this.request(
+      { type: "workspace-import-git", _reqId: reqId, ...args },
+      reqId,
+      REMOTE_GIT_TIMEOUT_MS,
+      "Git workspace import"
+    );
+  }
+
+  runGitWorkspaceOperation(args: GitWorkspaceOperationArgs): Promise<GitOperationResponse> {
+    const reqId = `git_op_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+    return this.request(
+      { type: "git-workspace-operation", _reqId: reqId, ...args },
+      reqId,
+      args.operation === "status" ? 15_000 : REMOTE_GIT_TIMEOUT_MS,
+      `Git workspace ${args.operation}`
     );
   }
 
