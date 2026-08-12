@@ -50,6 +50,13 @@ vi.mock("./nodeBackend.js", () => ({
   createNodeBackend: vi.fn(() => ({})),
 }));
 
+// createOpenAI 换成可观测的假工厂:返回的 provider 把创建时的 apiKey 附在模型对象上,
+// 便于断言"某个 modelKey 最终用的是哪把 key"。
+vi.mock("@ai-sdk/openai", () => ({
+  createOpenAI: (opts: { apiKey: string; baseURL?: string }) =>
+    (modelId: string) => ({ modelId, apiKey: opts.apiKey, baseURL: opts.baseURL }),
+}));
+
 const runCliSessionMock = vi.fn(async (...args: unknown[]) => {
   const session = args[1] as { messages: unknown[] };
   session.messages.push({ role: "assistant", content: "(cli done)" });
@@ -347,5 +354,81 @@ describe("runAgent", () => {
     ).rejects.toThrow("project");
     await expect(createSession("saved", "u2")).rejects.toThrow("user");
     expect(getWorkspaceHandleMock).not.toHaveBeenCalled();
+  });
+});
+
+// ── DeepSeek 路由:设置 DEEPSEEK_API_KEY 时 v4 系列走官方端点,否则回退硅基流动 ──
+describe("getModel 的 DeepSeek 路由", () => {
+  it("设置 DEEPSEEK_API_KEY 时 v4 系列走官方端点(官方模型 id + DEEPSEEK_API_KEY)", async () => {
+    vi.resetModules();
+    vi.stubEnv("DEEPSEEK_API_KEY", "dsk-env");
+    vi.stubEnv("SILICONFLOW_API_KEY", "sfk-env");
+    try {
+      const mod = await import("./agent.js");
+      const pro = mod.getModel("deepseek-v4-pro") as any;
+      expect(pro.apiKey).toBe("dsk-env");
+      expect(pro.baseURL).toBe("https://api.deepseek.com");
+      expect(pro.modelId).toBe("deepseek-v4-pro");
+      const flash = mod.getModel("deepseek-v4-flash") as any;
+      expect(flash.apiKey).toBe("dsk-env");
+      expect(flash.modelId).toBe("deepseek-v4-flash");
+    } finally {
+      vi.unstubAllEnvs();
+    }
+  });
+
+  it("v3/r1 官方平台没有,即使设了 DEEPSEEK_API_KEY 也始终走硅基流动 + SILICONFLOW_API_KEY", async () => {
+    vi.resetModules();
+    vi.stubEnv("DEEPSEEK_API_KEY", "dsk-env");
+    vi.stubEnv("SILICONFLOW_API_KEY", "sfk-env");
+    try {
+      const mod = await import("./agent.js");
+      for (const key of ["deepseek-v3", "deepseek-r1"]) {
+        const m = mod.getModel(key) as any;
+        expect(m.apiKey, key).toBe("sfk-env");
+        expect(m.baseURL, key).toBe("https://api.siliconflow.cn/v1");
+      }
+    } finally {
+      vi.unstubAllEnvs();
+    }
+  });
+
+  it("未设置 DEEPSEEK_API_KEY(或为空串)时 v4 系列回退硅基流动 + SILICONFLOW_API_KEY", async () => {
+    vi.resetModules();
+    vi.stubEnv("DEEPSEEK_API_KEY", ""); // 清掉宿主环境可能残留的值,空串按未设置处理
+    vi.stubEnv("SILICONFLOW_API_KEY", "sfk-env");
+    try {
+      const mod = await import("./agent.js");
+      const m = mod.getModel("deepseek-v4-flash") as any;
+      expect(m.apiKey).toBe("sfk-env");
+      expect(m.baseURL).toBe("https://api.siliconflow.cn/v1");
+      expect(m.modelId).toBe("deepseek-ai/DeepSeek-V4-Flash");
+    } finally {
+      vi.unstubAllEnvs();
+    }
+  });
+
+  it("qwen 等其余硅基流动模型不受 DEEPSEEK_API_KEY 影响", async () => {
+    vi.resetModules();
+    vi.stubEnv("DEEPSEEK_API_KEY", "dsk-env");
+    vi.stubEnv("SILICONFLOW_API_KEY", "sfk-env");
+    try {
+      const mod = await import("./agent.js");
+      expect((mod.getModel("qwen-coder") as any).apiKey).toBe("sfk-env");
+    } finally {
+      vi.unstubAllEnvs();
+    }
+  });
+
+  it("DEEPSEEK_BASE_URL 可覆盖官方端点", async () => {
+    vi.resetModules();
+    vi.stubEnv("DEEPSEEK_API_KEY", "dsk-env");
+    vi.stubEnv("DEEPSEEK_BASE_URL", "https://proxy.example.com/v1");
+    try {
+      const mod = await import("./agent.js");
+      expect((mod.getModel("deepseek-v4-flash") as any).baseURL).toBe("https://proxy.example.com/v1");
+    } finally {
+      vi.unstubAllEnvs();
+    }
   });
 });
