@@ -156,6 +156,7 @@ function MainScreen() {
     messages,
     isConnected,
     isStreaming,
+    activeTurnId,
     streamingPhase,
     currentToolName,
     sessionId,
@@ -225,12 +226,7 @@ function MainScreen() {
         await deleteRemoteGitCredential(profileId);
       }
     },
-    [
-      settings,
-      isConnected,
-      upsertRemoteGitCredential,
-      deleteRemoteGitCredential,
-    ]
+    [settings, isConnected, upsertRemoteGitCredential, deleteRemoteGitCredential]
   );
 
   const handleSaveSettings = useCallback(
@@ -355,12 +351,15 @@ function MainScreen() {
   useEffect(scrollToEnd, [messages]);
 
   const renderItem = ({ item, index }: { item: Message; index: number }) => {
-    const isLast = index === messages.length - 1;
+    const isActiveAssistant =
+      isStreaming &&
+      item.role === "assistant" &&
+      (activeTurnId ? item.turnId === activeTurnId : index === messages.length - 1);
     return (
       <ChatMessage
         message={item}
-        streamingPhase={isLast && isStreaming ? streamingPhase : undefined}
-        currentToolName={isLast && isStreaming ? currentToolName : undefined}
+        streamingPhase={isActiveAssistant ? streamingPhase : undefined}
+        currentToolName={isActiveAssistant ? currentToolName : undefined}
         onEditResend={!isStreaming && index >= editCutoff ? editAndResend : undefined}
       />
     );
@@ -376,11 +375,7 @@ function MainScreen() {
 
   const selectedModel = AVAILABLE_MODELS.find((m) => m.key === currentModel);
   const isGeek = settings.mode === "geek";
-  const keyboardVerticalOffset = getKeyboardVerticalOffset(
-    Platform.OS,
-    insets.top,
-    headerHeight
-  );
+  const keyboardVerticalOffset = getKeyboardVerticalOffset(Platform.OS, insets.top, headerHeight);
 
   const handleHeaderLayout = useCallback((event: LayoutChangeEvent) => {
     setHeaderHeight(event.nativeEvent.layout.height);
@@ -511,8 +506,15 @@ function MainScreen() {
                   <Text style={styles.goalAction}>暂停</Text>
                 </TouchableOpacity>
               ) : (
-                <TouchableOpacity onPress={() => goalControl("resume")}>
-                  <Text style={styles.goalAction}>继续</Text>
+                <TouchableOpacity
+                  disabled={isStreaming || !isConnected}
+                  onPress={() => goalControl("resume")}
+                >
+                  <Text
+                    style={[styles.goalAction, (isStreaming || !isConnected) && { opacity: 0.4 }]}
+                  >
+                    继续
+                  </Text>
                 </TouchableOpacity>
               )}
               <TouchableOpacity onPress={() => goalControl("cancel")}>
@@ -546,14 +548,15 @@ function MainScreen() {
           )}
 
           {/* Quick Actions */}
-          <QuickActions onSend={sendMessage} disabled={isStreaming || (!isGeek && !isConnected)} />
+          <QuickActions onSend={sendMessage} disabled={isStreaming} />
 
           {/* Input */}
           <ChatInput
             onSend={sendMessage}
             onStop={stopStreaming}
             isStreaming={isStreaming}
-            disabled={isStreaming || (!isGeek && !isConnected)}
+            isConnected={isGeek || isConnected}
+            disabled={isStreaming}
           />
         </KeyboardAvoidingView>
 

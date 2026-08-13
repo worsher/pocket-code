@@ -4,7 +4,11 @@
 // publish 带 seq 可补发;P13 重试在 loop 内自愈,driver 只见最终 stopReason;
 // P15 压缩在每个 turn 的 runAgent 内自动生效。
 
-import { goalKickoffPrompt, GOAL_CONTINUATION_PROMPT, type LoopStopReason } from "@pocket-code/agent-core";
+import {
+  goalKickoffPrompt,
+  GOAL_CONTINUATION_PROMPT,
+  type LoopStopReason,
+} from "@pocket-code/agent-core";
 import type { AgentEventType } from "@pocket-code/wire";
 import type { AgentSession } from "../agent.js";
 import { goalUpdatedEvent, type GoalState } from "./types.js";
@@ -33,14 +37,22 @@ const MAX_IDLE_TURNS = 3;
  */
 export async function runGoalDriver(session: AgentSession, deps: GoalDriverDeps): Promise<void> {
   const { sessionId } = session;
+  const transportTurnId = session.goal?.transportTurnId;
   let idleTurns = 0;
+
+  // One goal command can span many agent turns, but it remains one rendered
+  // transport turn. Override producer metadata so every delta/tool/done and
+  // lifecycle event is routed to the same assistant projection.
+  const publish = (event: AgentEventType): void => {
+    deps.publish(transportTurnId ? { ...event, turnId: transportTurnId } : event);
+  };
 
   const park = (g: GoalState, status: "paused" | "blocked", reason: string): void => {
     g.status = status;
     g.stopReason = reason;
     g.updatedAt = Date.now();
     deps.persistGoal(sessionId, g);
-    deps.publish(goalUpdatedEvent(g, "lifecycle"));
+    publish(goalUpdatedEvent(g, "lifecycle"));
   };
 
   while (session.goal?.status === "active") {
@@ -56,8 +68,16 @@ export async function runGoalDriver(session: AgentSession, deps: GoalDriverDeps)
     const before = g.updatedAt;
     const abort = new AbortController();
     session.currentAbort = abort;
-    const outcome = await deps.runAgent(session, content, deps.publish, abort.signal);
-    session.currentAbort = undefined;
+    session.currentAbortOwner = "goal";
+    let outcome: TurnOutcome | undefined;
+    try {
+      outcome = await deps.runAgent(session, content, publish, abort.signal);
+    } finally {
+      if (session.currentAbort === abort) {
+        session.currentAbort = undefined;
+        session.currentAbortOwner = undefined;
+      }
+    }
 
     if (outcome) {
       g.stats.inputTokens += outcome.usage.inputTokens;
@@ -70,7 +90,7 @@ export async function runGoalDriver(session: AgentSession, deps: GoalDriverDeps)
 
     if (cur.status === "complete") {
       // C16-4:恰一条 completion,随后 goal 清除(complete 是瞬时态,不持久化)
-      deps.publish(goalUpdatedEvent(cur, "completion"));
+      publish(goalUpdatedEvent(cur, "completion"));
       session.goal = undefined;
       deps.persistGoal(sessionId, null);
       break;
@@ -78,7 +98,7 @@ export async function runGoalDriver(session: AgentSession, deps: GoalDriverDeps)
     if (cur.status === "paused" || cur.status === "blocked") {
       // 工具或 goal-control 已置态:driver 只补通告(单一事件源在此)
       deps.persistGoal(sessionId, cur);
-      deps.publish(goalUpdatedEvent(cur, "lifecycle"));
+      publish(goalUpdatedEvent(cur, "lifecycle"));
       break;
     }
 

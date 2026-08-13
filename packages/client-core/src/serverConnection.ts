@@ -113,10 +113,7 @@ export interface ConnectionConfig {
   isRelayPaired(): boolean;
   /** 配对成功后由宿主持久化 token(RN: updateSettings 包装;Web: localStorage) */
   onTokenPersist?: (token: string, machineId: string) => void;
-  onEncryptionKeyPersist?: (
-    key: { publicKey: string; keyId: string },
-    machineId: string
-  ) => void;
+  onEncryptionKeyPersist?: (key: { publicKey: string; keyId: string }, machineId: string) => void;
   /** P14 D-P14-4 预留:宿主持久化事件游标;缺省内存态(冷启动走全量 loadSession)。 */
   getEventCursor?: () => { epoch: string; lastSeq: number } | undefined;
   persistEventCursor?: (epoch: string, lastSeq: number) => void;
@@ -130,6 +127,8 @@ export interface ConnectionHandlers {
     workspaceScope?: WorkspaceSessionScopeType,
     workspaceCatalog?: WorkspaceProjectCatalogEntryType[]
   ): void;
+  /** Init ack and any replay backlog have both been delivered. */
+  onSessionReady?(sessionId: string): void;
   onConnected(): void;
   onDisconnected(): void;
   onAuthError(message: string): void;
@@ -154,11 +153,19 @@ const REMOTE_GIT_TIMEOUT_MS = 11 * 60 * 1000;
 
 export class ServerConnection {
   private ws: WebSocket | RelayClient | null = null;
+  /** A writable socket is not usable for turns until the server acknowledges init. */
+  private sessionReady = false;
+  private strictTurnCorrelation = false;
+  /** Explicit session switches must not rehydrate the previous session's global cursor. */
+  private hydratePersistedCursor = true;
   private shouldConnect = false;
   private reconnectTimer: ReturnType<typeof setTimeout> | null = null;
   private reconnectAttempt = 0;
   /** _reqId/callId → resolver(RPC 关联:tool-exec 与 file/sync 请求) */
-  private resolvers = new Map<string, (result: unknown) => void>();
+  private resolvers = new Map<
+    string,
+    { resolve: (result: unknown) => void; reject: (error: Error) => void }
+  >();
   /** P14:事件流游标(epoch 缺省 = 从未收过带序事件,init 不请求补发) */
   private cursor: { epoch?: string; lastSeq: number } = { lastSeq: 0 };
   /** 连续缺口计数:第一次断开重连补发,第二次转 resync(spec §5.2) */
@@ -175,18 +182,39 @@ export class ServerConnection {
     return this.ws?.readyState === WebSocket.OPEN;
   }
 
+  get isReady(): boolean {
+    return this.isOpen && this.sessionReady;
+  }
+
+  get supportsTurnCorrelation(): boolean {
+    return this.strictTurnCorrelation;
+  }
+
   sendRaw(obj: Record<string, unknown>): boolean {
     if (!this.isOpen || !this.ws) return false;
-    this.ws.send(JSON.stringify(obj));
-    return true;
+    try {
+      const sent = this.ws.send(JSON.stringify(obj));
+      return sent !== false;
+    } catch {
+      return false;
+    }
+  }
+
+  /** Explicit session/project switches must not reuse another stream's epoch cursor. */
+  resetSessionCursor(): void {
+    this.cursor = { lastSeq: 0 };
+    this.gapStrikes = 0;
+    this.hydratePersistedCursor = false;
   }
 
   connect(): void {
     this.shouldConnect = true;
     this.clearReconnect();
     if (this.isOpen) return;
+    this.sessionReady = false;
+    this.strictTurnCorrelation = false;
 
-    const persisted = this.config.getEventCursor?.();
+    const persisted = this.hydratePersistedCursor ? this.config.getEventCursor?.() : undefined;
     if (persisted && !this.cursor.epoch)
       this.cursor = { epoch: persisted.epoch, lastSeq: persisted.lastSeq };
 
@@ -224,20 +252,26 @@ export class ServerConnection {
       if (this.config.isRelayMode()) {
         // relay 模式:daemon 侧 preAuth,已配对则直接 init(不带 token)
         if (this.config.isRelayPaired()) {
-          this.sendRaw({
-            type: "init",
-            ...this.buildCurrentInitPayload(),
-            ...this.cursorInitFields(),
-          });
+          if (
+            !this.sendRaw({
+              type: "init",
+              ...this.buildCurrentInitPayload(),
+              ...this.cursorInitFields(),
+            })
+          ) {
+            this.closeForReconnect();
+          }
         } else {
           console.log("[Conn] Connected to relay but not paired yet.");
         }
       } else {
         const token = this.config.getAuthToken();
         if (token) {
-          this.sendInit(token);
+          if (!this.sendInit(token)) this.closeForReconnect();
         } else {
-          this.sendRaw({ type: "register", deviceId: this.config.getDeviceId() });
+          if (!this.sendRaw({ type: "register", deviceId: this.config.getDeviceId() })) {
+            this.closeForReconnect();
+          }
         }
       }
     };
@@ -252,8 +286,13 @@ export class ServerConnection {
     ws.onclose = () => {
       if (this.ws !== ws) return;
       console.log("[Conn] Closed");
+      this.sessionReady = false;
       this.activeWorkspaceScope = undefined;
+      this.rejectAllResolvers("WebSocket disconnected");
       this.handlers.onDisconnected();
+      // Let the host observe the capability of the connection that just went
+      // away (it determines whether an in-flight turn is safe to replay).
+      this.strictTurnCorrelation = false;
       if (this.shouldConnect) this.scheduleReconnect();
     };
 
@@ -264,25 +303,65 @@ export class ServerConnection {
   }
 
   disconnect(): void {
+    const wasOpen = this.isOpen;
+    const ws = this.ws;
     this.shouldConnect = false;
+    this.sessionReady = false;
     this.clearReconnect();
     if (this.cursor.epoch) this.config.persistEventCursor?.(this.cursor.epoch, this.cursor.lastSeq);
     this.activeWorkspaceScope = undefined;
+    this.rejectAllResolvers("WebSocket disconnected");
+    // Detach first. Browser sockets call onclose asynchronously while test and
+    // alternate transports may call it synchronously; either way the stale
+    // callback must not duplicate the explicit host notification below.
+    this.ws = null;
     try {
-      this.ws?.close();
+      ws?.close();
     } catch {
       /* ignore */
     }
-    this.ws = null;
+    // Clearing this.ws intentionally makes the socket's later onclose stale.
+    // Notify hosts here so a manual disconnect cannot leave a green connected
+    // badge or a legacy replay waiter locked forever.
+    if (wasOpen) this.handlers.onDisconnected();
+    this.strictTurnCorrelation = false;
   }
 
-  private sendInit(token: string): void {
-    this.sendRaw({
+  private sendInit(token: string): boolean {
+    return this.sendRaw({
       type: "init",
       token,
       ...this.buildCurrentInitPayload(),
       ...this.cursorInitFields(),
     });
+  }
+
+  /** A failed handshake write is transport failure: keep reconnect enabled. */
+  private closeForReconnect(): void {
+    this.sessionReady = false;
+    try {
+      this.ws?.close();
+    } catch {
+      /* onclose owns reconnect scheduling when the transport can report it */
+    }
+  }
+
+  /** A server-invalid init response needs user action, not a reconnect loop. */
+  private stopUnreadyConnection(): void {
+    this.sessionReady = false;
+    this.shouldConnect = false;
+    this.clearReconnect();
+    try {
+      this.ws?.close();
+    } catch {
+      /* the connection remains manually recoverable through connect() */
+    }
+  }
+
+  private rejectAllResolvers(message: string): void {
+    const resolvers = [...this.resolvers.values()];
+    this.resolvers.clear();
+    for (const resolver of resolvers) resolver.reject(new Error(message));
   }
 
   /** Never emit the deprecated plaintext credential array from current clients. */
@@ -347,14 +426,19 @@ export class ServerConnection {
     switch (true) {
       case data.type === "auth": {
         this.handlers.onAuth(data.token, data.userId);
-        this.sendInit(data.token);
+        if (!this.sendInit(data.token)) this.closeForReconnect();
         return;
       }
       case data.type === "session": {
-        // P14 冷启动:采纳 server 游标(此前事件不可得,交给宿主的常规历史加载);
-        // 已有 epoch 且不符时不自行猜——等 server 的 resync-required 决定。
+        // A legacy ack has no replay phase, so a cold client can adopt currentSeq.
+        // New servers mark backlogPending and then deliver seq frames before
+        // session-ready; bind only the epoch here or those replay frames would be
+        // mistaken for duplicates and the queued turn's done could be lost.
         if (typeof data.eventEpoch === "string" && !this.cursor.epoch) {
-          this.cursor = { epoch: data.eventEpoch, lastSeq: data.currentSeq ?? 0 };
+          this.cursor = {
+            epoch: data.eventEpoch,
+            lastSeq: data.backlogPending === true ? 0 : (data.currentSeq ?? 0),
+          };
         }
         let workspaceScope: WorkspaceSessionScopeType | undefined;
         let workspaceCatalog: WorkspaceProjectCatalogEntryType[] | undefined;
@@ -366,10 +450,12 @@ export class ServerConnection {
             parsedScope.data.projectId !== data.projectId
           ) {
             this.activeWorkspaceScope = undefined;
+            this.sessionReady = false;
             this.handlers.onAgentEvent({
               type: "error",
               message: "Server returned an invalid workspace scope.",
             });
+            this.stopUnreadyConnection();
             return;
           }
           workspaceScope = parsedScope.data;
@@ -380,6 +466,7 @@ export class ServerConnection {
               type: "error",
               message: "Server returned an invalid workspace catalog.",
             });
+            this.stopUnreadyConnection();
             return;
           }
           workspaceCatalog = [];
@@ -390,13 +477,29 @@ export class ServerConnection {
                 type: "error",
                 message: "Server returned an invalid workspace catalog.",
               });
+              this.sessionReady = false;
+              this.stopUnreadyConnection();
               return;
             }
             workspaceCatalog.push(parsedEntry.data);
           }
         }
         this.activeWorkspaceScope = workspaceScope;
+        this.strictTurnCorrelation = data.turnCorrelationVersion === 1;
+        this.sessionReady = data.backlogPending !== true;
         this.handlers.onSession(data.sessionId, workspaceScope, workspaceCatalog);
+        if (this.sessionReady) this.handlers.onSessionReady?.(data.sessionId);
+        return;
+      }
+      case data.type === "session-ready": {
+        if (typeof data.eventEpoch === "string") {
+          if (!this.cursor.epoch) this.cursor.epoch = data.eventEpoch;
+          if (this.cursor.epoch === data.eventEpoch && typeof data.currentSeq === "number") {
+            this.cursor.lastSeq = Math.max(this.cursor.lastSeq, data.currentSeq);
+          }
+        }
+        this.sessionReady = true;
+        this.handlers.onSessionReady?.(data.sessionId);
         return;
       }
       case data.type === "resync-required": {
@@ -418,7 +521,7 @@ export class ServerConnection {
         data.type === "git-operation-result": {
         const resolver = data._reqId && this.resolvers.get(data._reqId);
         if (resolver) {
-          resolver(data);
+          resolver.resolve(data);
           this.resolvers.delete(data._reqId);
         }
         return;
@@ -427,7 +530,7 @@ export class ServerConnection {
       case data.type === "tool-result": {
         const resolver = data.callId && this.resolvers.get(data.callId);
         if (resolver) {
-          resolver(data.result);
+          resolver.resolve(data.result);
           this.resolvers.delete(data.callId);
           return;
         }
@@ -436,10 +539,11 @@ export class ServerConnection {
         return;
       }
       case data.type === "error": {
-        const resolver = data._reqId && this.resolvers.get(data._reqId);
+        const correlationId = data._reqId ?? data.callId ?? data.turnId;
+        const resolver = correlationId && this.resolvers.get(correlationId);
         if (resolver) {
-          resolver(data);
-          this.resolvers.delete(data._reqId);
+          resolver.reject(new Error(String(data.error ?? data.message ?? "Request failed")));
+          this.resolvers.delete(correlationId);
           return;
         }
         // D-P14-6 分流:AgentEvent 形态({message})原样进事件流,不再被
@@ -451,6 +555,7 @@ export class ServerConnection {
         }
         // 设备 token 被 daemon 拒绝:死 token 重试无意义,停止重连并提示重新配对
         if (typeof data.error === "string" && data.error.includes("Unauthorized")) {
+          this.sessionReady = false;
           this.shouldConnect = false;
           this.clearReconnect();
           this.handlers.onAuthError("设备未授权或配对已失效,请在设置中重新配对");
@@ -461,8 +566,27 @@ export class ServerConnection {
           }
           return;
         }
+        // A Relay socket can be open while the target daemon is unavailable. Closing it
+        // here re-runs init through the normal reconnect path instead of leaving the App
+        // permanently transport-open but session-unready.
+        const daemonOffline =
+          typeof data.error === "string" && data.error.includes("is not online");
+        if (daemonOffline) {
+          this.sessionReady = false;
+          try {
+            this.ws?.close();
+          } catch {
+            /* onclose owns reconnect scheduling */
+          }
+        }
         // 其余控制错误作为归一化 error 事件交给上层(字段名适配:出站 error 用 {error})
-        this.handlers.onAgentEvent({ type: "error", message: String(data.error ?? "unknown") });
+        this.handlers.onAgentEvent({
+          type: "error",
+          message: String(data.error ?? "unknown"),
+          code: "control-error",
+          ...(typeof data.turnId === "string" ? { turnId: data.turnId } : {}),
+        });
+        if (!daemonOffline && !this.sessionReady) this.stopUnreadyConnection();
         return;
       }
       case AGENT_EVENT_TYPES.has(data.type): {
@@ -496,14 +620,20 @@ export class ServerConnection {
         reject(new Error(`WebSocket not connected (${what})`));
         return;
       }
-      this.resolvers.set(key, resolve as (r: unknown) => void);
+      this.resolvers.set(key, {
+        resolve: resolve as (r: unknown) => void,
+        reject,
+      });
       setTimeout(() => {
         if (this.resolvers.has(key)) {
           this.resolvers.delete(key);
           reject(new Error(`${what} timed out`));
         }
       }, timeoutMs);
-      this.sendRaw(payload);
+      if (!this.sendRaw(payload)) {
+        this.resolvers.delete(key);
+        reject(new Error(`WebSocket send failed (${what})`));
+      }
     });
   }
 
@@ -601,11 +731,14 @@ export class ServerConnection {
     let secret = args.secret;
     let sealedSecret = args.sealedSecret;
     if (this.config.isRelayMode() && secret) {
-      if (sealedSecret) return Promise.reject(new Error("Provide either secret or sealedSecret, not both"));
+      if (sealedSecret)
+        return Promise.reject(new Error("Provide either secret or sealedSecret, not both"));
       const relay = this.config.getRelayOptions();
       if (!relay.publicKey || !relay.keyId) {
         return Promise.reject(
-          new Error("Paired daemon has no pinned encryption key; pair again before installing credentials")
+          new Error(
+            "Paired daemon has no pinned encryption key; pair again before installing credentials"
+          )
         );
       }
       sealedSecret = sealCredentialSecret(
@@ -621,7 +754,9 @@ export class ServerConnection {
         sealedSecret.profileId !== args.profile.id ||
         sealedSecret.origin !== args.profile.origin)
     ) {
-      return Promise.reject(new Error("Encrypted credential binding does not match the upsert request"));
+      return Promise.reject(
+        new Error("Encrypted credential binding does not match the upsert request")
+      );
     }
     return this.request(
       {

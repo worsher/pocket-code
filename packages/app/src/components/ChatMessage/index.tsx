@@ -33,20 +33,11 @@ function createRules(): RenderRules {
     fence: (node) => {
       const code = node.content || "";
       const language = (node as any).sourceInfo || "";
-      return (
-        <CodeBlock
-          key={node.key}
-          nodeKey={node.key}
-          code={code}
-          language={language}
-        />
-      );
+      return <CodeBlock key={node.key} nodeKey={node.key} code={code} language={language} />;
     },
     code_block: (node) => {
       const code = node.content || "";
-      return (
-        <CodeBlock key={node.key} nodeKey={node.key} code={code} />
-      );
+      return <CodeBlock key={node.key} nodeKey={node.key} code={code} />;
     },
   };
 }
@@ -79,10 +70,7 @@ function ToolCallView({ toolCall }: { toolCall: ToolCall }) {
   // Special rendering for runInBackground — show live streaming output
   if (toolCall.toolName === "runInBackground" && result?.processId != null) {
     return (
-      <ProcessOutput
-        processId={result.processId}
-        command={(toolCall.args as any).command || ""}
-      />
+      <ProcessOutput processId={result.processId} command={(toolCall.args as any).command || ""} />
     );
   }
 
@@ -117,12 +105,16 @@ function ToolCallView({ toolCall }: { toolCall: ToolCall }) {
   );
 }
 
-export default function ChatMessage({ message, streamingPhase, currentToolName, onEditResend }: ChatMessageProps) {
+export default function ChatMessage({
+  message,
+  streamingPhase,
+  currentToolName,
+  onEditResend,
+}: ChatMessageProps) {
   const isUser = message.role === "user";
   const [isExpanded, setIsExpanded] = useState(false);
   const [contentHeight, setContentHeight] = useState(0);
-  const shouldCollapse =
-    !isUser && contentHeight > COLLAPSE_HEIGHT && !isExpanded;
+  const shouldCollapse = !isUser && contentHeight > COLLAPSE_HEIGHT && !isExpanded;
 
   const handleLongPress = () => {
     if (!isUser || !onEditResend) return;
@@ -133,7 +125,7 @@ export default function ChatMessage({ message, streamingPhase, currentToolName, 
     if (Platform.OS === "ios") {
       ActionSheetIOS.showActionSheetWithOptions(
         { options, cancelButtonIndex: cancelIndex },
-        (buttonIndex) => handleAction(buttonIndex),
+        (buttonIndex) => handleAction(buttonIndex)
       );
     } else {
       Alert.alert("操作", undefined, [
@@ -156,7 +148,7 @@ export default function ChatMessage({ message, streamingPhase, currentToolName, 
               if (text?.trim()) onEditResend?.(message.id, text.trim());
             },
             "plain-text",
-            message.content,
+            message.content
           );
         } else {
           // Android doesn't support Alert.prompt, resend with original content
@@ -173,23 +165,14 @@ export default function ChatMessage({ message, streamingPhase, currentToolName, 
   };
 
   return (
-    <View
-      style={[
-        styles.container,
-        isUser ? styles.userContainer : styles.assistantContainer,
-      ]}
-    >
+    <View style={[styles.container, isUser ? styles.userContainer : styles.assistantContainer]}>
       <TouchableOpacity
         activeOpacity={isUser ? 0.7 : 1}
         onLongPress={handleLongPress}
         style={[styles.bubble, isUser ? styles.userBubble : styles.assistantBubble]}
       >
         <View
-          style={
-            shouldCollapse
-              ? { maxHeight: COLLAPSE_HEIGHT, overflow: "hidden" }
-              : undefined
-          }
+          style={shouldCollapse ? { maxHeight: COLLAPSE_HEIGHT, overflow: "hidden" } : undefined}
           onLayout={(e) => {
             if (!isExpanded && contentHeight === 0) {
               setContentHeight(e.nativeEvent.layout.height);
@@ -217,6 +200,11 @@ export default function ChatMessage({ message, streamingPhase, currentToolName, 
               <Text selectable style={styles.userText}>
                 {message.content || "..."}
               </Text>
+              {message.pending ? (
+                <Text style={[styles.userText, { opacity: 0.65, fontSize: 12 }]}>
+                  等待连接后发送
+                </Text>
+              ) : null}
             </>
           ) : (
             <>
@@ -231,22 +219,16 @@ export default function ChatMessage({ message, streamingPhase, currentToolName, 
                   {message.content}
                 </Markdown>
               ) : (
-                !message.toolCalls?.length && (
-                  streamingPhase ? (
-                    <StreamingIndicator
-                      phase={streamingPhase}
-                      toolName={currentToolName}
-                    />
-                  ) : (
-                    <Text style={[styles.userText, { color: "#8E8E93", fontStyle: "italic" }]}>
-                      [Empty response]
-                    </Text>
-                  )
-                )
+                !message.toolCalls?.length &&
+                (streamingPhase ? (
+                  <StreamingIndicator phase={streamingPhase} toolName={currentToolName} />
+                ) : message.pending ? null : (
+                  <Text style={[styles.userText, { color: "#8E8E93", fontStyle: "italic" }]}>
+                    [Empty response]
+                  </Text>
+                ))
               )}
-              {message.modelUsed && (
-                <Text style={styles.modelTag}>via {message.modelUsed}</Text>
-              )}
+              {message.modelUsed && <Text style={styles.modelTag}>via {message.modelUsed}</Text>}
             </>
           )}
           {message.toolCalls?.map((tc, i) => (
@@ -260,19 +242,13 @@ export default function ChatMessage({ message, streamingPhase, currentToolName, 
         {shouldCollapse && (
           <>
             <View style={styles.fadeOverlay} />
-            <TouchableOpacity
-              style={styles.expandButton}
-              onPress={() => setIsExpanded(true)}
-            >
+            <TouchableOpacity style={styles.expandButton} onPress={() => setIsExpanded(true)}>
               <Text style={styles.expandButtonText}>展开全文 ▼</Text>
             </TouchableOpacity>
           </>
         )}
         {isExpanded && contentHeight > COLLAPSE_HEIGHT && (
-          <TouchableOpacity
-            style={styles.expandButton}
-            onPress={() => setIsExpanded(false)}
-          >
+          <TouchableOpacity style={styles.expandButton} onPress={() => setIsExpanded(false)}>
             <Text style={styles.expandButtonText}>收起 ▲</Text>
           </TouchableOpacity>
         )}

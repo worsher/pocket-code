@@ -53,7 +53,8 @@ export class WebAgentStore {
       },
       onAuth: () => {}, // LAN 匿名注册返回的 token 由 ServerConnection 自己回发 init
       onSession: (sessionId) => this.setState({ sessionId }),
-      onConnected: () => this.setState({ connected: true, authError: null }),
+      onSessionReady: () => this.setState({ connected: true }),
+      onConnected: () => this.setState({ connected: false, authError: null }),
       onDisconnected: () => this.setState({ connected: false }),
       onAuthError: (message) => this.setState({ authError: message }),
       onFileChanged: () => {}, // Files 页手动刷新,MVP 不做推送联动
@@ -80,9 +81,17 @@ export class WebAgentStore {
 
   sendMessage(content: string): void {
     const now = Date.now();
-    const user: Message = { id: `u_${now}`, role: "user", content, timestamp: now };
-    const pending: Message = { id: `a_${now}`, role: "assistant", content: "", timestamp: now, pending: true };
-    const sent = this.conn.sendRaw({ type: "message", content });
+    const turnId = `turn_${globalThis.crypto.randomUUID()}`;
+    const user: Message = { id: `u_${turnId}`, turnId, role: "user", content, timestamp: now };
+    const pending: Message = {
+      id: `a_${turnId}`,
+      turnId,
+      role: "assistant",
+      content: "",
+      timestamp: now,
+      pending: true,
+    };
+    const sent = this.conn.isReady && this.conn.sendRaw({ type: "message", turnId, content });
     if (!sent) {
       this.setState({
         messages: [

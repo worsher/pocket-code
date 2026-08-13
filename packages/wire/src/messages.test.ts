@@ -19,6 +19,22 @@ describe("wire — WsMessage validation", () => {
     expect(result.success).toBe(true);
   });
 
+  it("init accepts an optional active turn id and kind for reconnect correlation", () => {
+    const result = WsMessage.safeParse({
+      type: "init",
+      sessionId: "s1",
+      activeTurnId: "turn-reconnecting",
+      activeTurnKind: "goal",
+    });
+    expect(result.success && result.data.type === "init" && result.data.activeTurnId).toBe(
+      "turn-reconnecting"
+    );
+    expect(result.success && result.data.type === "init" && result.data.activeTurnKind).toBe(
+      "goal"
+    );
+    expect(WsMessage.safeParse({ type: "init", activeTurnKind: "unknown" }).success).toBe(false);
+  });
+
   it("carries only the bound Git credential profile ID in init", () => {
     const result = WsMessage.safeParse({
       type: "init",
@@ -66,6 +82,7 @@ describe("wire — WsMessage validation", () => {
   it("goal-create / goal-control round-trip (P16)", () => {
     const create = WsMessage.safeParse({
       type: "goal-create",
+      turnId: "goal-turn-1",
       content: "清零 lint 错误",
       acceptance: "pnpm lint 通过",
       replace: null,
@@ -74,13 +91,20 @@ describe("wire — WsMessage validation", () => {
     expect(create.success).toBe(true);
     expect(create.success && (create.data as any).replace).toBeUndefined();
     expect(create.success && (create.data as any).maxTurns).toBe(30);
+    expect(create.success && (create.data as any).turnId).toBe("goal-turn-1");
     expect(WsMessage.safeParse({ type: "goal-create", content: "" }).success).toBe(false);
     expect(WsMessage.safeParse({ type: "goal-create", content: "x", maxTurns: 0 }).success).toBe(
       false
     );
 
     expect(WsMessage.safeParse({ type: "goal-control", action: "pause" }).success).toBe(true);
-    expect(WsMessage.safeParse({ type: "goal-control", action: "resume" }).success).toBe(true);
+    expect(
+      WsMessage.safeParse({
+        type: "goal-control",
+        action: "resume",
+        turnId: "turn-resume-1",
+      }).success
+    ).toBe(true);
     expect(WsMessage.safeParse({ type: "goal-control", action: "cancel" }).success).toBe(true);
     expect(WsMessage.safeParse({ type: "goal-control", action: "stop" }).success).toBe(false);
   });
@@ -101,6 +125,31 @@ describe("wire — WsMessage validation", () => {
       images: [{ base64: "abc", mimeType: "image/png" }],
     });
     expect(result.success).toBe(true);
+  });
+
+  it("message accepts an optional turnId and normalizes null for mixed versions", () => {
+    const correlated = WsMessage.safeParse({
+      type: "message",
+      turnId: "turn-123",
+      content: "hello",
+    });
+    expect(correlated.success).toBe(true);
+    expect(correlated.success && correlated.data.type === "message" && correlated.data.turnId).toBe(
+      "turn-123"
+    );
+
+    const legacy = WsMessage.safeParse({ type: "message", content: "hello" });
+    expect(legacy.success).toBe(true);
+    const nullable = WsMessage.safeParse({ type: "message", turnId: null, content: "hello" });
+    expect(
+      nullable.success && nullable.data.type === "message" && nullable.data.turnId
+    ).toBeUndefined();
+    expect(WsMessage.safeParse({ type: "message", turnId: "", content: "hello" }).success).toBe(
+      false
+    );
+    expect(
+      WsMessage.safeParse({ type: "message", turnId: "x".repeat(129), content: "hello" }).success
+    ).toBe(false);
   });
 
   it("should accept valid abort message", () => {

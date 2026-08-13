@@ -16,7 +16,10 @@ describe("RelayClient", () => {
       FakeWebSocket.instances.push(this);
     }
 
-    send() {}
+    sent: string[] = [];
+    send(data: string) {
+      this.sent.push(data);
+    }
     close() {}
   }
 
@@ -59,6 +62,59 @@ describe("RelayClient", () => {
     expect(openedUrls()).toEqual(["wss://aigc.zj.cn/relay"]);
   });
 
+  it("uses turnId as the Relay request id so reconnects can rebind the stream", () => {
+    const client = makeClient("wss://aigc.zj.cn/relay");
+    client.connect();
+    const socket = FakeWebSocket.instances[0];
+    socket.readyState = FakeWebSocket.OPEN;
+    expect(
+      client.send(JSON.stringify({ type: "message", turnId: "turn-1", content: "hello" }))
+    ).toBe(true);
+    expect(JSON.parse(socket.sent[0]).requestId).toBe("turn-1");
+
+    expect(
+      client.send(
+        JSON.stringify({ type: "goal-control", action: "resume", turnId: "turn-goal-resume" })
+      )
+    ).toBe(true);
+    expect(JSON.parse(socket.sent[1]).requestId).toBe("turn-goal-resume");
+  });
+
+  it("reports unsent envelopes instead of silently accepting them", () => {
+    const unpaired = makeClient("wss://aigc.zj.cn/relay", "");
+    unpaired.connect();
+    const socket = FakeWebSocket.instances[0];
+    socket.readyState = FakeWebSocket.OPEN;
+    expect(unpaired.send(JSON.stringify({ type: "message", content: "hello" }))).toBe(false);
+
+    const paired = makeClient("wss://aigc.zj.cn/relay");
+    paired.connect();
+    const throwingSocket = FakeWebSocket.instances[1];
+    throwingSocket.readyState = FakeWebSocket.OPEN;
+    throwingSocket.send = () => {
+      throw new Error("write failed");
+    };
+    expect(paired.send(JSON.stringify({ type: "message", content: "hello" }))).toBe(false);
+  });
+
+  it("correlates Relay control errors back to the originating turn", () => {
+    const client = makeClient("wss://aigc.zj.cn/relay");
+    const received: any[] = [];
+    client.onmessage = (event) => received.push(JSON.parse(event.data));
+    client.connect();
+    const socket = FakeWebSocket.instances[0];
+    socket.onmessage?.({
+      data: JSON.stringify({
+        type: "relay-response",
+        requestId: "turn-1",
+        payload: { type: "error", error: "Daemon m_1 is not online." },
+      }),
+    });
+    expect(received).toEqual([
+      { type: "error", error: "Daemon m_1 is not online.", turnId: "turn-1" },
+    ]);
+  });
+
   it("rejects pending pairing when relay returns an error", async () => {
     vi.useFakeTimers();
     const client = makeClient("wss://aigc.zj.cn/relay", "");
@@ -68,7 +124,9 @@ describe("RelayClient", () => {
     socket.readyState = FakeWebSocket.OPEN;
     const pairing = client.pairDevice("ABCD2345");
     const assertion = expect(pairing).rejects.toThrow("Invalid message: pair-request");
-    socket.onmessage?.({ data: JSON.stringify({ type: "error", error: "Invalid message: pair-request" }) });
+    socket.onmessage?.({
+      data: JSON.stringify({ type: "error", error: "Invalid message: pair-request" }),
+    });
 
     await assertion;
   });

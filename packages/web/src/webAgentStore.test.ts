@@ -50,11 +50,16 @@ describe("WebAgentStore", () => {
     store.connect();
     const ws = FakeWebSocket.instances[0];
     ws.open();
+    expect(store.getState().connected).toBe(false);
+    ws.receive({ type: "session", sessionId: "s_1", backlogPending: true });
+    expect(store.getState().connected).toBe(false);
+    ws.receive({ type: "session-ready", sessionId: "s_1" });
     expect(store.getState().connected).toBe(true);
 
     store.sendMessage("改一下 README");
     const outbound = JSON.parse(ws.sent.at(-1)!);
     expect(outbound).toMatchObject({ type: "message", content: "改一下 README" });
+    expect(outbound.turnId).toMatch(/^turn_/);
     expect(store.getState().messages).toHaveLength(2); // user + pending assistant
 
     ws.receive({ type: "text-delta", text: "好的" });

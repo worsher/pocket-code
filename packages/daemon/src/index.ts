@@ -169,6 +169,7 @@ const deviceHandlers = new Map<string, DeviceHandlerEntry>();
 const requestCorrelation = new RequestCorrelationContext();
 
 const TERMINAL_CONTROL_RESPONSES = new Set([
+  "session-ready",
   "git-credential-result",
   "git-operation-result",
   "workspace-import-result",
@@ -271,9 +272,7 @@ function handleRelayMessage(msg: DaemonInboundType) {
         const sendFn = (data: ServerOutboundType) => {
           const correlatedRequestId = requestCorrelation.current(newEntry.lastRequestId);
           connection.send({
-            type: TERMINAL_CONTROL_RESPONSES.has(data.type)
-              ? "forward-response"
-              : "forward-stream",
+            type: TERMINAL_CONTROL_RESPONSES.has(data.type) ? "forward-response" : "forward-stream",
             requestId: correlatedRequestId,
             payload: data,
           });

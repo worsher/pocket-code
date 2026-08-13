@@ -4,7 +4,14 @@ import { ServerOutbound, SessionMsg } from "./serverOutbound.js";
 describe("ServerOutbound", () => {
   const valid: unknown[] = [
     { type: "auth", token: "jwt", userId: "u1" },
-    { type: "session", sessionId: "s1", projectId: "p1", workspace: "/w" },
+    {
+      type: "session",
+      sessionId: "s1",
+      projectId: "p1",
+      workspace: "/w",
+      turnCorrelationVersion: 1,
+    },
+    { type: "session-ready", sessionId: "s1", eventEpoch: "ep_1", currentSeq: 3 },
     { type: "quota", userId: "u1", tier: "free", limits: {}, usage: {} },
     { type: "file-list", path: ".", _reqId: "r1", success: true, items: [] },
     { type: "file-content", path: "a.ts", success: true, content: "x" },
@@ -132,6 +139,7 @@ describe("ServerOutbound", () => {
         workspace: "/w",
         eventEpoch: "ep_1",
         currentSeq: 9,
+        backlogPending: true,
       }).success
     ).toBe(true);
     const resync = {

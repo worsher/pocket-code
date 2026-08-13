@@ -22,6 +22,8 @@ export interface ToolCall {
 
 export interface Message {
   id: string;
+  /** Correlates the user/assistant pair with streamed events for one turn. */
+  turnId?: string;
   role: "user" | "assistant";
   content: string;
   thinking?: string;
@@ -32,34 +34,62 @@ export interface Message {
   modelUsed?: string;
 }
 
-/** 更新末尾 assistant 消息;末尾不是 assistant 则原样返回。 */
-function updateLastAssistant(
+/**
+ * 有 turnId 时只更新对应 assistant；无 turnId 时回退更新末尾 assistant，
+ * 保持旧 server / geek 路径兼容。带 turnId 但找不到匹配时不得污染其他 turn。
+ */
+function updateAssistant(
   messages: Message[],
+  turnId: string | undefined,
   update: (m: Message) => Message
 ): Message[] {
-  const last = messages[messages.length - 1];
-  if (!last || last.role !== "assistant") return messages;
-  const updated = update(last);
+  let index = messages.length - 1;
+  if (turnId !== undefined) {
+    while (
+      index >= 0 &&
+      (messages[index].role !== "assistant" || messages[index].turnId !== turnId)
+    ) {
+      index--;
+    }
+  }
+  const target = messages[index];
+  if (!target || target.role !== "assistant") return messages;
+  const updated = update(target);
   // 若 update 返回原引用(无变化),直接返回原数组
-  if (updated === last) return messages;
-  const next = messages.slice(0, -1);
-  next.push(updated);
+  if (updated === target) return messages;
+  const next = messages.slice();
+  next[index] = updated;
   return next;
 }
 
 export function applyAgentEvent(messages: Message[], ev: AgentEventType): Message[] {
   switch (ev.type) {
-    case "text-delta":
-      return updateLastAssistant(messages, (m) => ({ ...m, content: m.content + ev.text }));
-    case "reasoning-delta":
-      return updateLastAssistant(messages, (m) => ({ ...m, thinking: (m.thinking || "") + ev.text }));
-    case "tool-call":
-      return updateLastAssistant(messages, (m) => ({
+    case "turn-replay-reset":
+      return updateAssistant(messages, ev.turnId, (m) => ({
         ...m,
-        toolCalls: [...(m.toolCalls || []), { callId: ev.callId, toolName: ev.name, args: ev.args }],
+        content: "",
+        thinking: undefined,
+        toolCalls: [],
+        modelUsed: undefined,
+        pending: false,
+      }));
+    case "text-delta":
+      return updateAssistant(messages, ev.turnId, (m) => ({ ...m, content: m.content + ev.text }));
+    case "reasoning-delta":
+      return updateAssistant(messages, ev.turnId, (m) => ({
+        ...m,
+        thinking: (m.thinking || "") + ev.text,
+      }));
+    case "tool-call":
+      return updateAssistant(messages, ev.turnId, (m) => ({
+        ...m,
+        toolCalls: [
+          ...(m.toolCalls || []),
+          { callId: ev.callId, toolName: ev.name, args: ev.args },
+        ],
       }));
     case "tool-result":
-      return updateLastAssistant(messages, (m) => {
+      return updateAssistant(messages, ev.turnId, (m) => {
         const toolCalls = [...(m.toolCalls || [])];
         // callId 精确配对;找不到再回退"首个未完成"(兼容合成/缺失 callId)
         let idx = toolCalls.findIndex((t) => t.callId === ev.callId && t.result === undefined);
@@ -69,9 +99,12 @@ export function applyAgentEvent(messages: Message[], ev: AgentEventType): Messag
         return { ...m, toolCalls };
       });
     case "model-selected":
-      return updateLastAssistant(messages, (m) => ({ ...m, modelUsed: ev.modelKey }));
+      return updateAssistant(messages, ev.turnId, (m) => ({ ...m, modelUsed: ev.modelKey }));
     case "error":
-      return updateLastAssistant(messages, (m) => ({ ...m, content: m.content + `\n\nError: ${ev.message}` }));
+      return updateAssistant(messages, ev.turnId, (m) => ({
+        ...m,
+        content: m.content + `\n\nError: ${ev.message}`,
+      }));
     // usage/done/file-changed/command-output/process-*/preview-available:
     // 无消息列表内的 UI 消费者(done 的副作用在 hook 层),显式忽略。
     default:
@@ -126,6 +159,10 @@ export function storedToCoreMessages(stored: StoredMessage[]): CoreMessage[] {
   const result: CoreMessage[] = [];
 
   stored.forEach((msg, index) => {
+    // Offline turns live in the durable queue until acknowledged. They must not
+    // enter a local model's conversation history merely because their pending
+    // UI bubbles were persisted with the session.
+    if (msg.pending) return;
     if (msg.role === "user") {
       if (msg.images && msg.images.length > 0) {
         result.push({

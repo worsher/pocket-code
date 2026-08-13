@@ -39,7 +39,10 @@ export interface PairDeviceResult {
  */
 export class RelayClient {
   private ws: WebSocket | null = null;
-  private pendingRequests = new Map<string, { resolve: (val: any) => void; reject: (err: any) => void }>();
+  private pendingRequests = new Map<
+    string,
+    { resolve: (val: any) => void; reject: (err: any) => void }
+  >();
 
   public onopen?: () => void;
   public onmessage?: (event: { data: string }) => void;
@@ -73,7 +76,14 @@ export class RelayClient {
           case "relay-response":
           case "relay-stream": {
             // Unpack and emit as though it was a direct message
-            this.onmessage?.({ data: JSON.stringify(raw.payload) });
+            const payload = raw.payload as Record<string, unknown>;
+            const correlatedPayload =
+              payload?.type === "error" &&
+              typeof payload.error === "string" &&
+              payload.turnId === undefined
+                ? { ...payload, turnId: raw.requestId }
+                : payload;
+            this.onmessage?.({ data: JSON.stringify(correlatedPayload) });
             break;
           }
 
@@ -146,15 +156,15 @@ export class RelayClient {
   /**
    * Transparently wrap the business message in a RelayEnvelope and send it.
    */
-  public send(data: string) {
+  public send(data: string): boolean {
     if (!this.ws || this.ws.readyState !== WebSocket.OPEN) {
       console.warn("[RelayClient] Cannot send: socket not open");
-      return;
+      return false;
     }
 
     if (!this.opts.token || !this.opts.machineId) {
       console.error("[RelayClient] Cannot send: missing token or machineId. Must pair first.");
-      return;
+      return false;
     }
 
     try {
@@ -162,7 +172,12 @@ export class RelayClient {
 
       // Use the requestId from the payload if it has one (like tool-exec),
       // otherwise generate a transient one for tracking.
-      const requestId = payload.callId || payload._reqId || `req_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+      const requestId =
+        payload.turnId ||
+        payload.activeTurnId ||
+        payload.callId ||
+        payload._reqId ||
+        `req_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
 
       const envelope = {
         type: "relay-request",
@@ -173,8 +188,10 @@ export class RelayClient {
       };
 
       this.ws.send(JSON.stringify(envelope));
+      return true;
     } catch (err) {
       console.error("[RelayClient] Failed to prepare envelope:", err);
+      return false;
     }
   }
 
@@ -218,13 +235,15 @@ export class RelayClient {
         }
       }, 10000);
 
-      this.ws.send(JSON.stringify({
-        type: "pair-request",
-        pairingCode,
-        deviceId: this.opts.deviceId,
-        deviceName: this.opts.deviceName,
-        machineId: targetMachineId,
-      }));
+      this.ws.send(
+        JSON.stringify({
+          type: "pair-request",
+          pairingCode,
+          deviceId: this.opts.deviceId,
+          deviceName: this.opts.deviceName,
+          machineId: targetMachineId,
+        })
+      );
     });
   }
 
@@ -239,11 +258,16 @@ export class RelayClient {
     if (!response.success) return;
     const hasPublicKey = typeof response.publicKey === "string" && response.publicKey.length > 0;
     const hasKeyId = typeof response.keyId === "string" && response.keyId.length > 0;
-    if (hasPublicKey !== hasKeyId) throw new Error("Daemon returned incomplete encryption key metadata");
+    if (hasPublicKey !== hasKeyId)
+      throw new Error("Daemon returned incomplete encryption key metadata");
 
     const pinned = this.opts.pinnedEncryptionKey;
     if (pinned) {
-      if (!hasPublicKey || pinned.keyId !== response.keyId || pinned.publicKey !== response.publicKey) {
+      if (
+        !hasPublicKey ||
+        pinned.keyId !== response.keyId ||
+        pinned.publicKey !== response.publicKey
+      ) {
         throw new Error("Daemon encryption key changed; remove the pinned device and pair again");
       }
       return;

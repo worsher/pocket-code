@@ -105,6 +105,37 @@ export async function initDb(): Promise<void> {
   }
   db.run(`CREATE INDEX IF NOT EXISTS idx_sessions_project ON sessions(project_id);`);
 
+  // Durable idempotency journal for client-generated chat turn IDs. A row is
+  // persisted as "running" before the agent is invoked, so a process restart
+  // never guesses that an uncertain turn is safe to execute again. Completed
+  // rows retain the normalized AgentEvent payloads for exact logical replay.
+  db.run(`
+    CREATE TABLE IF NOT EXISTS turn_journal (
+      session_id TEXT NOT NULL,
+      turn_id TEXT NOT NULL,
+      request_hash TEXT NOT NULL,
+      status TEXT NOT NULL CHECK (status IN ('running', 'completed')),
+      claim_token TEXT NOT NULL,
+      events_json TEXT NOT NULL DEFAULT '[]',
+      created_at INTEGER NOT NULL,
+      updated_at INTEGER NOT NULL,
+      completed_at INTEGER,
+      PRIMARY KEY (session_id, turn_id)
+    );
+  `);
+  db.run(`CREATE INDEX IF NOT EXISTS idx_turn_journal_updated
+          ON turn_journal(status, updated_at);`);
+
+  // Completed turns are retained long enough to cover delayed mobile/offline
+  // retries while keeping the database bounded. Never automatically delete a
+  // running row: it represents an uncertain side-effect boundary and must keep
+  // blocking re-execution until an operator deliberately resolves it.
+  db.run(
+    `DELETE FROM turn_journal
+     WHERE status = 'completed' AND updated_at < ?`,
+    [Date.now() - 30 * 24 * 60 * 60 * 1000]
+  );
+
   // Workspace Storage v2 catalog. Physical storage keys are random and scoped
   // by the (user_id, project_id) catalog row; client IDs never become paths.
   db.run(`
@@ -237,7 +268,175 @@ export interface WorkspaceImportSourceRecord {
   writeBackPolicy: "explicit" | "linked" | "git";
 }
 
+export type TurnJournalStatus = "running" | "completed";
+
+export interface TurnJournalRecord<TEvent = unknown> {
+  sessionId: string;
+  turnId: string;
+  requestHash: string;
+  status: TurnJournalStatus;
+  events: TEvent[];
+  createdAt: number;
+  updatedAt: number;
+  completedAt?: number;
+}
+
+export type TurnJournalClaim<TEvent = unknown> =
+  | { kind: "claimed"; claimToken: string }
+  | { kind: "running" }
+  | { kind: "completed"; events: TEvent[] }
+  | { kind: "conflict" };
+
+function parseTurnJournalEvents<TEvent>(value: unknown): TEvent[] {
+  if (typeof value !== "string") throw new Error("Turn journal events are unreadable");
+  const parsed = JSON.parse(value) as unknown;
+  if (!Array.isArray(parsed)) throw new Error("Turn journal events are not an array");
+  return parsed as TEvent[];
+}
+
+function readTurnJournalRow<TEvent>(
+  sessionId: string,
+  turnId: string
+): TurnJournalRecord<TEvent> | null {
+  const stmt = db.prepare(
+    `SELECT session_id, turn_id, request_hash, status, events_json,
+            created_at, updated_at, completed_at
+     FROM turn_journal
+     WHERE session_id = ? AND turn_id = ?`
+  );
+  stmt.bind([sessionId, turnId]);
+  if (!stmt.step()) {
+    stmt.free();
+    return null;
+  }
+  const row = stmt.getAsObject();
+  stmt.free();
+  return {
+    sessionId: row.session_id as string,
+    turnId: row.turn_id as string,
+    requestHash: row.request_hash as string,
+    status: row.status as TurnJournalStatus,
+    events: parseTurnJournalEvents<TEvent>(row.events_json),
+    createdAt: row.created_at as number,
+    updatedAt: row.updated_at as number,
+    completedAt: typeof row.completed_at === "number" ? (row.completed_at as number) : undefined,
+  };
+}
+
 // ── Public API ──────────────────────────────────────────
+
+/**
+ * Atomically claims a stable client turn ID in this database instance.
+ *
+ * A pre-existing running row is intentionally never reclaimed automatically:
+ * after a crash the server cannot know which tools already produced external
+ * side effects. The caller must return a terminal error instead of running the
+ * agent again.
+ */
+export function claimTurnJournal<TEvent = unknown>(args: {
+  sessionId: string;
+  turnId: string;
+  requestHash: string;
+  now?: number;
+  claimTokenFactory?: () => string;
+}): TurnJournalClaim<TEvent> {
+  const existing = readTurnJournalRow<TEvent>(args.sessionId, args.turnId);
+  if (existing) {
+    if (existing.requestHash !== args.requestHash) return { kind: "conflict" };
+    return existing.status === "completed"
+      ? { kind: "completed", events: existing.events }
+      : { kind: "running" };
+  }
+
+  const now = args.now ?? Date.now();
+  const claimToken = (args.claimTokenFactory ?? randomUUID)();
+  db.run(
+    `INSERT INTO turn_journal
+       (session_id, turn_id, request_hash, status, claim_token, events_json,
+        created_at, updated_at, completed_at)
+     VALUES (?, ?, ?, 'running', ?, '[]', ?, ?, NULL)`,
+    [args.sessionId, args.turnId, args.requestHash, claimToken, now, now]
+  );
+  try {
+    persist();
+  } catch (error) {
+    // atomicWriteFileSync only replaces a target after its temporary file is
+    // completely written. Therefore a thrown persist means neither the
+    // backup failure nor the primary failure made this claim durable. Keep
+    // the in-memory database aligned with the still-old on-disk database.
+    db.run(
+      `DELETE FROM turn_journal
+       WHERE session_id = ? AND turn_id = ? AND request_hash = ?
+         AND claim_token = ? AND status = 'running'`,
+      [args.sessionId, args.turnId, args.requestHash, claimToken]
+    );
+    throw error;
+  }
+  return { kind: "claimed", claimToken };
+}
+
+/** Completes only the exact claim that created the running row. */
+export function completeTurnJournal<TEvent = unknown>(args: {
+  sessionId: string;
+  turnId: string;
+  requestHash: string;
+  claimToken: string;
+  events: TEvent[];
+  now?: number;
+}): boolean {
+  const now = args.now ?? Date.now();
+  const eventsJson = JSON.stringify(args.events);
+  db.run(
+    `UPDATE turn_journal
+     SET status = 'completed', events_json = ?, updated_at = ?, completed_at = ?
+     WHERE session_id = ? AND turn_id = ? AND request_hash = ?
+       AND claim_token = ? AND status = 'running'`,
+    [eventsJson, now, now, args.sessionId, args.turnId, args.requestHash, args.claimToken]
+  );
+  if (db.getRowsModified() !== 1) return false;
+  try {
+    persist();
+  } catch (error) {
+    // Completion is allowed only from the pristine running claim. If the
+    // durable write fails, restore that exact claim in memory so a retry is
+    // still treated as uncertain/running just as it is on disk.
+    db.run(
+      `UPDATE turn_journal
+       SET status = 'running', events_json = '[]',
+           updated_at = created_at, completed_at = NULL
+       WHERE session_id = ? AND turn_id = ? AND request_hash = ?
+         AND claim_token = ? AND status = 'completed' AND updated_at = ?`,
+      [args.sessionId, args.turnId, args.requestHash, args.claimToken, now]
+    );
+    throw error;
+  }
+  return true;
+}
+
+export function readTurnJournal<TEvent = unknown>(
+  sessionId: string,
+  turnId: string
+): TurnJournalRecord<TEvent> | null {
+  return readTurnJournalRow<TEvent>(sessionId, turnId);
+}
+
+/**
+ * Prune only completed rows. Running rows are uncertain side-effect markers
+ * and are deliberately retained until their owning session is explicitly
+ * deleted.
+ */
+export function cleanupTurnJournal(
+  completedBefore: number = Date.now() - 30 * 24 * 60 * 60 * 1000
+): number {
+  db.run(
+    `DELETE FROM turn_journal
+     WHERE status = 'completed' AND updated_at < ?`,
+    [completedBefore]
+  );
+  const changes = db.getRowsModified();
+  if (changes > 0) persist();
+  return changes;
+}
 
 /** Save or update a session */
 export function saveSession(
@@ -288,13 +487,53 @@ export function getSession(sessionId: string): SessionRecord | null {
   };
 }
 
-/** P16:落盘 goal 状态(null = 清除)。session 行不存在时为 no-op。 */
-export function saveSessionGoal(sessionId: string, goalJson: string | null): void {
-  db.run("UPDATE sessions SET goal_json = ?, updated_at = ? WHERE session_id = ?", [
-    goalJson,
-    Date.now(),
-    sessionId,
-  ]);
+/**
+ * P16: persist goal state (null clears it). Goal creation may be the first
+ * operation in a brand-new session, so an optional seed makes that boundary an
+ * INSERT/UPDATE instead of silently updating zero rows.
+ */
+export function saveSessionGoal(
+  sessionId: string,
+  goalJson: string | null,
+  seed?: {
+    userId: string;
+    projectId: string;
+    messages: CoreMessage[];
+    modelKey: string;
+  }
+): void {
+  const now = Date.now();
+  if (seed) {
+    const firstUserMsg = seed.messages.find((message) => message.role === "user");
+    const title =
+      typeof firstUserMsg?.content === "string" ? firstUserMsg.content.slice(0, 50) : "";
+    db.run(
+      `INSERT INTO sessions
+         (session_id, user_id, project_id, title, messages, model_key,
+          goal_json, created_at, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+       ON CONFLICT(session_id) DO UPDATE SET
+         goal_json = excluded.goal_json,
+         updated_at = excluded.updated_at`,
+      [
+        sessionId,
+        seed.userId,
+        seed.projectId,
+        title,
+        JSON.stringify(seed.messages),
+        seed.modelKey,
+        goalJson,
+        now,
+        now,
+      ]
+    );
+  } else {
+    db.run("UPDATE sessions SET goal_json = ?, updated_at = ? WHERE session_id = ?", [
+      goalJson,
+      now,
+      sessionId,
+    ]);
+  }
   persist();
 }
 
@@ -342,11 +581,13 @@ export function listUserSessions(
 
 /** Delete a session */
 export function deleteSession(sessionId: string, userId: string): boolean {
-  const before = db.getRowsModified();
   db.run("DELETE FROM sessions WHERE session_id = ? AND user_id = ?", [sessionId, userId]);
-  const after = db.getRowsModified();
-  if (after > 0) persist();
-  return after > 0;
+  const deleted = db.getRowsModified() > 0;
+  if (deleted) {
+    db.run("DELETE FROM turn_journal WHERE session_id = ?", [sessionId]);
+    persist();
+  }
+  return deleted;
 }
 
 /** Clean up old sessions (default: 7 days) */
@@ -354,7 +595,10 @@ export function cleanupOldSessions(maxAgeDays: number = 7): number {
   const cutoff = Date.now() - maxAgeDays * 24 * 60 * 60 * 1000;
   db.run("DELETE FROM sessions WHERE updated_at < ?", [cutoff]);
   const changes = db.getRowsModified();
-  if (changes > 0) persist();
+  if (changes > 0) {
+    db.run("DELETE FROM turn_journal WHERE session_id NOT IN (SELECT session_id FROM sessions)");
+    persist();
+  }
   return changes;
 }
 

@@ -10,16 +10,37 @@ import {
   type WorkspaceScope,
   type WorkspaceScopeInput,
 } from "@pocket-code/workspace-core";
+import type { StoredImageAttachment } from "@pocket-code/client-core";
 
 const QUEUE_KEY = "pocket-code:offline-queue";
 const QUARANTINE_KEY = "pocket-code:offline-queue:quarantine";
+let queueWriteTail: Promise<void> = Promise.resolve();
+
+function enqueueQueueWrite<T>(task: () => Promise<T>): Promise<T> {
+  const run = queueWriteTail.catch(() => undefined).then(task);
+  queueWriteTail = run.then(
+    () => undefined,
+    () => undefined
+  );
+  return run;
+}
 
 export interface QueuedMessage {
   id: string;
   scope: WorkspaceScope;
+  /** Remote route that accepted this turn. Prevents replay into another authority. */
+  connectionKey?: string;
+  /** Server catalog identity for an already-authoritative replica. */
+  authorityId?: string;
   content: string;
+  images?: StoredImageAttachment[];
+  model?: string;
+  customPrompt?: string;
+  rewindTo?: number;
   timestamp: number;
   retries: number;
+  /** Kept for manual recovery, but excluded from automatic replay. */
+  blockedReason?: string;
   /** Awaiting the first authoritative remote replica acknowledgement. */
   provisional: boolean;
 }
@@ -49,9 +70,23 @@ function parseQueuedMessage(value: unknown): QueuedMessage | null {
     return {
       id: candidate.id,
       scope,
+      connectionKey:
+        typeof candidate.connectionKey === "string" ? candidate.connectionKey : undefined,
+      authorityId: typeof candidate.authorityId === "string" ? candidate.authorityId : undefined,
       content: candidate.content,
+      images: Array.isArray(candidate.images)
+        ? (candidate.images as StoredImageAttachment[])
+        : undefined,
+      model: typeof candidate.model === "string" ? candidate.model : undefined,
+      customPrompt: typeof candidate.customPrompt === "string" ? candidate.customPrompt : undefined,
+      rewindTo:
+        typeof candidate.rewindTo === "number" && Number.isInteger(candidate.rewindTo)
+          ? candidate.rewindTo
+          : undefined,
       timestamp: candidate.timestamp,
       retries: candidate.retries,
+      blockedReason:
+        typeof candidate.blockedReason === "string" ? candidate.blockedReason : undefined,
       // Records written before this field existed were already authoritative.
       provisional: candidate.provisional === true,
     };
@@ -72,7 +107,7 @@ async function quarantine(values: unknown[]): Promise<void> {
   }
   await AsyncStorage.setItem(
     QUARANTINE_KEY,
-    JSON.stringify([...existing, ...values.map((value) => ({ value, quarantinedAt: Date.now() }))]),
+    JSON.stringify([...existing, ...values.map((value) => ({ value, quarantinedAt: Date.now() }))])
   );
 }
 
@@ -80,21 +115,41 @@ async function quarantine(values: unknown[]): Promise<void> {
 export async function enqueueMessage(
   scopeInput: WorkspaceScopeInput,
   content: string,
-  options?: { provisional?: boolean },
+  options?: {
+    /** Stable turn id when a live submission is durably queued before transport send. */
+    id?: string;
+    provisional?: boolean;
+    connectionKey?: string;
+    authorityId?: string;
+    images?: StoredImageAttachment[];
+    model?: string;
+    customPrompt?: string;
+    rewindTo?: number;
+  }
 ): Promise<QueuedMessage> {
   const msg: QueuedMessage = {
-    id: `offline_${randomUUID()}`,
+    id: options?.id ?? `offline_${randomUUID()}`,
     scope: createWorkspaceScope(scopeInput),
+    connectionKey: options?.connectionKey,
+    authorityId: options?.authorityId,
     content,
+    images: options?.images,
+    model: options?.model,
+    customPrompt: options?.customPrompt,
+    rewindTo: options?.rewindTo,
     timestamp: Date.now(),
     retries: 0,
     provisional: options?.provisional === true,
   };
 
-  const queue = await getQueue();
-  queue.push(msg);
-  await saveQueue(queue);
-  return msg;
+  return enqueueQueueWrite(async () => {
+    const queue = await readQueue();
+    const existingIndex = queue.findIndex((message) => message.id === msg.id);
+    if (existingIndex === -1) queue.push(msg);
+    else queue[existingIndex] = { ...queue[existingIndex], ...msg };
+    await saveQueue(queue);
+    return msg;
+  });
 }
 
 /**
@@ -104,18 +159,31 @@ export async function enqueueMessage(
 export async function rebindProvisionalQueue(
   previousScope: WorkspaceScope,
   authoritativeScope: WorkspaceScope,
+  route: { connectionKey: string; authorityId: string }
 ): Promise<number> {
-  const queue = await getQueue();
-  let rebound = 0;
-  const updated = queue.map((message) => {
-    if (!message.provisional || !isSameWorkspaceScope(previousScope, message.scope)) {
-      return message;
-    }
-    rebound++;
-    return { ...message, scope: authoritativeScope, provisional: false };
+  return enqueueQueueWrite(async () => {
+    const queue = await readQueue();
+    let rebound = 0;
+    const updated = queue.map((message) => {
+      if (
+        !message.provisional ||
+        !isSameWorkspaceScope(previousScope, message.scope) ||
+        message.connectionKey !== route.connectionKey
+      ) {
+        return message;
+      }
+      rebound++;
+      return {
+        ...message,
+        scope: authoritativeScope,
+        connectionKey: route.connectionKey,
+        authorityId: route.authorityId,
+        provisional: false,
+      };
+    });
+    if (rebound > 0) await saveQueue(updated);
+    return rebound;
   });
-  if (rebound > 0) await saveQueue(updated);
-  return rebound;
 }
 
 /**
@@ -123,10 +191,25 @@ export async function rebindProvisionalQueue(
  * quarantine key instead of being replayed into whichever project is active.
  */
 export async function getQueue(): Promise<QueuedMessage[]> {
+  await queueWriteTail;
+  return readQueue();
+}
+
+async function readQueue(): Promise<QueuedMessage[]> {
+  const raw = await AsyncStorage.getItem(QUEUE_KEY);
+  if (!raw) return [];
+  let parsed: unknown;
   try {
-    const raw = await AsyncStorage.getItem(QUEUE_KEY);
-    if (!raw) return [];
-    const parsed: unknown = JSON.parse(raw);
+    parsed = JSON.parse(raw);
+  } catch {
+    // Malformed stored bytes are data corruption, not a transient read error.
+    // Quarantine them explicitly; AsyncStorage I/O failures above must propagate
+    // so no mutator can overwrite an unreadable-but-valid durable queue with [].
+    await quarantine([raw]);
+    await saveQueue([]);
+    return [];
+  }
+  {
     if (!Array.isArray(parsed)) {
       await quarantine([parsed]);
       await saveQueue([]);
@@ -145,42 +228,127 @@ export async function getQueue(): Promise<QueuedMessage[]> {
       await saveQueue(queue);
     }
     return queue;
-  } catch {
-    return [];
   }
+}
+
+/**
+ * Earliest queue scope that can be proven to belong to the current remote route.
+ *
+ * New records carry connectionKey. Older authoritative records remain recoverable
+ * only when their replica id/generation exactly matches the retained catalog row;
+ * an unscoped provisional record is deliberately not replayed across authorities.
+ */
+export async function getResumeScopeForProject(args: {
+  projectId: string;
+  connectionKey: string;
+  retainedReplica?: { id: string; generation: number; authorityId: string } | null;
+}): Promise<WorkspaceScope | null> {
+  const queued = (await getQueue())
+    .filter((message) => {
+      if (message.scope.projectId !== args.projectId) return false;
+      if (message.connectionKey) {
+        if (message.connectionKey !== args.connectionKey) return false;
+        if (message.provisional) return true;
+        const retained = args.retainedReplica;
+        return Boolean(
+          retained &&
+          message.scope.replicaId === retained.id &&
+          message.scope.workspaceGeneration === retained.generation &&
+          (!message.authorityId || message.authorityId === retained.authorityId)
+        );
+      }
+
+      // Backward compatibility for records created before route metadata existed.
+      if (message.provisional) return false;
+      const retained = args.retainedReplica;
+      return Boolean(
+        retained &&
+        message.scope.replicaId === retained.id &&
+        message.scope.workspaceGeneration === retained.generation
+      );
+    })
+    .sort((left, right) => left.timestamp - right.timestamp);
+  // An indeterminate earlier turn is an ordering barrier. Do not silently skip
+  // it and restore a later session/turn from the same route.
+  return queued[0]?.blockedReason ? null : (queued[0]?.scope ?? null);
 }
 
 export async function getQueueForScope(scope: WorkspaceScope): Promise<QueuedMessage[]> {
   return (await getQueue()).filter((message) => isSameWorkspaceScope(scope, message.scope));
 }
 
+/**
+ * Return only authoritative turns proven to belong to the current connection.
+ *
+ * Scope equality alone is insufficient: two authorities may acknowledge the
+ * same provisional client scope. Legacy records without route metadata remain
+ * durable but are never replayed automatically.
+ */
+export async function getQueueForReplay(
+  scope: WorkspaceScope,
+  route: { connectionKey: string; authorityId: string }
+): Promise<QueuedMessage[]> {
+  const matching = (await getQueue()).filter(
+    (message) =>
+      isSameWorkspaceScope(scope, message.scope) &&
+      message.connectionKey === route.connectionKey &&
+      message.authorityId === route.authorityId
+  );
+  const barrier = matching.findIndex((message) => Boolean(message.blockedReason));
+  return matching
+    .slice(0, barrier === -1 ? matching.length : barrier)
+    .filter((message) => !message.provisional);
+}
+
 /** Remove a message from the queue after successful send. */
 export async function dequeueMessage(id: string): Promise<void> {
-  const queue = await getQueue();
-  const filtered = queue.filter((message) => message.id !== id);
-  await saveQueue(filtered);
+  await enqueueQueueWrite(async () => {
+    const queue = await readQueue();
+    const filtered = queue.filter((message) => message.id !== id);
+    await saveQueue(filtered);
+  });
 }
 
 /** Mark a message as retried (increment retry count). */
 export async function markRetried(id: string): Promise<void> {
-  const queue = await getQueue();
-  const updated = queue.map((message) =>
-    message.id === id ? { ...message, retries: message.retries + 1 } : message,
-  );
-  await saveQueue(updated);
+  await enqueueQueueWrite(async () => {
+    const queue = await readQueue();
+    const updated = queue.map((message) =>
+      message.id === id ? { ...message, retries: message.retries + 1 } : message
+    );
+    await saveQueue(updated);
+  });
+}
+
+/**
+ * Preserve an indeterminate legacy turn without ever replaying it automatically.
+ * The record remains available for a future explicit recovery UI or export.
+ */
+export async function markUncertain(id: string, reason: string): Promise<void> {
+  await enqueueQueueWrite(async () => {
+    const queue = await readQueue();
+    const updated = queue.map((message) =>
+      message.id === id
+        ? { ...message, retries: message.retries + 1, blockedReason: reason }
+        : message
+    );
+    await saveQueue(updated);
+  });
 }
 
 /** Remove messages that have exceeded max retries. */
 export async function pruneFailedMessages(maxRetries: number = 3): Promise<QueuedMessage[]> {
-  const queue = await getQueue();
-  const failed = queue.filter((message) => message.retries >= maxRetries);
-  const remaining = queue.filter((message) => message.retries < maxRetries);
-  await saveQueue(remaining);
-  return failed;
+  return enqueueQueueWrite(async () => {
+    const queue = await readQueue();
+    const failed = queue.filter((message) => message.retries >= maxRetries);
+    const remaining = queue.filter((message) => message.retries < maxRetries);
+    await saveQueue(remaining);
+    return failed;
+  });
 }
 
 export async function clearQueue(): Promise<void> {
-  await AsyncStorage.removeItem(QUEUE_KEY);
+  await enqueueQueueWrite(() => AsyncStorage.removeItem(QUEUE_KEY));
 }
 
 export async function getQueueSize(): Promise<number> {

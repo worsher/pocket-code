@@ -19,7 +19,7 @@ import {
 import QuickActionEditor from "../QuickActionEditor";
 
 interface QuickActionsProps {
-  onSend: (message: string) => void;
+  onSend: (message: string) => unknown;
   disabled?: boolean;
 }
 
@@ -40,7 +40,7 @@ export default function QuickActions({ onSend, disabled }: QuickActionsProps) {
       setActions(updated);
       await saveQuickActions(projectId, updated);
     },
-    [projectId],
+    [projectId]
   );
 
   const handleAdd = () => {
@@ -49,16 +49,14 @@ export default function QuickActions({ onSend, disabled }: QuickActionsProps) {
   };
 
   const handleLongPress = (action: CustomAction) => {
-    const options = action.isDefault
-      ? ["编辑", "取消"]
-      : ["编辑", "删除", "取消"];
+    const options = action.isDefault ? ["编辑", "取消"] : ["编辑", "删除", "取消"];
     const cancelIndex = options.length - 1;
     const destructiveIndex = action.isDefault ? undefined : 1;
 
     if (Platform.OS === "ios") {
       ActionSheetIOS.showActionSheetWithOptions(
         { options, cancelButtonIndex: cancelIndex, destructiveButtonIndex: destructiveIndex },
-        (idx) => handleMenuAction(action, idx),
+        (idx) => handleMenuAction(action, idx)
       );
     } else {
       const alertOptions = action.isDefault
@@ -68,7 +66,11 @@ export default function QuickActions({ onSend, disabled }: QuickActionsProps) {
           ]
         : [
             { text: "编辑", onPress: () => handleMenuAction(action, 0) },
-            { text: "删除", style: "destructive" as const, onPress: () => handleMenuAction(action, 1) },
+            {
+              text: "删除",
+              style: "destructive" as const,
+              onPress: () => handleMenuAction(action, 1),
+            },
             { text: "取消", style: "cancel" as const },
           ];
       Alert.alert("操作", undefined, alertOptions);
@@ -87,7 +89,7 @@ export default function QuickActions({ onSend, disabled }: QuickActionsProps) {
   const handleEditorSave = (label: string, prompt: string, icon: string) => {
     if (editingAction) {
       const updated = actions.map((a) =>
-        a.id === editingAction.id ? { ...a, label, prompt, icon } : a,
+        a.id === editingAction.id ? { ...a, label, prompt, icon } : a
       );
       save(updated);
     } else {
@@ -114,9 +116,7 @@ export default function QuickActions({ onSend, disabled }: QuickActionsProps) {
               activeOpacity={0.7}
             >
               <Text style={styles.icon}>{action.icon}</Text>
-              <Text style={[styles.label, disabled && styles.labelDisabled]}>
-                {action.label}
-              </Text>
+              <Text style={[styles.label, disabled && styles.labelDisabled]}>{action.label}</Text>
             </TouchableOpacity>
           ))}
           <TouchableOpacity

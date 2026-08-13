@@ -37,17 +37,12 @@ export function registerDaemon(
   machineName: string,
   publicKey?: string,
   keyId?: string
-): void {
-  // If a daemon with the same machineId is already connected, close the old one
+): WebSocket | undefined {
+  // Atomically replace the registry owner before closing the old socket. Some
+  // WebSocket implementations can emit close synchronously; the late callback
+  // must already observe that the old socket is no longer authoritative.
   const existing = daemons.get(machineId);
-  if (existing && existing.socket !== socket) {
-    console.log(`[Relay] Replacing existing daemon connection for ${machineId}`);
-    try {
-      existing.socket.close(1000, "Replaced by new connection");
-    } catch {
-      // Ignore close errors on stale sockets
-    }
-  }
+  const replacedSocket = existing?.socket !== socket ? existing?.socket : undefined;
 
   daemons.set(machineId, {
     socket,
@@ -58,20 +53,39 @@ export function registerDaemon(
     keyId,
   });
 
-  console.log(
-    `[Relay] Daemon registered: ${machineName} (${machineId}). Total: ${daemons.size}`
-  );
+  if (replacedSocket) {
+    console.log(`[Relay] Replacing existing daemon connection for ${machineId}`);
+    try {
+      replacedSocket.close(1000, "Replaced by new connection");
+    } catch {
+      // Ignore close errors on stale sockets
+    }
+  }
+
+  console.log(`[Relay] Daemon registered: ${machineName} (${machineId}). Total: ${daemons.size}`);
+  return replacedSocket;
 }
 
-export function unregisterDaemon(socket: WebSocket): void {
+/** Remove only records still owned by this exact socket and return their ids. */
+export function unregisterDaemon(socket: WebSocket): string[] {
+  const removed: string[] = [];
   // I-2:同一 socket 可能因换 machineId 重复注册而在 Map 里留有多条记录,
   // 必须全部清理,而非命中首条就 return。
   for (const [id, conn] of daemons) {
     if (conn.socket === socket) {
       daemons.delete(id);
-      console.log(`[Relay] Daemon disconnected: ${conn.machineName} (${id}). Total: ${daemons.size}`);
+      removed.push(id);
+      console.log(
+        `[Relay] Daemon disconnected: ${conn.machineName} (${id}). Total: ${daemons.size}`
+      );
     }
   }
+  return removed;
+}
+
+/** True only while this socket is the current registry owner for machineId. */
+export function isDaemonOwner(socket: WebSocket, machineId: string): boolean {
+  return daemons.get(machineId)?.socket === socket;
 }
 
 export function updateHeartbeat(machineId: string): void {
@@ -238,10 +252,7 @@ export function forwardPairRequest(
 /**
  * Forward a pair-response from Daemon back to the waiting App.
  */
-export function forwardPairResponse(
-  machineId: string,
-  response: unknown
-): boolean {
+export function forwardPairResponse(machineId: string, response: unknown): boolean {
   const pending = pendingPairs.get(machineId);
   if (!pending || pending.length === 0) {
     console.log(`[Relay] No pending pair request for daemon ${machineId}`);
@@ -263,19 +274,21 @@ export function forwardPairResponse(
 
 const HEARTBEAT_TIMEOUT_MS = 60 * 1000; // 60s without heartbeat = dead
 
-export function cleanupStaleDaemons(): void {
+export function cleanupStaleDaemons(): string[] {
   const now = Date.now();
+  const removed: string[] = [];
   for (const [id, conn] of daemons) {
     if (now - conn.lastHeartbeat > HEARTBEAT_TIMEOUT_MS) {
-      console.log(
-        `[Relay] Daemon ${conn.machineName} (${id}) timed out. Removing.`
-      );
+      console.log(`[Relay] Daemon ${conn.machineName} (${id}) timed out. Removing.`);
+      // Relinquish ownership before close: a synchronous close callback must not
+      // release the same generation twice or race the timer's returned cleanup.
+      daemons.delete(id);
+      removed.push(id);
       try {
         conn.socket.close(1000, "Heartbeat timeout");
       } catch {
         // Ignore
       }
-      daemons.delete(id);
     }
   }
 
@@ -289,4 +302,5 @@ export function cleanupStaleDaemons(): void {
       pendingPairs.set(mid, filtered);
     }
   }
+  return removed;
 }

@@ -14,7 +14,7 @@ class FakeWebSocket {
   sent: string[] = [];
   onopen?: () => void;
   onmessage?: (event: { data: string }) => void;
-  onclose?: () => void;
+  onclose?: (event: { code: number; reason: string }) => void;
   onerror?: () => void;
   constructor(public url: string) {
     FakeWebSocket.instances.push(this);
@@ -24,7 +24,7 @@ class FakeWebSocket {
   }
   close() {
     this.readyState = FakeWebSocket.CLOSED;
-    this.onclose?.();
+    this.onclose?.({ code: 1000, reason: "" });
   }
   /** 测试辅助:模拟服务端握手完成 */
   open() {
@@ -39,7 +39,7 @@ class FakeWebSocket {
 /** 测试辅助:如真实 WebSocket 一样,onclose 触发前 readyState 已是 CLOSED */
 function closeSocket(ws: FakeWebSocket) {
   ws.readyState = FakeWebSocket.CLOSED;
-  ws.onclose?.();
+  ws.onclose?.({ code: 1006, reason: "network lost" });
 }
 
 function makeConfig(overrides: Partial<ConnectionConfig> = {}): ConnectionConfig {
@@ -83,7 +83,363 @@ describe("ServerConnection", () => {
     conn.connect();
     const ws = FakeWebSocket.instances[0];
     ws.open();
+    expect(conn.isOpen).toBe(true);
+    expect(conn.isReady).toBe(false);
     expect(JSON.parse(ws.sent[0])).toEqual({ type: "register", deviceId: "d_1" });
+    conn.disconnect();
+  });
+
+  it("becomes ready only after backlog completion and resets on disconnect", () => {
+    const conn = new ServerConnection(makeConfig(), makeHandlers());
+    conn.connect();
+    const ws = FakeWebSocket.instances[0];
+    ws.open();
+    expect(conn.isReady).toBe(false);
+    ws.receive({
+      type: "session",
+      sessionId: "s1",
+      projectId: "",
+      workspace: "/w",
+      backlogPending: true,
+    });
+    expect(conn.isReady).toBe(false);
+    ws.receive({ type: "session-ready", sessionId: "s1" });
+    expect(conn.isReady).toBe(true);
+    conn.disconnect();
+    expect(conn.isReady).toBe(false);
+  });
+
+  it("notifies once on intentional disconnect before clearing turn-correlation capability", () => {
+    const capabilitiesAtDisconnect: boolean[] = [];
+    let conn!: ServerConnection;
+    const disconnected = vi.fn(() => capabilitiesAtDisconnect.push(conn.supportsTurnCorrelation));
+    conn = new ServerConnection(makeConfig(), makeHandlers({ onDisconnected: disconnected }));
+    conn.connect();
+    const ws = FakeWebSocket.instances[0];
+    ws.open();
+    ws.receive({
+      type: "session",
+      sessionId: "s1",
+      projectId: "",
+      workspace: "/w",
+      turnCorrelationVersion: 1,
+    });
+
+    conn.disconnect();
+
+    expect(disconnected).toHaveBeenCalledTimes(1);
+    expect(capabilitiesAtDisconnect).toEqual([true]);
+    expect(conn.supportsTurnCorrelation).toBe(false);
+    expect(conn.isOpen).toBe(false);
+  });
+
+  it.each([
+    {
+      name: "register",
+      config: makeConfig(),
+      failWrite: (ws: FakeWebSocket) => {
+        ws.send = () => {
+          throw new Error("register write failed");
+        };
+      },
+    },
+    {
+      name: "direct init",
+      config: makeConfig({ getAuthToken: () => "tok_1" }),
+      failWrite: (ws: FakeWebSocket) => {
+        ws.send = () => {
+          throw new Error("init write failed");
+        };
+      },
+    },
+    {
+      name: "Relay init",
+      config: makeConfig({
+        isRelayMode: () => true,
+        isRelayPaired: () => true,
+        getRelayOptions: () => ({ machineId: "m_1", deviceId: "d_1", token: "tok_1" }),
+      }),
+      failWrite: (ws: FakeWebSocket) => {
+        ws.send = () => {
+          throw new Error("relay init write failed");
+        };
+      },
+    },
+  ])("closes and reconnects when the $name handshake write fails", ({ config, failWrite }) => {
+    vi.useFakeTimers();
+    const conn = new ServerConnection(config, makeHandlers());
+    conn.connect();
+    const ws = FakeWebSocket.instances[0];
+    failWrite(ws);
+
+    ws.open();
+
+    expect(ws.readyState).toBe(FakeWebSocket.CLOSED);
+    vi.advanceTimersByTime(2_000);
+    expect(FakeWebSocket.instances).toHaveLength(2);
+    conn.disconnect();
+  });
+
+  it("closes and reconnects when the post-registration init write fails", () => {
+    vi.useFakeTimers();
+    const conn = new ServerConnection(makeConfig(), makeHandlers());
+    conn.connect();
+    const ws = FakeWebSocket.instances[0];
+    ws.open();
+    ws.send = () => {
+      throw new Error("auth init write failed");
+    };
+
+    ws.receive({ type: "auth", token: "tok_1", userId: "u_1" });
+
+    expect(ws.readyState).toBe(FakeWebSocket.CLOSED);
+    vi.advanceTimersByTime(2_000);
+    expect(FakeWebSocket.instances).toHaveLength(2);
+    conn.disconnect();
+  });
+
+  it("returns false when the underlying socket write throws", () => {
+    const conn = new ServerConnection(makeConfig(), makeHandlers());
+    conn.connect();
+    const ws = FakeWebSocket.instances[0];
+    ws.open();
+    ws.send = () => {
+      throw new Error("write failed");
+    };
+    expect(conn.sendRaw({ type: "message", content: "hello" })).toBe(false);
+    conn.disconnect();
+  });
+
+  it("rejects an RPC immediately when its socket write fails", async () => {
+    const conn = new ServerConnection(makeConfig(), makeHandlers());
+    conn.connect();
+    const ws = FakeWebSocket.instances[0];
+    ws.open();
+    ws.send = () => {
+      throw new Error("write failed");
+    };
+
+    await expect(conn.listFiles(".")).rejects.toThrow("WebSocket send failed");
+    conn.disconnect();
+  });
+
+  it("rejects pending RPCs immediately on intentional disconnect", async () => {
+    const conn = new ServerConnection(makeConfig(), makeHandlers());
+    conn.connect();
+    const ws = FakeWebSocket.instances[0];
+    ws.open();
+    const pending = conn.listFiles("src");
+    const rejection = expect(pending).rejects.toThrow("WebSocket disconnected");
+
+    conn.disconnect();
+
+    await rejection;
+  });
+
+  it("rejects pending RPCs immediately on unexpected close", async () => {
+    vi.useFakeTimers();
+    const conn = new ServerConnection(makeConfig(), makeHandlers());
+    conn.connect();
+    const ws = FakeWebSocket.instances[0];
+    ws.open();
+    const pending = conn.listFiles("src");
+    const rejection = expect(pending).rejects.toThrow("WebSocket disconnected");
+
+    closeSocket(ws);
+
+    await rejection;
+    conn.disconnect();
+  });
+
+  it("keeps new servers unready until session-ready but accepts legacy session acks", () => {
+    const ready: string[] = [];
+    const conn = new ServerConnection(
+      makeConfig(),
+      makeHandlers({ onSessionReady: (sessionId) => ready.push(sessionId) })
+    );
+    conn.connect();
+    const ws = FakeWebSocket.instances[0];
+    ws.open();
+    ws.receive({
+      type: "session",
+      sessionId: "new",
+      projectId: "",
+      workspace: "/w",
+      backlogPending: true,
+    });
+    expect(conn.isReady).toBe(false);
+    ws.receive({ type: "session-ready", sessionId: "new" });
+    expect(conn.isReady).toBe(true);
+    expect(ready).toEqual(["new"]);
+    conn.disconnect();
+
+    const legacy = new ServerConnection(makeConfig(), makeHandlers());
+    legacy.connect();
+    const legacyWs = FakeWebSocket.instances[1];
+    legacyWs.open();
+    legacyWs.receive({ type: "session", sessionId: "old", projectId: "", workspace: "/w" });
+    expect(legacy.isReady).toBe(true);
+    legacy.disconnect();
+  });
+
+  it("exposes strict turn correlation only after the server advertises it", () => {
+    const conn = new ServerConnection(makeConfig(), makeHandlers());
+    conn.connect();
+    const ws = FakeWebSocket.instances[0];
+    ws.open();
+    expect(conn.supportsTurnCorrelation).toBe(false);
+    ws.receive({
+      type: "session",
+      sessionId: "s1",
+      projectId: "",
+      workspace: "/w",
+      turnCorrelationVersion: 1,
+    });
+    expect(conn.supportsTurnCorrelation).toBe(true);
+    conn.disconnect();
+    expect(conn.supportsTurnCorrelation).toBe(false);
+  });
+
+  it("closes and clears readiness when Relay reports the daemon offline", () => {
+    vi.useFakeTimers();
+    const events: any[] = [];
+    const conn = new ServerConnection(
+      makeConfig(),
+      makeHandlers({ onAgentEvent: (event) => events.push(event) })
+    );
+    conn.connect();
+    const ws = FakeWebSocket.instances[0];
+    ws.open();
+    ws.receive({
+      type: "session",
+      sessionId: "s1",
+      projectId: "",
+      workspace: "/w",
+      backlogPending: true,
+    });
+    ws.receive({ type: "session-ready", sessionId: "s1" });
+    expect(conn.isReady).toBe(true);
+    ws.receive({
+      type: "error",
+      error: "Daemon m_1 is not online.",
+      turnId: "turn-1",
+    });
+    expect(conn.isReady).toBe(false);
+    expect(events.at(-1)).toMatchObject({
+      type: "error",
+      code: "control-error",
+      turnId: "turn-1",
+    });
+    vi.advanceTimersByTime(2_000);
+    expect(FakeWebSocket.instances).toHaveLength(2);
+    conn.disconnect();
+  });
+
+  it.each([
+    {
+      name: "workspace scope",
+      ack: {
+        type: "session",
+        sessionId: "session-1",
+        projectId: "10ed836e-ae48-4d67-9e26-a74cbf55a52e",
+        workspace: "/w",
+        workspaceScope: {
+          projectId: "10ed836e-ae48-4d67-9e26-a74cbf55a52e",
+          replicaId: "0f3d985e-0a3a-458e-932d-c89dbbf671c6",
+          sessionId: "wrong-session",
+          workspaceGeneration: 1,
+          authorityId: "ce393574-d077-4ddf-a34a-bd9746277f97",
+          replicaKind: "cloud",
+        },
+      },
+      message: "invalid workspace scope",
+    },
+    {
+      name: "workspace catalog",
+      ack: {
+        type: "session",
+        sessionId: "session-1",
+        projectId: "",
+        workspace: "/w",
+        workspaceCatalog: {},
+      },
+      message: "invalid workspace catalog",
+    },
+  ])(
+    "stops reconnecting after an invalid $name ack but remains manually connectable",
+    ({ ack, message }) => {
+      vi.useFakeTimers();
+      const events: any[] = [];
+      const disconnected = vi.fn();
+      const conn = new ServerConnection(
+        makeConfig(),
+        makeHandlers({ onAgentEvent: (event) => events.push(event), onDisconnected: disconnected })
+      );
+      conn.connect();
+      const ws = FakeWebSocket.instances[0];
+      ws.open();
+
+      ws.receive(ack);
+
+      expect(conn.isOpen).toBe(false);
+      expect(conn.isReady).toBe(false);
+      expect(disconnected).toHaveBeenCalledTimes(1);
+      expect(events.at(-1)).toMatchObject({
+        type: "error",
+        message: expect.stringContaining(message),
+      });
+      vi.advanceTimersByTime(60_000);
+      expect(FakeWebSocket.instances).toHaveLength(1);
+
+      conn.connect();
+      expect(FakeWebSocket.instances).toHaveLength(2);
+      conn.disconnect();
+    }
+  );
+
+  it("stops reconnecting on a fatal control error before session-ready", () => {
+    vi.useFakeTimers();
+    const events: any[] = [];
+    const conn = new ServerConnection(
+      makeConfig(),
+      makeHandlers({ onAgentEvent: (event) => events.push(event) })
+    );
+    conn.connect();
+    const ws = FakeWebSocket.instances[0];
+    ws.open();
+
+    ws.receive({ type: "error", error: "Session does not belong to this user" });
+
+    expect(conn.isOpen).toBe(false);
+    expect(events.at(-1)).toMatchObject({
+      type: "error",
+      code: "control-error",
+      message: "Session does not belong to this user",
+    });
+    vi.advanceTimersByTime(60_000);
+    expect(FakeWebSocket.instances).toHaveLength(1);
+
+    conn.connect();
+    expect(FakeWebSocket.instances).toHaveLength(2);
+    conn.disconnect();
+  });
+
+  it("keeps a ready connection open for a non-fatal control error", () => {
+    const events: any[] = [];
+    const conn = new ServerConnection(
+      makeConfig(),
+      makeHandlers({ onAgentEvent: (event) => events.push(event) })
+    );
+    conn.connect();
+    const ws = FakeWebSocket.instances[0];
+    ws.open();
+    ws.receive({ type: "session", sessionId: "s1", projectId: "", workspace: "/w" });
+
+    ws.receive({ type: "error", error: "Operation rejected" });
+
+    expect(conn.isOpen).toBe(true);
+    expect(conn.isReady).toBe(true);
+    expect(events.at(-1)).toMatchObject({ type: "error", message: "Operation rejected" });
     conn.disconnect();
   });
 
@@ -260,6 +616,83 @@ describe("ServerConnection", () => {
       ws.receive({ type: "text-delta", text: "a", seq: 8 });
       ws.receive({ type: "text-delta", text: "stale", seq: 7 }); // ≤ currentSeq → 丢弃
       expect(received.map((e: any) => e.seq)).toEqual([8]);
+      conn.disconnect();
+    });
+
+    it("⑥a delivers the entire announced backlog before advancing to session-ready", () => {
+      const received: any[] = [];
+      const ready: string[] = [];
+      const conn = new ServerConnection(
+        makeConfig(),
+        makeHandlers({
+          onAgentEvent: (event) => received.push(event),
+          onSessionReady: (sessionId) => ready.push(sessionId),
+        })
+      );
+      conn.connect();
+      const ws = FakeWebSocket.instances.at(-1)!;
+      ws.open();
+      ws.receive({
+        type: "session",
+        sessionId: "s1",
+        projectId: "",
+        workspace: "/w",
+        eventEpoch: "ep_1",
+        currentSeq: 3,
+        backlogPending: true,
+      });
+      ws.receive({ type: "text-delta", text: "a", seq: 1 });
+      ws.receive({ type: "text-delta", text: "b", seq: 2 });
+      ws.receive({ type: "done", stopReason: "end_turn", seq: 3 });
+      expect(received.map((event) => event.seq)).toEqual([1, 2, 3]);
+      expect(conn.isReady).toBe(false);
+
+      ws.receive({
+        type: "session-ready",
+        sessionId: "s1",
+        eventEpoch: "ep_1",
+        currentSeq: 3,
+      });
+      expect(conn.isReady).toBe(true);
+      expect(ready).toEqual(["s1"]);
+      ws.receive({ type: "text-delta", text: "duplicate", seq: 2 });
+      expect(received.map((event) => event.seq)).toEqual([1, 2, 3]);
+      conn.disconnect();
+    });
+
+    it("⑥b explicit session switch resets the old epoch and accepts the new stream", () => {
+      const received: any[] = [];
+      const config = makeConfig({
+        getAuthToken: () => "tok",
+        buildInitPayload: () => ({ sessionId: "next-session" }),
+      });
+      const { conn, ws } = openWithEpoch(
+        makeHandlers({ onAgentEvent: (event) => received.push(event) }),
+        config,
+        7
+      );
+      ws.receive({ type: "text-delta", text: "old", seq: 8 });
+      conn.disconnect();
+      conn.resetSessionCursor();
+
+      conn.connect();
+      const nextSocket = FakeWebSocket.instances.at(-1)!;
+      nextSocket.open();
+      const init = nextSocket.sent.map((value) => JSON.parse(value)).find((m) => m.type === "init");
+      expect(init).toMatchObject({ type: "init", sessionId: "next-session" });
+      expect(init).not.toHaveProperty("eventEpoch");
+      expect(init).not.toHaveProperty("lastSeq");
+
+      nextSocket.receive({
+        type: "session",
+        sessionId: "next-session",
+        projectId: "",
+        workspace: "/w",
+        eventEpoch: "ep_2",
+        currentSeq: 0,
+      });
+      nextSocket.receive({ type: "text-delta", text: "new", seq: 1 });
+      expect(received.map((event) => event.seq)).toEqual([8, 1]);
       conn.disconnect();
     });
 
@@ -449,7 +882,11 @@ describe("ServerConnection", () => {
 
     const upsert = conn.upsertGitCredential({ profile, secret: "github_pat_test" });
     const upsertRequest = JSON.parse(ws.sent.at(-1)!);
-    expect(upsertRequest).toMatchObject({ type: "git-credential-upsert", profile, secret: "github_pat_test" });
+    expect(upsertRequest).toMatchObject({
+      type: "git-credential-upsert",
+      profile,
+      secret: "github_pat_test",
+    });
     ws.receive({
       type: "git-credential-result",
       _reqId: upsertRequest._reqId,

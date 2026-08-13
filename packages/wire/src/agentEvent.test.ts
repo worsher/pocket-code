@@ -98,14 +98,21 @@ describe("wire — AgentEvent validation", () => {
   });
 
   it("accepts usage with non-negative ints", () => {
-    expect(
-      AgentEvent.safeParse({ type: "usage", inputTokens: 10, outputTokens: 20 }).success
-    ).toBe(true);
+    expect(AgentEvent.safeParse({ type: "usage", inputTokens: 10, outputTokens: 20 }).success).toBe(
+      true
+    );
   });
 
   it("accepts done and error", () => {
     expect(AgentEvent.safeParse({ type: "done" }).success).toBe(true);
     expect(AgentEvent.safeParse({ type: "error", message: "boom" }).success).toBe(true);
+  });
+
+  it("requires a turnId for durable replay reset", () => {
+    expect(AgentEvent.safeParse({ type: "turn-replay-reset", turnId: "turn-replay" }).success).toBe(
+      true
+    );
+    expect(AgentEvent.safeParse({ type: "turn-replay-reset" }).success).toBe(false);
   });
 
   it("done: bare form and extended stopReason/usage form both round-trip", () => {
@@ -124,59 +131,111 @@ describe("wire — AgentEvent validation", () => {
   it("step-retrying and media-degraded round-trip", () => {
     const retry = {
       type: "step-retrying",
-      failedAttempt: 1, nextAttempt: 2, maxAttempts: 5, delayMs: 500,
-      statusCode: 429, message: "rate limited",
+      failedAttempt: 1,
+      nextAttempt: 2,
+      maxAttempts: 5,
+      delayMs: 500,
+      statusCode: 429,
+      message: "rate limited",
     };
     const r1 = AgentEvent.safeParse(retry);
     expect(r1.success && r1.data).toEqual(retry);
     // 可选字段缺省合法
-    expect(AgentEvent.safeParse({ type: "step-retrying", failedAttempt: 1, nextAttempt: 2, maxAttempts: 5, delayMs: 0 }).success).toBe(true);
+    expect(
+      AgentEvent.safeParse({
+        type: "step-retrying",
+        failedAttempt: 1,
+        nextAttempt: 2,
+        maxAttempts: 5,
+        delayMs: 0,
+      }).success
+    ).toBe(true);
 
     const deg = { type: "media-degraded", level: "degraded", keptImages: 1 };
     const r2 = AgentEvent.safeParse(deg);
     expect(r2.success && r2.data).toEqual(deg);
-    expect(AgentEvent.safeParse({ type: "media-degraded", level: "half", keptImages: 0 }).success).toBe(false);
+    expect(
+      AgentEvent.safeParse({ type: "media-degraded", level: "half", keptImages: 0 }).success
+    ).toBe(false);
   });
 
-  it("every variant accepts optional seq and round-trips it (P14 C14-1)", () => {
-    const withSeq = { type: "text-delta", text: "hi", seq: 42 };
-    const r = AgentEvent.safeParse(withSeq);
-    expect(r.success && r.data).toEqual(withSeq);
-    expect(AgentEvent.safeParse({ type: "done", seq: 1 }).success).toBe(true);
-    expect(AgentEvent.safeParse({ type: "tool-result", callId: "c1", result: 1, seq: 7 }).success).toBe(true);
+  it("every variant declares optional turnId and seq metadata", () => {
+    for (const option of AgentEvent.options) {
+      const requiresTurnId = option.shape.type.value === "turn-replay-reset";
+      expect(option.shape.turnId.safeParse(undefined).success).toBe(!requiresTurnId);
+      expect(option.shape.turnId.safeParse("turn-123").success).toBe(true);
+      expect(option.shape.turnId.safeParse("").success).toBe(false);
+      expect(option.shape.turnId.safeParse("x".repeat(129)).success).toBe(false);
+      expect(option.shape.seq.safeParse(undefined).success).toBe(true);
+      expect(option.shape.seq.safeParse(42).success).toBe(true);
+    }
+  });
+
+  it("turnId and seq round-trip together while both remain optional", () => {
+    const withMetadata = { type: "text-delta", text: "hi", turnId: "turn-123", seq: 42 };
+    const r = AgentEvent.safeParse(withMetadata);
+    expect(r.success && r.data).toEqual(withMetadata);
+    expect(AgentEvent.safeParse({ type: "done", turnId: "turn-123", seq: 1 }).success).toBe(true);
+    expect(
+      AgentEvent.safeParse({
+        type: "tool-result",
+        callId: "c1",
+        result: 1,
+        turnId: "turn-123",
+        seq: 7,
+      }).success
+    ).toBe(true);
     expect(AgentEvent.safeParse({ type: "text-delta", text: "hi", seq: 0 }).success).toBe(false); // 正整数
-    expect(AgentEvent.safeParse({ type: "text-delta", text: "hi" }).success).toBe(true); // 缺省合法
+    expect(AgentEvent.safeParse({ type: "text-delta", text: "hi" }).success).toBe(true); // 两字段缺省合法
   });
 
   it("history-compacted round-trips (P15)", () => {
     const full = {
       type: "history-compacted",
-      tokensBefore: 70000, tokensAfter: 9000,
-      compactedMessages: 42, keptRecentTurns: 2, seq: 5,
+      tokensBefore: 70000,
+      tokensAfter: 9000,
+      compactedMessages: 42,
+      keptRecentTurns: 2,
+      seq: 5,
     };
     const r = AgentEvent.safeParse(full);
     expect(r.success && r.data).toEqual(full);
-    expect(AgentEvent.safeParse({ type: "history-compacted", tokensBefore: 1 }).success).toBe(false); // 缺字段
+    expect(AgentEvent.safeParse({ type: "history-compacted", tokensBefore: 1 }).success).toBe(
+      false
+    ); // 缺字段
     expect(AGENT_EVENT_TYPE_NAMES).toContain("history-compacted"); // 派生集合自动路由(P13 T6 收益)
   });
 
   it("goal-updated round-trips (P16)", () => {
     const full = {
-      type: "goal-updated", status: "blocked", change: "lifecycle",
-      stopReason: "已达轮数预算", goal: "清零 lint 错误",
-      stats: { turns: 20, inputTokens: 100, outputTokens: 50 }, maxTurns: 20, seq: 9,
+      type: "goal-updated",
+      status: "blocked",
+      change: "lifecycle",
+      stopReason: "已达轮数预算",
+      goal: "清零 lint 错误",
+      stats: { turns: 20, inputTokens: 100, outputTokens: 50 },
+      maxTurns: 20,
+      seq: 9,
     };
     const r = AgentEvent.safeParse(full);
     expect(r.success && r.data).toEqual(full);
     // 最小形态(cleared 时 goal/maxTurns 缺省)
-    expect(AgentEvent.safeParse({
-      type: "goal-updated", status: "complete", change: "completion",
-      stats: { turns: 3, inputTokens: 0, outputTokens: 0 },
-    }).success).toBe(true);
-    expect(AgentEvent.safeParse({
-      type: "goal-updated", status: "active", change: "other",
-      stats: { turns: 0, inputTokens: 0, outputTokens: 0 },
-    }).success).toBe(false);
+    expect(
+      AgentEvent.safeParse({
+        type: "goal-updated",
+        status: "complete",
+        change: "completion",
+        stats: { turns: 3, inputTokens: 0, outputTokens: 0 },
+      }).success
+    ).toBe(true);
+    expect(
+      AgentEvent.safeParse({
+        type: "goal-updated",
+        status: "active",
+        change: "other",
+        stats: { turns: 0, inputTokens: 0, outputTokens: 0 },
+      }).success
+    ).toBe(false);
     expect(AGENT_EVENT_TYPE_NAMES).toContain("goal-updated");
   });
 
@@ -192,8 +251,6 @@ describe("wire — AgentEvent validation", () => {
   });
 
   it("rejects tool-call missing name", () => {
-    expect(
-      AgentEvent.safeParse({ type: "tool-call", callId: "c1", args: {} }).success
-    ).toBe(false);
+    expect(AgentEvent.safeParse({ type: "tool-call", callId: "c1", args: {} }).success).toBe(false);
   });
 });

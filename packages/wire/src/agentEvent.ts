@@ -6,20 +6,24 @@
 import { z } from "zod";
 import { WorkspaceSessionScope } from "./workspace.js";
 
-// P14:per-session 单调事件序号(server 侧 eventBuffer 分配;spec 2026-07-21 C14-1)。
-// 可选:geek in-process 路径与旧端不带;客户端对带 seq 事件按 (epoch, seq) 去重。
-const seqField = { seq: z.number().int().positive().optional() };
+// 共用事件元数据。字段均可选，以保持 geek in-process 路径与混合版本兼容。
+// turnId 由发起 turn 的客户端生成（旧客户端缺省时 server 可代生成）；seq 由
+// server 侧 eventBuffer 按 session 分配，客户端按 (epoch, seq) 去重。
+const eventMetaFields = {
+  turnId: z.string().min(1).max(128).optional(),
+  seq: z.number().int().positive().optional(),
+};
 
 export const TextDeltaEvent = z.object({
   type: z.literal("text-delta"),
   text: z.string(),
-  ...seqField,
+  ...eventMetaFields,
 });
 
 export const ReasoningDeltaEvent = z.object({
   type: z.literal("reasoning-delta"),
   text: z.string(),
-  ...seqField,
+  ...eventMetaFields,
 });
 
 export const ToolCallEvent = z.object({
@@ -27,7 +31,7 @@ export const ToolCallEvent = z.object({
   callId: z.string(),
   name: z.string(),
   args: z.record(z.unknown()),
-  ...seqField,
+  ...eventMetaFields,
 });
 
 export const ToolResultEvent = z.object({
@@ -35,7 +39,7 @@ export const ToolResultEvent = z.object({
   callId: z.string(),
   result: z.unknown(),
   isError: z.boolean().optional(),
-  ...seqField,
+  ...eventMetaFields,
 });
 
 export const FileChangedEvent = z.object({
@@ -46,7 +50,7 @@ export const FileChangedEvent = z.object({
   newContent: z.string().optional(),
   /** Optional for mixed-version compatibility; v2 servers attach it. */
   workspaceScope: WorkspaceSessionScope.optional(),
-  ...seqField,
+  ...eventMetaFields,
 });
 
 export const CommandOutputEvent = z.object({
@@ -54,7 +58,7 @@ export const CommandOutputEvent = z.object({
   callId: z.string(),
   chunk: z.string(),
   stream: z.enum(["stdout", "stderr"]),
-  ...seqField,
+  ...eventMetaFields,
 });
 
 export const ProcessStartedEvent = z.object({
@@ -62,28 +66,28 @@ export const ProcessStartedEvent = z.object({
   processId: z.string(),
   command: z.string(),
   cwd: z.string().optional(),
-  ...seqField,
+  ...eventMetaFields,
 });
 
 export const ProcessExitedEvent = z.object({
   type: z.literal("process-exited"),
   processId: z.string(),
   exitCode: z.number().int(),
-  ...seqField,
+  ...eventMetaFields,
 });
 
 export const PreviewAvailableEvent = z.object({
   type: z.literal("preview-available"),
   url: z.string(),
   source: z.enum(["dev-server", "static"]),
-  ...seqField,
+  ...eventMetaFields,
 });
 
 export const ModelSelectedEvent = z.object({
   type: z.literal("model-selected"),
   modelKey: z.string(),
   reason: z.string().optional(),
-  ...seqField,
+  ...eventMetaFields,
 });
 
 /** step 级瞬时错误重试通告(每次重发前恰发一条,spec 2026-07-21 C13-6)。 */
@@ -95,7 +99,7 @@ export const StepRetryingEvent = z.object({
   delayMs: z.number().int().nonnegative(),
   statusCode: z.number().int().optional(),
   message: z.string().optional(),
-  ...seqField,
+  ...eventMetaFields,
 });
 
 /** 媒体降级通告:发送投影降级(degraded 保留最近一张 / stripped 全剥离,spec §4.3)。 */
@@ -103,7 +107,7 @@ export const MediaDegradedEvent = z.object({
   type: z.literal("media-degraded"),
   level: z.enum(["degraded", "stripped"]),
   keptImages: z.number().int().nonnegative(),
-  ...seqField,
+  ...eventMetaFields,
 });
 
 /** P15:turn 边界上下文压缩通告(token 数为估算值,spec §6)。 */
@@ -113,7 +117,7 @@ export const HistoryCompactedEvent = z.object({
   tokensAfter: z.number().int().nonnegative(),
   compactedMessages: z.number().int().nonnegative(),
   keptRecentTurns: z.number().int().nonnegative(),
-  ...seqField,
+  ...eventMetaFields,
 });
 
 /** P16:goal 状态变更通告。completion/cleared 为终局(此后 goal 已清除)。 */
@@ -130,14 +134,14 @@ export const GoalUpdatedEvent = z.object({
     outputTokens: z.number().int().nonnegative(),
   }),
   maxTurns: z.number().int().positive().optional(),
-  ...seqField,
+  ...eventMetaFields,
 });
 
 export const UsageEvent = z.object({
   type: z.literal("usage"),
   inputTokens: z.number().int().nonnegative(),
   outputTokens: z.number().int().nonnegative(),
-  ...seqField,
+  ...eventMetaFields,
 });
 
 export const DoneEvent = z.object({
@@ -151,14 +155,25 @@ export const DoneEvent = z.object({
       outputTokens: z.number().int().nonnegative(),
     })
     .optional(),
-  ...seqField,
+  ...eventMetaFields,
 });
 
 export const ErrorEvent = z.object({
   type: z.literal("error"),
   message: z.string(),
   code: z.string().optional(),
-  ...seqField,
+  ...eventMetaFields,
+});
+
+/**
+ * A durable completed turn is about to be replayed from its beginning. Clients
+ * clear only that turn's partial assistant projection before applying the full
+ * recorded event sequence, preventing duplicated deltas after a disconnect.
+ */
+export const TurnReplayResetEvent = z.object({
+  type: z.literal("turn-replay-reset"),
+  turnId: z.string().min(1).max(128),
+  seq: z.number().int().positive().optional(),
 });
 
 /** 判别联合：App 渲染层只消费此契约 */
@@ -180,11 +195,12 @@ export const AgentEvent = z.discriminatedUnion("type", [
   UsageEvent,
   DoneEvent,
   ErrorEvent,
+  TurnReplayResetEvent,
 ]);
 
 export type AgentEventType = z.infer<typeof AgentEvent>;
 
 /** 联合内全部事件 type 名(单一真相源;client-core 分发层据此路由,勿手写复制)。 */
 export const AGENT_EVENT_TYPE_NAMES: readonly string[] = AgentEvent.options.map(
-  (o) => o.shape.type.value,
+  (o) => o.shape.type.value
 );

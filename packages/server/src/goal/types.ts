@@ -10,6 +10,8 @@ import type { ToolDef } from "@pocket-code/agent-core";
 export interface GoalState {
   goal: string;
   acceptance?: string;
+  /** Stable client turn that owns every rendered event for the current goal run. */
+  transportTurnId?: string;
   status: "active" | "paused" | "blocked" | "complete";
   stopReason?: string;
   stats: { turns: number; inputTokens: number; outputTokens: number; startedAt: number };
@@ -20,11 +22,17 @@ export interface GoalState {
 
 const DEFAULT_MAX_TURNS = 20;
 
-export function createGoal(content: string, acceptance?: string, maxTurns?: number): GoalState {
+export function createGoal(
+  content: string,
+  acceptance?: string,
+  maxTurns?: number,
+  transportTurnId?: string
+): GoalState {
   const now = Date.now();
   return {
     goal: content,
     ...(acceptance ? { acceptance } : {}),
+    ...(transportTurnId ? { transportTurnId } : {}),
     status: "active",
     stats: { turns: 0, inputTokens: 0, outputTokens: 0, startedAt: now },
     budgets: { maxTurns: maxTurns ?? DEFAULT_MAX_TURNS },
@@ -37,19 +45,25 @@ export function createGoal(content: string, acceptance?: string, maxTurns?: numb
 export function goalUpdatedEvent(g: GoalState, change: "lifecycle" | "completion"): AgentEventType {
   return {
     type: "goal-updated",
+    ...(g.transportTurnId ? { turnId: g.transportTurnId } : {}),
     status: g.status,
     change,
     ...(g.stopReason ? { stopReason: g.stopReason } : {}),
     goal: g.goal,
-    stats: { turns: g.stats.turns, inputTokens: g.stats.inputTokens, outputTokens: g.stats.outputTokens },
+    stats: {
+      turns: g.stats.turns,
+      inputTokens: g.stats.inputTokens,
+      outputTokens: g.stats.outputTokens,
+    },
     maxTurns: g.budgets.maxTurns,
   };
 }
 
 /** cancel 的终局事件(此后 goal 已清除,D-P16-5)。 */
-export function clearedEvent(stats: GoalState["stats"]): AgentEventType {
+export function clearedEvent(stats: GoalState["stats"], transportTurnId?: string): AgentEventType {
   return {
     type: "goal-updated",
+    ...(transportTurnId ? { turnId: transportTurnId } : {}),
     status: "paused",
     change: "cleared",
     stats: { turns: stats.turns, inputTokens: stats.inputTokens, outputTokens: stats.outputTokens },

@@ -1,22 +1,14 @@
-import React, { useState, useCallback } from "react";
-import {
-  View,
-  TextInput,
-  TouchableOpacity,
-  Text,
-  StyleSheet,
-} from "react-native";
-import {
-  showImagePicker,
-  ImagePreviewBar,
-  type ImageAttachment,
-} from "../ImagePicker";
+import React, { useState, useCallback, useRef } from "react";
+import { View, TextInput, TouchableOpacity, Text, StyleSheet } from "react-native";
+import { showImagePicker, ImagePreviewBar, type ImageAttachment } from "../ImagePicker";
+import { DraftRevision } from "./draftRevision";
 
 interface ChatInputProps {
-  onSend: (text: string, images?: ImageAttachment[]) => void;
+  onSend: (text: string, images?: ImageAttachment[]) => boolean | void | Promise<boolean | void>;
   onStop?: () => void;
   isStreaming?: boolean;
   disabled?: boolean;
+  isConnected?: boolean;
 }
 
 export default function ChatInput({
@@ -24,27 +16,43 @@ export default function ChatInput({
   onStop,
   isStreaming,
   disabled,
+  isConnected = true,
 }: ChatInputProps) {
   const [text, setText] = useState("");
   const [images, setImages] = useState<ImageAttachment[]>([]);
+  // Sending first persists the turn before it reports acceptance. Keep a
+  // synchronous revision so that completion of that earlier await cannot clear
+  // a second draft the user started typing in the meantime.
+  const draftRevisionRef = useRef(new DraftRevision());
 
-  const handleSend = () => {
+  const handleTextChange = useCallback((nextText: string) => {
+    draftRevisionRef.current.change();
+    setText(nextText);
+  }, []);
+
+  const handleSend = async () => {
     const trimmed = text.trim();
     if ((!trimmed && images.length === 0) || disabled) return;
-    onSend(trimmed || "(图片)", images.length > 0 ? images : undefined);
-    setText("");
-    setImages([]);
+    const submittedRevision = draftRevisionRef.current.capture();
+    const accepted = await onSend(trimmed || "(图片)", images.length > 0 ? images : undefined);
+    if (draftRevisionRef.current.shouldClear(submittedRevision, accepted)) {
+      draftRevisionRef.current.change();
+      setText("");
+      setImages([]);
+    }
   };
 
   const handleAttach = useCallback(async () => {
     if (images.length >= 3) return;
     const img = await showImagePicker();
     if (img) {
+      draftRevisionRef.current.change();
       setImages((prev) => [...prev, img]);
     }
   }, [images.length]);
 
   const handleRemoveImage = useCallback((index: number) => {
+    draftRevisionRef.current.change();
     setImages((prev) => prev.filter((_, i) => i !== index));
   }, []);
 
@@ -64,8 +72,10 @@ export default function ChatInput({
         <TextInput
           style={styles.input}
           value={text}
-          onChangeText={setText}
-          placeholder={disabled ? "连接中..." : "Ask Pocket Code..."}
+          onChangeText={handleTextChange}
+          placeholder={
+            disabled ? "处理中..." : isConnected ? "Ask Pocket Code..." : "离线发送，连接后自动执行"
+          }
           placeholderTextColor="#636366"
           multiline
           maxLength={4000}
@@ -78,10 +88,7 @@ export default function ChatInput({
           </TouchableOpacity>
         ) : (
           <TouchableOpacity
-            style={[
-              styles.sendButton,
-              !canSend && styles.sendButtonDisabled,
-            ]}
+            style={[styles.sendButton, !canSend && styles.sendButtonDisabled]}
             onPress={handleSend}
             disabled={!canSend}
           >

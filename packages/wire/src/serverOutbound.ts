@@ -30,6 +30,18 @@ export const SessionMsg = z.object({
   // P14:事件流游标(缓冲世代 + 当前最高 seq),客户端据此协商补发
   eventEpoch: z.string().optional(),
   currentSeq: z.number().int().nonnegative().optional(),
+  /** New servers send true while replay frames are still following this ack. */
+  backlogPending: z.literal(true).optional(),
+  /** Ordinary message streams from this server always carry a stable turnId. */
+  turnCorrelationVersion: z.literal(1).optional(),
+});
+
+/** Sent after reconnect backlog delivery so clients can safely start new turns. */
+export const SessionReadyMsg = z.object({
+  type: z.literal("session-ready"),
+  sessionId: z.string(),
+  eventEpoch: z.string().optional(),
+  currentSeq: z.number().int().nonnegative().optional(),
 });
 
 /** P14:server 无法用缓冲覆盖客户端缺口时的全量重建指示(spec C14-4)。 */
@@ -220,6 +232,7 @@ export const ServerOutbound = z.union([
   AgentEvent,
   AuthMsg,
   SessionMsg,
+  SessionReadyMsg,
   QuotaMsg,
   FileListMsg,
   FileContentMsg,

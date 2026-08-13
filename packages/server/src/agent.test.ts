@@ -53,8 +53,11 @@ vi.mock("./nodeBackend.js", () => ({
 // createOpenAI 换成可观测的假工厂:返回的 provider 把创建时的 apiKey 附在模型对象上,
 // 便于断言"某个 modelKey 最终用的是哪把 key"。
 vi.mock("@ai-sdk/openai", () => ({
-  createOpenAI: (opts: { apiKey: string; baseURL?: string }) =>
-    (modelId: string) => ({ modelId, apiKey: opts.apiKey, baseURL: opts.baseURL }),
+  createOpenAI: (opts: { apiKey: string; baseURL?: string }) => (modelId: string) => ({
+    modelId,
+    apiKey: opts.apiKey,
+    baseURL: opts.baseURL,
+  }),
 }));
 
 const runCliSessionMock = vi.fn(async (...args: unknown[]) => {
@@ -101,7 +104,9 @@ beforeEach(() => {
   getWorkspaceHandleMock.mockClear();
   // 缺省透传(未压缩):既有用例零改动
   compactHistoryMock.mockReset();
-  compactHistoryMock.mockImplementation(async ({ history }: { history: unknown[] }) => ({ history }));
+  compactHistoryMock.mockImplementation(async ({ history }: { history: unknown[] }) => ({
+    history,
+  }));
 });
 
 describe("runAgent", () => {
@@ -129,13 +134,7 @@ describe("runAgent", () => {
       usage: { inputTokens: 1, outputTokens: 2 },
     });
     expect(session.messages).toBe(returnedMessages);
-    expect(saveSessionMock).toHaveBeenCalledWith(
-      "s1",
-      "u1",
-      returnedMessages,
-      "claude-sonnet",
-      ""
-    );
+    expect(saveSessionMock).toHaveBeenCalledWith("s1", "u1", returnedMessages, "claude-sonnet", "");
   });
 
   it("defensive path: runAgentLoop rejects(编程 bug 兜底) — still emits done(stopReason error), saves session, rebuilds messages as history+user, does not rethrow", async () => {
@@ -143,7 +142,10 @@ describe("runAgent", () => {
 
     const session = makeSession({
       modelKey: "claude-sonnet",
-      messages: [{ role: "user", content: "previous" }, { role: "assistant", content: "prev reply" }],
+      messages: [
+        { role: "user", content: "previous" },
+        { role: "assistant", content: "prev reply" },
+      ],
     });
     const { events, onEvent } = collectEvents();
 
@@ -167,8 +169,11 @@ describe("runAgent", () => {
 
   it("effectiveModelKey passthrough: modelKey='auto' resolves via analyzePrompt and is passed to createNodeModelClient, model-selected event fires", async () => {
     runAgentLoopMock.mockResolvedValue({
-      messages: [], fullText: "",
-      stopReason: "end_turn", usage: { inputTokens: 0, outputTokens: 0 }, steps: 1,
+      messages: [],
+      fullText: "",
+      stopReason: "end_turn",
+      usage: { inputTokens: 0, outputTokens: 0 },
+      steps: 1,
     });
 
     const session = makeSession({ modelKey: "auto" });
@@ -186,22 +191,36 @@ describe("runAgent", () => {
 
   it("done event carries stopReason and usage from loop result", async () => {
     runAgentLoopMock.mockResolvedValue({
-      messages: [{ role: "user", content: "hi" }, { role: "assistant", content: "partial" }],
-      fullText: "partial", stopReason: "max_steps",
-      usage: { inputTokens: 7, outputTokens: 3 }, steps: 25,
+      messages: [
+        { role: "user", content: "hi" },
+        { role: "assistant", content: "partial" },
+      ],
+      fullText: "partial",
+      stopReason: "max_steps",
+      usage: { inputTokens: 7, outputTokens: 3 },
+      steps: 25,
     });
     const { events, onEvent } = collectEvents();
     await runAgent(makeSession(), "hi", onEvent);
     expect(events.at(-1)).toEqual({
-      type: "done", stopReason: "max_steps", usage: { inputTokens: 7, outputTokens: 3 },
+      type: "done",
+      stopReason: "max_steps",
+      usage: { inputTokens: 7, outputTokens: 3 },
     });
   });
 
   it("loop error result persists partial progress and done carries stopReason error", async () => {
-    const partial = [{ role: "user", content: "hi" }, { role: "assistant", content: "half" }];
+    const partial = [
+      { role: "user", content: "hi" },
+      { role: "assistant", content: "half" },
+    ];
     runAgentLoopMock.mockResolvedValue({
-      messages: partial, fullText: "half", stopReason: "error",
-      usage: { inputTokens: 1, outputTokens: 1 }, steps: 1, errorMessage: "model down",
+      messages: partial,
+      fullText: "half",
+      stopReason: "error",
+      usage: { inputTokens: 1, outputTokens: 1 },
+      steps: 1,
+      errorMessage: "model down",
     });
     const { events, onEvent } = collectEvents();
     const session = makeSession();
@@ -217,14 +236,31 @@ describe("runAgent", () => {
       { role: "user", content: "近期请求" },
       { role: "assistant", content: "近期答复" },
     ];
-    const compactionResult = { tokensBefore: 70000, tokensAfter: 900, compactedMessages: 20, keptRecentTurns: 2 };
+    const compactionResult = {
+      tokensBefore: 70000,
+      tokensAfter: 900,
+      compactedMessages: 20,
+      keptRecentTurns: 2,
+    };
     compactHistoryMock.mockResolvedValue({ history: compacted, result: compactionResult });
     runAgentLoopMock.mockResolvedValue({
-      messages: [...compacted, { role: "user", content: "hi" }, { role: "assistant", content: "ok" }],
-      fullText: "ok", stopReason: "end_turn", usage: { inputTokens: 1, outputTokens: 1 }, steps: 1,
+      messages: [
+        ...compacted,
+        { role: "user", content: "hi" },
+        { role: "assistant", content: "ok" },
+      ],
+      fullText: "ok",
+      stopReason: "end_turn",
+      usage: { inputTokens: 1, outputTokens: 1 },
+      steps: 1,
     });
     const { events, onEvent } = collectEvents();
-    const session = makeSession({ messages: [{ role: "user", content: "old" }, { role: "assistant", content: "old-reply" }] });
+    const session = makeSession({
+      messages: [
+        { role: "user", content: "old" },
+        { role: "assistant", content: "old-reply" },
+      ],
+    });
     await runAgent(session, "hi", onEvent);
 
     const compactIdx = events.findIndex((e) => e.type === "history-compacted");
@@ -240,8 +276,14 @@ describe("runAgent", () => {
 
   it("P15: no compaction (default passthrough) → no event, single saveSession (regression)", async () => {
     runAgentLoopMock.mockResolvedValue({
-      messages: [{ role: "user", content: "hi" }, { role: "assistant", content: "ok" }],
-      fullText: "ok", stopReason: "end_turn", usage: { inputTokens: 0, outputTokens: 0 }, steps: 1,
+      messages: [
+        { role: "user", content: "hi" },
+        { role: "assistant", content: "ok" },
+      ],
+      fullText: "ok",
+      stopReason: "end_turn",
+      usage: { inputTokens: 0, outputTokens: 0 },
+      steps: 1,
     });
     const { events, onEvent } = collectEvents();
     await runAgent(makeSession(), "hi", onEvent);
@@ -263,18 +305,27 @@ describe("runAgent", () => {
 
   it("P16: runAgent returns { stopReason, usage } on builtin path (D-P16-1)", async () => {
     runAgentLoopMock.mockResolvedValue({
-      messages: [], fullText: "",
-      stopReason: "max_steps", usage: { inputTokens: 9, outputTokens: 4 }, steps: 25,
+      messages: [],
+      fullText: "",
+      stopReason: "max_steps",
+      usage: { inputTokens: 9, outputTokens: 4 },
+      steps: 25,
     });
     const { onEvent } = collectEvents();
     const outcome = await runAgent(makeSession(), "hi", onEvent);
-    expect(outcome).toEqual({ stopReason: "max_steps", usage: { inputTokens: 9, outputTokens: 4 } });
+    expect(outcome).toEqual({
+      stopReason: "max_steps",
+      usage: { inputTokens: 9, outputTokens: 4 },
+    });
   });
 
   it("P16: active goal → system contains injection, extraTools carries updateGoalStatus (C16-7/8)", async () => {
     runAgentLoopMock.mockResolvedValue({
-      messages: [], fullText: "",
-      stopReason: "end_turn", usage: { inputTokens: 0, outputTokens: 0 }, steps: 1,
+      messages: [],
+      fullText: "",
+      stopReason: "end_turn",
+      usage: { inputTokens: 0, outputTokens: 0 },
+      steps: 1,
     });
     const session = makeSession();
     (session as any).goal = createGoal("清零 lint 错误", undefined, 20);
@@ -290,8 +341,11 @@ describe("runAgent", () => {
 
   it("P16: non-goal turn has no injection and no extraTools (C16-7)", async () => {
     runAgentLoopMock.mockResolvedValue({
-      messages: [], fullText: "",
-      stopReason: "end_turn", usage: { inputTokens: 0, outputTokens: 0 }, steps: 1,
+      messages: [],
+      fullText: "",
+      stopReason: "end_turn",
+      usage: { inputTokens: 0, outputTokens: 0 },
+      steps: 1,
     });
     const { onEvent } = collectEvents();
     await runAgent(makeSession(), "hi", onEvent);
@@ -301,16 +355,22 @@ describe("runAgent", () => {
   });
 
   it("P16: createSession restores goal with active→paused downgrade (C16-6)", async () => {
-    const activeGoal = createGoal("长跑目标");
+    const activeGoal = createGoal("长跑目标", undefined, undefined, "restored-goal-turn");
     getSessionMock.mockReturnValue({
-      sessionId: "s1", userId: "u1", projectId: "", title: "",
-      messages: [], modelKey: "deepseek-v4-flash",
+      sessionId: "s1",
+      userId: "u1",
+      projectId: "",
+      title: "",
+      messages: [],
+      modelKey: "deepseek-v4-flash",
       goalJson: JSON.stringify(activeGoal),
-      createdAt: 1, updatedAt: 1,
+      createdAt: 1,
+      updatedAt: 1,
     });
     const session = await createSession("s1", "u1");
     expect((session as any).goal.status).toBe("paused");
     expect((session as any).goal.stopReason).toContain("重启");
+    expect((session as any).goal.transportTurnId).toBe("restored-goal-turn");
     expect(saveSessionGoalMock).toHaveBeenCalled(); // 降级态回写
     getSessionMock.mockReturnValue(null);
   });
@@ -331,7 +391,7 @@ describe("runAgent", () => {
 
     const session = await createSession("saved", "u1");
     expect(getWorkspaceHandleMock).toHaveBeenCalledWith(
-      expect.objectContaining({ projectId: savedProjectId, userId: "u1" }),
+      expect.objectContaining({ projectId: savedProjectId, userId: "u1" })
     );
     expect(session.projectId).toBe(savedProjectId);
     expect(session.workspace).toBe(`/tmp/ws/${savedProjectId}`);
@@ -350,7 +410,7 @@ describe("runAgent", () => {
       updatedAt: 1,
     });
     await expect(
-      createSession("saved", "u1", "018f00d2-8931-7bc0-aad1-1ec83b13f982"),
+      createSession("saved", "u1", "018f00d2-8931-7bc0-aad1-1ec83b13f982")
     ).rejects.toThrow("project");
     await expect(createSession("saved", "u2")).rejects.toThrow("user");
     expect(getWorkspaceHandleMock).not.toHaveBeenCalled();
@@ -426,7 +486,9 @@ describe("getModel 的 DeepSeek 路由", () => {
     vi.stubEnv("DEEPSEEK_BASE_URL", "https://proxy.example.com/v1");
     try {
       const mod = await import("./agent.js");
-      expect((mod.getModel("deepseek-v4-flash") as any).baseURL).toBe("https://proxy.example.com/v1");
+      expect((mod.getModel("deepseek-v4-flash") as any).baseURL).toBe(
+        "https://proxy.example.com/v1"
+      );
     } finally {
       vi.unstubAllEnvs();
     }

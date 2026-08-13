@@ -1,5 +1,11 @@
 import { describe, it, expect } from "vitest";
-import { applyAgentEvent, phaseFor, truncateCoreHistory, storedToCoreMessages, type Message } from "./chatReducer";
+import {
+  applyAgentEvent,
+  phaseFor,
+  truncateCoreHistory,
+  storedToCoreMessages,
+  type Message,
+} from "./chatReducer";
 import type { CoreMessage } from "@pocket-code/agent-core";
 import type { StoredMessage } from "./types";
 
@@ -16,6 +22,116 @@ describe("applyAgentEvent", () => {
     expect(out2[0]).toBe(out[0]); // 未动的消息保持引用
   });
 
+  it("routes interleaved events to the assistant with the matching turnId", () => {
+    const messages: Message[] = [
+      { id: "u1", turnId: "turn-1", role: "user", content: "first", timestamp: 1 },
+      {
+        id: "a1",
+        turnId: "turn-1",
+        role: "assistant",
+        content: "",
+        toolCalls: [],
+        timestamp: 2,
+      },
+      { id: "u2", turnId: "turn-2", role: "user", content: "second", timestamp: 3 },
+      {
+        id: "a2",
+        turnId: "turn-2",
+        role: "assistant",
+        content: "",
+        toolCalls: [],
+        timestamp: 4,
+      },
+    ];
+
+    const afterFirst = applyAgentEvent(messages, {
+      type: "text-delta",
+      turnId: "turn-1",
+      text: "A",
+    });
+    const afterSecond = applyAgentEvent(afterFirst, {
+      type: "text-delta",
+      turnId: "turn-2",
+      text: "B",
+    });
+    const out = applyAgentEvent(afterSecond, {
+      type: "text-delta",
+      turnId: "turn-1",
+      text: "C",
+    });
+
+    expect(out.find((message) => message.id === "a1")?.content).toBe("AC");
+    expect(out.find((message) => message.id === "a2")?.content).toBe("B");
+    expect(afterFirst[3]).toBe(messages[3]);
+  });
+
+  it("does not fall back to another assistant when a turnId has no match", () => {
+    const messages = base({ turnId: "known-turn" });
+    const out = applyAgentEvent(messages, {
+      type: "text-delta",
+      turnId: "missing-turn",
+      text: "wrong",
+    });
+    expect(out).toBe(messages);
+    expect(out[1].content).toBe("");
+  });
+
+  it("resets only a replayed turn before applying its complete durable stream", () => {
+    const messages: Message[] = [
+      { id: "u1", turnId: "turn-1", role: "user", content: "first", timestamp: 1 },
+      {
+        id: "a1",
+        turnId: "turn-1",
+        role: "assistant",
+        content: "partial",
+        thinking: "partial thought",
+        toolCalls: [{ callId: "c1", toolName: "readFile", args: {}, result: "old" }],
+        modelUsed: "old-model",
+        pending: true,
+        timestamp: 2,
+      },
+      { id: "u2", turnId: "turn-2", role: "user", content: "second", timestamp: 3 },
+      {
+        id: "a2",
+        turnId: "turn-2",
+        role: "assistant",
+        content: "keep me",
+        timestamp: 4,
+      },
+    ];
+
+    const reset = applyAgentEvent(messages, {
+      type: "turn-replay-reset",
+      turnId: "turn-1",
+    });
+    const replayed = applyAgentEvent(reset, {
+      type: "text-delta",
+      turnId: "turn-1",
+      text: "complete",
+    });
+
+    expect(replayed[1]).toMatchObject({
+      content: "complete",
+      thinking: undefined,
+      toolCalls: [],
+      modelUsed: undefined,
+      pending: false,
+    });
+    expect(replayed[3]).toBe(messages[3]);
+  });
+
+  it("keeps the last-assistant fallback for events without turnId", () => {
+    const messages: Message[] = [
+      { id: "u1", turnId: "turn-1", role: "user", content: "first", timestamp: 1 },
+      { id: "a1", turnId: "turn-1", role: "assistant", content: "", timestamp: 2 },
+      { id: "u2", turnId: "turn-2", role: "user", content: "second", timestamp: 3 },
+      { id: "a2", turnId: "turn-2", role: "assistant", content: "", timestamp: 4 },
+    ];
+    const out = applyAgentEvent(messages, { type: "text-delta", text: "legacy" });
+    expect(out[1].content).toBe("");
+    expect(out[3].content).toBe("legacy");
+  });
+
   it("appends reasoning-delta to thinking", () => {
     const out = applyAgentEvent(base(), { type: "reasoning-delta", text: "mm" });
     expect(out[1].thinking).toBe("mm");
@@ -23,8 +139,18 @@ describe("applyAgentEvent", () => {
 
   it("records tool-call and pairs tool-result by callId (并发同名工具不错配)", () => {
     let msgs = base();
-    msgs = applyAgentEvent(msgs, { type: "tool-call", callId: "c1", name: "readFile", args: { path: "a" } });
-    msgs = applyAgentEvent(msgs, { type: "tool-call", callId: "c2", name: "readFile", args: { path: "b" } });
+    msgs = applyAgentEvent(msgs, {
+      type: "tool-call",
+      callId: "c1",
+      name: "readFile",
+      args: { path: "a" },
+    });
+    msgs = applyAgentEvent(msgs, {
+      type: "tool-call",
+      callId: "c2",
+      name: "readFile",
+      args: { path: "b" },
+    });
     msgs = applyAgentEvent(msgs, { type: "tool-result", callId: "c2", result: "B" });
     const tcs = msgs[1].toolCalls!;
     expect(tcs[0].result).toBeUndefined();
@@ -40,7 +166,11 @@ describe("applyAgentEvent", () => {
 
   it("sets modelUsed on model-selected and appends error text", () => {
     let msgs = base();
-    msgs = applyAgentEvent(msgs, { type: "model-selected", modelKey: "deepseek-v3", reason: "simple" });
+    msgs = applyAgentEvent(msgs, {
+      type: "model-selected",
+      modelKey: "deepseek-v3",
+      reason: "simple",
+    });
     expect(msgs[1].modelUsed).toBe("deepseek-v3");
     msgs = applyAgentEvent(msgs, { type: "error", message: "boom" });
     expect(msgs[1].content).toContain("Error: boom");
@@ -50,7 +180,9 @@ describe("applyAgentEvent", () => {
     const msgs = base();
     expect(applyAgentEvent(msgs, { type: "done" })).toBe(msgs);
     expect(applyAgentEvent(msgs, { type: "usage", inputTokens: 1, outputTokens: 2 })).toBe(msgs);
-    expect(applyAgentEvent(msgs, { type: "file-changed", path: "a", changeType: "modified" })).toBe(msgs);
+    expect(applyAgentEvent(msgs, { type: "file-changed", path: "a", changeType: "modified" })).toBe(
+      msgs
+    );
     const userOnly: Message[] = [{ id: "1", role: "user", content: "x", timestamp: 1 }];
     expect(applyAgentEvent(userOnly, { type: "text-delta", text: "y" })).toBe(userOnly);
   });
@@ -190,6 +322,29 @@ describe("storedToCoreMessages (I1: loadSession core history reconstruction)", (
     expect(storedToCoreMessages(stored)).toEqual([{ role: "assistant", content: "ok" }]);
   });
 
+  it("omits pending offline turns from reconstructed model history", () => {
+    const stored: StoredMessage[] = [
+      {
+        id: "u1",
+        turnId: "offline-1",
+        role: "user",
+        content: "queued",
+        pending: true,
+        timestamp: 1,
+      },
+      {
+        id: "a1",
+        turnId: "offline-1",
+        role: "assistant",
+        content: "",
+        pending: true,
+        timestamp: 2,
+      },
+      { id: "u2", role: "user", content: "completed", timestamp: 3 },
+    ];
+    expect(storedToCoreMessages(stored)).toEqual([{ role: "user", content: "completed" }]);
+  });
+
   it("backfills a synthetic aborted tool message when the stored toolCall has no result yet (parity with agent-core loop.ts abort backfill)", () => {
     const stored: StoredMessage[] = [
       {
@@ -202,7 +357,11 @@ describe("storedToCoreMessages (I1: loadSession core history reconstruction)", (
     ];
     const out = storedToCoreMessages(stored);
     expect(out).toEqual([
-      { role: "assistant", content: "", toolCalls: [{ id: "stored-0-0", name: "readFile", args: { path: "a.ts" } }] },
+      {
+        role: "assistant",
+        content: "",
+        toolCalls: [{ id: "stored-0-0", name: "readFile", args: { path: "a.ts" } }],
+      },
       {
         role: "tool",
         toolCallId: "stored-0-0",

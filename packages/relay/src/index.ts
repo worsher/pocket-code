@@ -11,24 +11,31 @@ import { dirname, join as joinPath } from "path";
 loadEnv();
 {
   const here = dirname(fileURLToPath(import.meta.url)); // src/ 或 dist/
-  loadEnv({ path: joinPath(here, "..", ".env") });               // 包根
-  loadEnv({ path: joinPath(here, "..", "..", "..", ".env") });   // 仓库根
+  loadEnv({ path: joinPath(here, "..", ".env") }); // 包根
+  loadEnv({ path: joinPath(here, "..", "..", "..", ".env") }); // 仓库根
 }
 import { WebSocketServer, WebSocket } from "ws";
 import { createServer } from "http";
-import {
-  unregisterDaemon,
-  getOnlineMachines,
-  cleanupStaleDaemons,
-  sendRawToDaemon,
-} from "./relay.js";
+import { getOnlineMachines, cleanupStaleDaemons, sendRawToDaemon } from "./relay.js";
 import { RequestTracker } from "./requestTracker.js";
 import { TunnelHub } from "./tunnelHub.js";
 import { WsTunnelHub } from "./wsTunnelHub.js";
 import { createUpgradeHandler, makeTunnelWss } from "./upgradeRouter.js";
 import { createHttpHandler } from "./httpRouter.js";
-import { requireRelaySecret, isDiscoveryEnabled, getTunnelToken, isTunnelCookieSecure, getTunnelMode, getTunnelBaseDomain } from "./config.js";
+import {
+  requireRelaySecret,
+  isDiscoveryEnabled,
+  getTunnelToken,
+  isTunnelCookieSecure,
+  getTunnelMode,
+  getTunnelBaseDomain,
+} from "./config.js";
 import { createConnState, handleRelayInbound } from "./messageRouter.js";
+import {
+  expireStaleRequests,
+  handleRelayConnectionClosed,
+  releaseDaemonResources,
+} from "./connectionLifecycle.js";
 
 const PORT = parseInt(process.env.PORT || "3200", 10);
 
@@ -52,10 +59,14 @@ console.log(
 const TUNNEL_MODE = getTunnelMode();
 const TUNNEL_BASE_DOMAIN = getTunnelBaseDomain();
 if (TUNNEL_MODE === "subdomain" && TUNNEL_BASE_DOMAIN === null) {
-  console.error("[Relay] 启动失败:TUNNEL_BASE_DOMAIN required when TUNNEL_MODE=subdomain (e.g. tunnel.example.com)");
+  console.error(
+    "[Relay] 启动失败:TUNNEL_BASE_DOMAIN required when TUNNEL_MODE=subdomain (e.g. tunnel.example.com)"
+  );
   process.exit(1);
 }
-console.log(`[Relay] Tunnel mode: ${TUNNEL_MODE}${TUNNEL_MODE === "subdomain" ? ` (base=${TUNNEL_BASE_DOMAIN})` : ""}`);
+console.log(
+  `[Relay] Tunnel mode: ${TUNNEL_MODE}${TUNNEL_MODE === "subdomain" ? ` (base=${TUNNEL_BASE_DOMAIN})` : ""}`
+);
 
 // ── 反向 HTTP 隧道枢纽(关联 http 请求与 tunnelId) ──
 const tunnelHub = new TunnelHub();
@@ -102,8 +113,17 @@ httpServer.listen(PORT, "0.0.0.0", () => {
   console.log(`[Relay] Listening on ws://0.0.0.0:${PORT}`);
 });
 
-// Periodic heartbeat cleanup
-setInterval(cleanupStaleDaemons, 20 * 1000);
+// Periodic heartbeat cleanup. cleanupStaleDaemons returns the registry owners it
+// removed so their correlated App requests terminate instead of hanging.
+setInterval(() => {
+  for (const machineId of cleanupStaleDaemons()) {
+    releaseDaemonResources(
+      machineId,
+      { requests, tunnelHub, wsTunnelHub },
+      "Daemon heartbeat timed out."
+    );
+  }
+}, 20 * 1000);
 
 // ── Connection Handling ───────────────────────────────
 
@@ -127,17 +147,7 @@ wss.on("connection", (ws: WebSocket, req) => {
     console.log(
       `[Relay] Connection closed (role: ${state.role}, code: ${code}, reason: ${reason.toString() || "-"})`
     );
-    if (state.role === "daemon") {
-      unregisterDaemon(ws);
-      // 只中止该 daemon 的隧道(原 abortAll 全断)
-      if (state.machineId) {
-        tunnelHub.abortByMachine(state.machineId);
-        wsTunnelHub.abortByMachine(state.machineId);
-      }
-    }
-    if (state.role === "app") {
-      requests.deleteBySocket(ws);
-    }
+    handleRelayConnectionClosed(ws, state, { requests, tunnelHub, wsTunnelHub });
   });
 });
 
@@ -148,5 +158,5 @@ const requests = new RequestTracker<WebSocket>();
 
 // 每 60s 清理:已关闭 socket 或超 TTL 的悬挂请求(修复原内存泄漏)。
 setInterval(() => {
-  requests.cleanupStale();
+  expireStaleRequests(requests);
 }, 60 * 1000);

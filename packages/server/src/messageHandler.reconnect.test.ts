@@ -18,6 +18,58 @@ const PROJECT_B = "018f00d2-8931-7bc0-aad1-1ec83b13f982";
 const REPLICA_ID = "0f3d985e-0a3a-458e-932d-c89dbbf671c6";
 const AUTHORITY_ID = "ce393574-d077-4ddf-a34a-bd9746277f97";
 
+const journalMock = vi.hoisted(() => {
+  type Row = {
+    requestHash: string;
+    status: "running" | "completed";
+    claimToken: string;
+    events: unknown[];
+  };
+  const rows = new Map<string, Row>();
+  const key = (sessionId: string, turnId: string) => `${sessionId}\u0000${turnId}`;
+  const claim = vi.fn((args: { sessionId: string; turnId: string; requestHash: string }) => {
+    const existing = rows.get(key(args.sessionId, args.turnId));
+    if (existing) {
+      if (existing.requestHash !== args.requestHash) return { kind: "conflict" as const };
+      return existing.status === "completed"
+        ? { kind: "completed" as const, events: existing.events }
+        : { kind: "running" as const };
+    }
+    const claimToken = `claim-${rows.size + 1}`;
+    rows.set(key(args.sessionId, args.turnId), {
+      requestHash: args.requestHash,
+      status: "running",
+      claimToken,
+      events: [],
+    });
+    return { kind: "claimed" as const, claimToken };
+  });
+  const complete = vi.fn(
+    (args: {
+      sessionId: string;
+      turnId: string;
+      requestHash: string;
+      claimToken: string;
+      events: unknown[];
+    }) => {
+      const row = rows.get(key(args.sessionId, args.turnId));
+      if (
+        !row ||
+        row.status !== "running" ||
+        row.requestHash !== args.requestHash ||
+        row.claimToken !== args.claimToken
+      ) {
+        return false;
+      }
+      row.status = "completed";
+      row.events = args.events;
+      return true;
+    }
+  );
+  return { rows, key, claim, complete };
+});
+const deleteSessionMock = vi.hoisted(() => vi.fn(() => true));
+
 const runAgentMock = vi.fn(
   (_session: unknown, _content: string, onEvent: (e: unknown) => void, signal?: AbortSignal) =>
     new Promise<void>((resolve) => {
@@ -57,8 +109,10 @@ vi.mock("./agent.js", () => ({
 
 vi.mock("./db.js", () => ({
   initDb: vi.fn(async () => {}),
+  claimTurnJournal: journalMock.claim,
+  completeTurnJournal: journalMock.complete,
   listUserSessions: vi.fn(() => []),
-  deleteSession: vi.fn(() => true),
+  deleteSession: deleteSessionMock,
   getWorkspaceAuthorityId: vi.fn(() => AUTHORITY_ID),
   updateWorkspaceProjectDisplayName: vi.fn(),
   isWorkspaceSessionGenerationCurrent: vi.fn(() => true),
@@ -104,6 +158,7 @@ vi.mock("./gitCredentials.js", () => ({
 vi.mock("./nodeBackend.js", () => ({ createNodeBackend: vi.fn(() => ({})) }));
 vi.mock("./sync/syncHandler.js", () => ({ handleSyncPull: vi.fn(), handleSyncFile: vi.fn() }));
 
+const { createSession: createSessionMock } = await import("./agent.js");
 const { createMessageHandler } = await import("./messageHandler.js");
 
 function makeHandler() {
@@ -118,8 +173,25 @@ const msg = (obj: Record<string, unknown>) => JSON.stringify(obj);
 
 beforeEach(() => {
   _resetStreams();
+  journalMock.rows.clear();
+  journalMock.claim.mockClear();
+  journalMock.complete.mockClear();
+  deleteSessionMock.mockReset();
+  deleteSessionMock.mockReturnValue(true);
+  vi.mocked(createSessionMock).mockClear();
   currentRun = null;
-  runAgentMock.mockClear();
+  runAgentMock.mockReset();
+  runAgentMock.mockImplementation(
+    (
+      _session: unknown,
+      _content: string,
+      onEvent: (event: unknown) => void,
+      signal?: AbortSignal
+    ) =>
+      new Promise<void>((resolve) => {
+        currentRun = { onEvent, signal, finish: resolve };
+      })
+  );
 });
 
 describe("messageHandler — P14 事件流", () => {
@@ -227,9 +299,177 @@ describe("messageHandler — P14 事件流", () => {
     currentRun!.finish();
     await turn;
 
-    const evs = sent.filter((m: any) => typeof m.seq === "number") as any[];
+    const evs = sent.filter(
+      (m: any) => typeof m.seq === "number" && m.type !== "session-ready"
+    ) as any[];
     expect(evs.map((e) => e.seq)).toEqual([1, 2, 3]);
     expect(evs.map((e) => e.type)).toEqual(["text-delta", "tool-call", "done"]);
+  });
+
+  it("signals session-ready only after buffered reconnect events are delivered", async () => {
+    const stream = getSessionStream("ready-after-backlog");
+    stream.publish({ type: "text-delta", text: "buffered" });
+    const { sent, handler } = makeHandler();
+    await handler.onMessage(
+      msg({
+        type: "init",
+        sessionId: "ready-after-backlog",
+        eventEpoch: stream.epoch,
+        lastSeq: 0,
+      })
+    );
+    expect(sent.map((event) => event.type)).toEqual(["session", "text-delta", "session-ready"]);
+    expect(sent[0]).toMatchObject({ backlogPending: true });
+  });
+
+  it("correlates every event to its turn and serializes overlapping messages", async () => {
+    const { sent, handler } = makeHandler();
+    await handler.onMessage(msg({ type: "init", sessionId: "serialized-turns" }));
+
+    const first = handler.onMessage(msg({ type: "message", turnId: "turn-1", content: "first" }));
+    await vi.waitFor(() => expect(runAgentMock).toHaveBeenCalledTimes(1));
+    const firstRun = currentRun!;
+
+    const second = handler.onMessage(msg({ type: "message", turnId: "turn-2", content: "second" }));
+    await Promise.resolve();
+    expect(runAgentMock).toHaveBeenCalledTimes(1);
+
+    firstRun.onEvent({ type: "text-delta", text: "one" });
+    firstRun.onEvent({ type: "done", stopReason: "end_turn" });
+    firstRun.finish();
+    await first;
+
+    await vi.waitFor(() => expect(runAgentMock).toHaveBeenCalledTimes(2));
+    const secondRun = currentRun!;
+    secondRun.onEvent({ type: "text-delta", text: "two" });
+    secondRun.onEvent({ type: "done", stopReason: "end_turn" });
+    secondRun.finish();
+    await second;
+
+    const events = sent.filter((event: any) => event.turnId) as any[];
+    expect(events.map((event) => [event.type, event.turnId])).toEqual([
+      ["text-delta", "turn-1"],
+      ["done", "turn-1"],
+      ["text-delta", "turn-2"],
+      ["done", "turn-2"],
+    ]);
+  });
+
+  it("durably replays every completed turn event with fresh stream sequence numbers", async () => {
+    const { sent, handler } = makeHandler();
+    await handler.onMessage(msg({ type: "init", sessionId: "journal-replay" }));
+
+    const first = handler.onMessage(
+      msg({ type: "message", turnId: "stable-replay", content: "run once" })
+    );
+    await vi.waitFor(() => expect(runAgentMock).toHaveBeenCalledTimes(1));
+    currentRun!.onEvent({ type: "text-delta", text: "answer" });
+    currentRun!.onEvent({ type: "usage", inputTokens: 4, outputTokens: 2 });
+    currentRun!.onEvent({ type: "done", stopReason: "end_turn" });
+    currentRun!.finish();
+    await first;
+
+    await handler.onMessage(msg({ type: "message", turnId: "stable-replay", content: "run once" }));
+    expect(runAgentMock).toHaveBeenCalledTimes(1);
+
+    const events = sent.filter((event: any) => event.turnId === "stable-replay") as any[];
+    expect(events.map((event) => event.seq)).toEqual([1, 2, 3, 4, 5, 6, 7]);
+    const logical = events.map(({ seq: _seq, ...event }) => event);
+    expect(logical[3]).toEqual({ type: "turn-replay-reset", turnId: "stable-replay" });
+    expect(logical.slice(4)).toEqual(logical.slice(0, 3));
+    expect(logical.slice(0, 3).map((event) => event.type)).toEqual(["text-delta", "usage", "done"]);
+  });
+
+  it("does not acknowledge a durable turn before the completed journal commit", async () => {
+    journalMock.complete.mockImplementationOnce(() => false);
+    const { sent, handler } = makeHandler();
+    await handler.onMessage(msg({ type: "init", sessionId: "journal-commit-failure" }));
+    const turn = handler.onMessage(
+      msg({ type: "message", turnId: "commit-failure", content: "persist before done" })
+    );
+    await vi.waitFor(() => expect(runAgentMock).toHaveBeenCalledTimes(1));
+    currentRun!.onEvent({ type: "text-delta", text: "answer" });
+    currentRun!.onEvent({ type: "done", stopReason: "end_turn" });
+    currentRun!.finish();
+    await turn;
+
+    const events = sent.filter((event: any) => event.turnId === "commit-failure") as any[];
+    expect(events.map((event) => [event.type, event.stopReason, event.code])).toEqual([
+      ["text-delta", undefined, undefined],
+      ["error", undefined, "turn-journal-commit-failed"],
+      ["done", "error", undefined],
+    ]);
+  });
+
+  it("rejects a reused turnId when any execution input changes", async () => {
+    runAgentMock.mockImplementation(
+      async (
+        _session: unknown,
+        _content: string,
+        onEvent: (event: unknown) => void
+      ): Promise<void> => {
+        onEvent({ type: "done", stopReason: "end_turn" });
+      }
+    );
+    const base = {
+      type: "message",
+      content: "same content",
+      model: "model-a",
+      customPrompt: "prompt-a",
+      rewindTo: 0,
+      images: [{ base64: "image-a", mimeType: "image/png" }],
+    };
+    const variants = [
+      { ...base, content: "changed content" },
+      { ...base, model: "model-b" },
+      { ...base, customPrompt: "prompt-b" },
+      { ...base, rewindTo: 1 },
+      { ...base, images: [{ base64: "image-b", mimeType: "image/png" }] },
+      { ...base, images: [{ base64: "image-a", mimeType: "image/jpeg" }] },
+    ];
+
+    for (const [index, variant] of variants.entries()) {
+      const { sent, handler } = makeHandler();
+      const sessionId = `journal-conflict-${index}`;
+      const turnId = `stable-conflict-${index}`;
+      await handler.onMessage(msg({ type: "init", sessionId }));
+      await handler.onMessage(msg({ ...base, turnId }));
+      const callsAfterFirst = runAgentMock.mock.calls.length;
+      await handler.onMessage(msg({ ...variant, turnId }));
+      expect(runAgentMock).toHaveBeenCalledTimes(callsAfterFirst);
+      expect(sent.slice(-2)).toMatchObject([
+        { type: "error", code: "turn-id-conflict", turnId },
+        { type: "done", stopReason: "error", turnId },
+      ]);
+    }
+  });
+
+  it("does not execute a durable turn left running by another process", async () => {
+    journalMock.claim.mockImplementationOnce(() => ({ kind: "running" }));
+    const { sent, handler } = makeHandler();
+    await handler.onMessage(msg({ type: "init", sessionId: "journal-running" }));
+    await handler.onMessage(
+      msg({ type: "message", turnId: "uncertain-turn", content: "do not repeat" })
+    );
+
+    expect(runAgentMock).not.toHaveBeenCalled();
+    expect(sent.slice(-2)).toMatchObject([
+      { type: "error", code: "turn-in-progress", turnId: "uncertain-turn" },
+      { type: "done", stopReason: "error", turnId: "uncertain-turn" },
+    ]);
+  });
+
+  it("keeps legacy messages without turnId out of the durable journal", async () => {
+    const { handler } = makeHandler();
+    await handler.onMessage(msg({ type: "init", sessionId: "legacy-no-journal" }));
+    const turn = handler.onMessage(msg({ type: "message", content: "legacy" }));
+    await vi.waitFor(() => expect(runAgentMock).toHaveBeenCalledTimes(1));
+    currentRun!.onEvent({ type: "done", stopReason: "end_turn" });
+    currentRun!.finish();
+    await turn;
+
+    expect(journalMock.claim).not.toHaveBeenCalled();
+    expect(journalMock.complete).not.toHaveBeenCalled();
   });
 
   it("② disconnect mid-turn: turn keeps running (no abort), events buffer, new handler replays gap then joins live (C14-2/5/6)", async () => {
@@ -312,5 +552,73 @@ describe("messageHandler — P14 事件流", () => {
     expect(run.signal?.aborted).toBe(true);
     run.finish();
     await turn;
+  });
+
+  it("rejects deletion while a session turn is active without touching its DB or journal", async () => {
+    const { sent, handler } = makeHandler();
+    const sessionId = "delete-active-session";
+    await handler.onMessage(msg({ type: "init", sessionId }));
+
+    const turn = handler.onMessage(
+      msg({ type: "message", turnId: "delete-active-turn", content: "still running" })
+    );
+    await vi.waitFor(() => expect(currentRun).not.toBeNull());
+    expect(journalMock.rows.get(journalMock.key(sessionId, "delete-active-turn"))).toMatchObject({
+      status: "running",
+    });
+
+    await handler.onMessage(msg({ type: "delete-session", sessionId }));
+
+    expect(sent.at(-1)).toEqual({
+      type: "error",
+      error: "Session is active and cannot be deleted until its current turn finishes.",
+    });
+    expect(deleteSessionMock).not.toHaveBeenCalled();
+    expect(journalMock.rows.get(journalMock.key(sessionId, "delete-active-turn"))).toMatchObject({
+      status: "running",
+    });
+
+    currentRun!.onEvent({ type: "done", stopReason: "end_turn" });
+    currentRun!.finish();
+    await turn;
+  });
+
+  it("deletes an idle session cache and stream so the same id restores a fresh session", async () => {
+    const sessionId = "delete-idle-session";
+    const original = makeHandler();
+    await original.handler.onMessage(msg({ type: "init", sessionId }));
+    const oldAck = original.sent.find((event) => event.type === "session") as any;
+
+    // A second live handler shares the same cached AgentSession before deletion.
+    const stalePeer = makeHandler();
+    await stalePeer.handler.onMessage(msg({ type: "init", sessionId }));
+    expect(vi.mocked(createSessionMock).mock.calls.filter(([id]) => id === sessionId)).toHaveLength(
+      1
+    );
+
+    await original.handler.onMessage(msg({ type: "delete-session", sessionId }));
+    expect(deleteSessionMock).toHaveBeenCalledWith(sessionId, "u1");
+    expect(original.sent.at(-1)).toEqual({
+      type: "session-deleted",
+      sessionId,
+      success: true,
+    });
+
+    // Other connections holding the deleted shared object must not resurrect it.
+    await stalePeer.handler.onMessage(msg({ type: "message", content: "must be rejected" }));
+    expect(stalePeer.sent.at(-1)).toEqual({
+      type: "error",
+      error: "No session. Send init first.",
+    });
+    expect(runAgentMock).not.toHaveBeenCalled();
+
+    const replacement = makeHandler();
+    await replacement.handler.onMessage(msg({ type: "init", sessionId }));
+    const newAck = replacement.sent.find((event) => event.type === "session") as any;
+    expect(newAck.eventEpoch).not.toBe(oldAck.eventEpoch);
+    expect(newAck.currentSeq).toBe(0);
+    expect(vi.mocked(createSessionMock).mock.calls.filter(([id]) => id === sessionId)).toHaveLength(
+      2
+    );
   });
 });

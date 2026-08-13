@@ -14,19 +14,20 @@ import {
 import { WORKSPACE_FEATURE_FLAGS } from "../services/workspaceFeatureFlags";
 import { recordWorkspaceMetric } from "../services/workspaceTelemetry";
 import { getModelConfig, getApiKeyField, MODELS } from "../services/modelConfig";
-import {
-  updateSettings,
-  type AppSettings,
-  type GitCredentialProfile,
-} from "../store/settings";
-import { saveChatHistory, loadChatHistory } from "../store/chatHistory";
+import { updateSettings, type AppSettings, type GitCredentialProfile } from "../store/settings";
+import { saveChatHistory, loadChatHistoryStrict } from "../store/chatHistory";
 import { deleteLocalFile, executeLocalTool, writeLocalFile } from "../services/localFileSystem";
 import {
   enqueueMessage,
-  getQueueForScope,
+  getQueueForReplay,
+  getResumeScopeForProject,
   dequeueMessage,
+  markRetried,
+  markUncertain,
   rebindProvisionalQueue,
 } from "../services/offlineQueue";
+import { prepareQueuedTurnMessages } from "./queuedTurnMessages";
+export { prepareQueuedTurnMessages } from "./queuedTurnMessages";
 import { getWorkspaceConnectionKey, usesRemoteWorkspace } from "../services/workspaceConnection";
 import type { RemoteReplicaCatalogEntry } from "../store/projectCatalog";
 import { sendLocalNotification } from "../services/notifications";
@@ -128,7 +129,9 @@ const MAX_SYNC_FILE_SIZE = 512 * 1024; // 512KB
 function assertGitCredentialResponse(response: GitCredentialResponse): GitCredentialResponse {
   if (!response.success) {
     const detail = response.error;
-    throw new Error(detail ? `${detail.message} (${detail.code})` : "Git credential operation failed");
+    throw new Error(
+      detail ? `${detail.message} (${detail.code})` : "Git credential operation failed"
+    );
   }
   return response;
 }
@@ -206,15 +209,26 @@ function notifyRunCommand(result: unknown) {
   );
 }
 
-const mkUserMsg = (content: string, images?: ImageAttachment[]): Message => ({
-  id: Date.now().toString(),
+const newTurnId = (): string => `turn_${randomUUID()}`;
+const newMessageId = (): string => `msg_${randomUUID()}`;
+
+const mkUserMsg = (
+  content: string,
+  images?: ImageAttachment[],
+  turnId?: string,
+  pending?: boolean
+): Message => ({
+  id: turnId ? `msg_user_${turnId}` : newMessageId(),
+  turnId,
   role: "user",
   content,
   images,
   timestamp: Date.now(),
+  pending,
 });
-const mkAssistantMsg = (): Message => ({
-  id: (Date.now() + 1).toString(),
+const mkAssistantMsg = (turnId?: string, uniqueId = false): Message => ({
+  id: turnId && !uniqueId ? `msg_assistant_${turnId}` : newMessageId(),
+  turnId,
   role: "assistant",
   content: "",
   toolCalls: [],
@@ -299,16 +313,44 @@ export function useAgent({
   messagesRef.current = messages;
   const isStreamingRef = useRef(isStreaming);
   isStreamingRef.current = isStreaming;
+  const activeTurnIdRef = useRef<string | null>(null);
+  const activeTurnKindRef = useRef<"message" | "goal" | null>(null);
+  const renderTurnIdRef = useRef<string | null>(null);
+  const replayDrainRef = useRef<Promise<void> | null>(null);
+  const replayGenerationRef = useRef(0);
+  const sessionPreparationRef = useRef<Promise<void>>(Promise.resolve());
+  const sessionReadyRef = useRef(false);
+  const pendingRebindScopeRef = useRef<WorkspaceScope | null>(null);
+  const replayTurnRef = useRef<{
+    queueId: string;
+    turnId: string;
+    settled: boolean;
+    resolve: (result: "done" | "disconnected" | "send-failed" | "uncertain") => void;
+  } | null>(null);
+  const queueHydrationRef = useRef<Promise<void> | null>(null);
+  const queueHydrationIntentRef = useRef(0);
+  const queueHydrationDesiredRef = useRef(false);
+  const hydratedProvisionalScopeRef = useRef<WorkspaceScope | null>(null);
   const goalStateRef = useRef(goalState);
   goalStateRef.current = goalState;
   // loadSession 定义在 handlers 单例块之后 → handlers 内经 ref 间接引用(P14 resync)
   const loadSessionRef = useRef<((sid: string) => Promise<void>) | null>(null);
+  const sessionLoadIntentRef = useRef(0);
   const modeRef = useRef(settings.mode);
   modeRef.current = settings.mode;
   const authTokenRef = useRef(settings.authToken);
   authTokenRef.current = settings.authToken;
   const deviceIdRef = useRef(settings.deviceId);
   deviceIdRef.current = settings.deviceId;
+
+  // Event callbacks may arrive several times in one render frame. Keep the ref as
+  // the synchronous source of truth, then mirror it to React state for rendering.
+  const commitMessages = useCallback((update: (current: Message[]) => Message[]): Message[] => {
+    const next = update(messagesRef.current);
+    messagesRef.current = next;
+    setMessages(next);
+    return next;
+  }, []);
 
   const activeRemoteReplicaRef = useRef<{
     connectionKey: string;
@@ -354,6 +396,25 @@ export function useAgent({
       return null;
     }
   };
+
+  const ensureSubmissionScope = (): WorkspaceScope => {
+    if (!sessionIdRef.current) {
+      const offlineSessionId = `offline_session_${randomUUID()}`;
+      sessionIdRef.current = offlineSessionId;
+      setSessionId(offlineSessionId);
+    }
+    const current = getCurrentWorkspaceScope();
+    if (current) return current;
+    if (projectIdRef.current && workspaceReplicaIdRef.current) {
+      return createWorkspaceScope({
+        projectId: projectIdRef.current,
+        replicaId: workspaceReplicaIdRef.current,
+        sessionId: sessionIdRef.current,
+        workspaceGeneration: workspaceGenerationRef.current ?? 1,
+      });
+    }
+    throw new Error("Current workspace scope is unavailable");
+  };
   // callId → toolName(runCommand 后台通知需知道工具名)
   const callNamesRef = useRef(new Map<string, string>());
   // geek 会话的 CoreMessage 史(与 UI messages 并行维护,供 runAgentLoop 使用)。
@@ -391,23 +452,52 @@ export function useAgent({
     if (!sid || msgs.length === 0) return;
     saveChatHistory(sid, msgs as StoredMessage[], projectIdRef.current || "").catch(() => {});
   }, []);
+  const pendingFinalizeSaveRef = useRef(false);
 
   // ── done 收敛(云端 & geek 共用) ─────────────────────
   const finalizeStreaming = useCallback(() => {
+    const completedTurnId = renderTurnIdRef.current;
+    isStreamingRef.current = false;
+    activeTurnIdRef.current = null;
+    activeTurnKindRef.current = null;
+    renderTurnIdRef.current = null;
     setIsStreaming(false);
     setStreamingPhase("idle");
     setCurrentToolName(undefined);
-    saveMessages(messagesRef.current, sessionIdRef.current);
+    pendingFinalizeSaveRef.current = true;
     if (AppState.currentState !== "active") {
-      const lastMsg = messagesRef.current[messagesRef.current.length - 1];
+      const lastMsg = completedTurnId
+        ? [...messagesRef.current]
+            .reverse()
+            .find((message) => message.role === "assistant" && message.turnId === completedTurnId)
+        : messagesRef.current[messagesRef.current.length - 1];
       const summary = lastMsg?.content?.slice(0, 100) || "任务已完成";
       sendLocalNotification("Pocket Code", summary);
     }
-  }, [saveMessages]);
+  }, []);
+
+  const cancelReplayDrain = useCallback(() => {
+    replayGenerationRef.current += 1;
+    const replay = replayTurnRef.current;
+    if (replay && !replay.settled) {
+      replay.settled = true;
+      replay.resolve("disconnected");
+    }
+    replayTurnRef.current = null;
+    replayDrainRef.current = null;
+  }, []);
+
+  // Run persistence after React has committed the last queued event update. This
+  // prevents done and the final text delta in the same batch from saving stale refs.
+  useEffect(() => {
+    if (isStreaming || !pendingFinalizeSaveRef.current) return;
+    pendingFinalizeSaveRef.current = false;
+    saveMessages(messages, sessionIdRef.current);
+  }, [isStreaming, messages, saveMessages]);
 
   // ── 重试/降级瞬时提醒(cloud & geek 共用,P13)─────────────
   const applyStreamNotice = useCallback(
-    (ev: AgentEventType) => {
+    (ev: AgentEventType, controlsStreaming: boolean = true) => {
       switch (ev.type) {
         case "step-retrying":
           setStreamNotice(`网络波动,正在重试(第 ${ev.nextAttempt}/${ev.maxAttempts} 次)…`);
@@ -426,31 +516,39 @@ export function useAgent({
           setEditCutoff(messagesRef.current.length); // 压缩点之前禁用编辑重发(D-P15-3)
           break;
         case "goal-updated": {
+          const nextGoalState =
+            ev.change === "completion" || ev.change === "cleared"
+              ? null
+              : {
+                  status: ev.status,
+                  goal: ev.goal,
+                  stopReason: ev.stopReason,
+                  stats: ev.stats,
+                  maxTurns: ev.maxTurns,
+                };
+          // Multiple WS frames can arrive before React commits a render. Keep the
+          // ref authoritative immediately so an adjacent done observes the new
+          // goal lifecycle instead of stale state.
+          goalStateRef.current = nextGoalState;
           if (ev.change === "completion") {
             sendLocalNotification("目标已完成 ✓", ev.goal ?? "");
             setGoalState(null);
           } else if (ev.change === "cleared") {
             setGoalState(null);
           } else {
-            setGoalState({
-              status: ev.status,
-              goal: ev.goal,
-              stopReason: ev.stopReason,
-              stats: ev.stats,
-              maxTurns: ev.maxTurns,
-            });
+            setGoalState(nextGoalState);
             if (ev.status === "blocked") {
               sendLocalNotification("目标受阻", ev.stopReason ?? ev.goal ?? "");
             }
           }
           // goal 终局/停车:收敛 streaming 态(done 在 goal active 时被跳过收敛,D-P16-7),
           // 顺带修剪 done 处预插的尾部空占位气泡。
-          if (ev.change !== "lifecycle" || ev.status !== "active") {
-            setMessages((prev) => {
-              const last = prev[prev.length - 1];
+          if (controlsStreaming && (ev.change !== "lifecycle" || ev.status !== "active")) {
+            commitMessages((current) => {
+              const last = current[current.length - 1];
               return last && last.role === "assistant" && !last.content && !last.toolCalls?.length
-                ? prev.slice(0, -1)
-                : prev;
+                ? current.slice(0, -1)
+                : current;
             });
             finalizeStreaming();
           }
@@ -463,7 +561,7 @@ export function useAgent({
           break;
       }
     },
-    [finalizeStreaming]
+    [commitMessages, finalizeStreaming]
   );
 
   // ── 单例 ServerConnection(惰性创建) ───────────────────
@@ -490,6 +588,8 @@ export function useAgent({
         projectName: projectNameRef.current || undefined,
         gitCredentialProfileId: gitCredentialProfileIdRef.current || undefined,
         model: modelRef.current,
+        activeTurnId: activeTurnIdRef.current || undefined,
+        activeTurnKind: activeTurnKindRef.current || undefined,
       }),
       isRelayPaired: () => !!(settingsRef.current.relayToken && settingsRef.current.relayMachineId),
       onTokenPersist: (token, machineId) =>
@@ -514,10 +614,36 @@ export function useAgent({
         // geek 模式的事件由本地适配层 emitGeek 产生,忽略来自服务器的流式事件
         if (modeRef.current === "geek") return;
 
-        setMessages((prev) => applyAgentEvent(prev, ev));
+        commitMessages((current) => applyAgentEvent(current, ev));
+        const replay = replayTurnRef.current;
+        const completesReplay = Boolean(
+          ev.type === "done" &&
+          replay &&
+          !replay.settled &&
+          (ev.turnId === replay.turnId || (!connRef.current?.supportsTurnCorrelation && !ev.turnId))
+        );
+        if (completesReplay && replay) {
+          replay.settled = true;
+          replay.resolve("done");
+        }
+        const isRecoveredGoalState =
+          ev.type === "goal-updated" && !!ev.turnId && !activeTurnIdRef.current;
+        const controlsActiveTurn =
+          !ev.turnId ||
+          (!!activeTurnIdRef.current && ev.turnId === activeTurnIdRef.current) ||
+          isRecoveredGoalState;
+        // Goal lifecycle owns the goal card independently from whichever turn is
+        // currently streaming. A late `cleared` for a cancelled goal must still
+        // remove the card, but it must not finalize a newer ordinary message.
+        if (ev.type === "goal-updated") {
+          applyStreamNotice(ev, controlsActiveTurn);
+          if (!controlsActiveTurn) return;
+        } else {
+          if (!controlsActiveTurn) return;
+          applyStreamNotice(ev);
+        }
         const p = phaseFor(ev);
         if (p) setStreamingPhase(p);
-        applyStreamNotice(ev);
 
         switch (ev.type) {
           case "tool-call":
@@ -537,19 +663,41 @@ export function useAgent({
             callNamesRef.current.clear();
             // CLI 委托路径缺省 stopReason,按 end_turn 解释(spec C12-4)
             setLastStopReason(ev.stopReason ?? "end_turn");
+            if (completesReplay) break;
             // P16 D-P16-7:goal 续跑的多轮输出用新气泡分隔,否则全堆进同一 assistant
             if (goalStateRef.current?.status === "active") {
-              setMessages((prev) => [...prev, mkAssistantMsg()]);
+              renderTurnIdRef.current = ev.turnId ?? null;
+              // One goal owns a stable turnId across multiple model rounds, but
+              // React list keys still need to be unique for each rendered bubble.
+              commitMessages((current) => [...current, mkAssistantMsg(ev.turnId, true)]);
+              isStreamingRef.current = true;
               setIsStreaming(true); // goal 仍在续跑,不收敛 streaming 态
               break;
             }
             finalizeStreaming();
             break;
           case "error":
-            // reducer 已追加错误文案,这里只收敛 streaming 状态
-            setIsStreaming(false);
-            setStreamingPhase("idle");
-            setCurrentToolName(undefined);
+            // Agent errors are followed by done(stopReason="error"). Keep the turn
+            // locked until that terminal event so queued replay cannot overlap it.
+            if (
+              ev.code === "control-error" ||
+              ev.code === "turn-journal-unavailable" ||
+              ev.code === "turn-journal-commit-failed" ||
+              ev.code === "turn-in-progress"
+            ) {
+              const replay = replayTurnRef.current;
+              if (
+                replay &&
+                !replay.settled &&
+                (ev.turnId === replay.turnId ||
+                  (!connRef.current?.supportsTurnCorrelation && !ev.turnId))
+              ) {
+                replay.settled = true;
+                replay.resolve("send-failed");
+                break;
+              }
+              finalizeStreaming();
+            }
             break;
         }
       },
@@ -562,8 +710,19 @@ export function useAgent({
         workspaceScope?: WorkspaceSessionScopeType,
         workspaceCatalog?: WorkspaceProjectCatalogEntryType[]
       ) => {
+        sessionReadyRef.current = false;
+        sessionPreparationRef.current = Promise.resolve();
+        // Capture the provisional offline scope before replacing its temporary
+        // session id with the authoritative id returned by the server. Otherwise
+        // rebindProvisionalQueue would look under the new id and orphan the FIFO.
+        const previousScope =
+          pendingRebindScopeRef.current ??
+          hydratedProvisionalScopeRef.current ??
+          getCurrentWorkspaceScope();
         sessionIdRef.current = sid;
         setSessionId(sid);
+        setAuthError(null);
+        setStreamNotice(null);
         const boundProfile = settingsRef.current.gitCredentialProfiles.find(
           (profile) => profile.id === gitCredentialProfileIdRef.current && profile.hasSecret
         );
@@ -584,7 +743,6 @@ export function useAgent({
         } else {
           remoteGitCredentialInstallRef.current = null;
         }
-        const previousScope = getCurrentWorkspaceScope();
         const connectionKey = getWorkspaceConnectionKey(settingsRef.current);
         if (connectionKey && workspaceCatalog) {
           for (const project of workspaceCatalog) {
@@ -616,25 +774,79 @@ export function useAgent({
             activeRemoteReplicaRef.current = { connectionKey, entry };
             onRemoteReplicaRef.current?.(workspaceScope.projectId, entry, projectNameRef.current);
             const authoritativeScope = createWorkspaceScope(workspaceScope);
-            void (async () => {
-              if (previousScope && !isSameWorkspaceScope(previousScope, authoritativeScope)) {
-                await rebindProvisionalQueue(previousScope, authoritativeScope);
+            const provisionalScope = createWorkspaceScope({
+              projectId: authoritativeScope.projectId,
+              replicaId: workspaceReplicaIdRef.current ?? authoritativeScope.replicaId,
+              sessionId: authoritativeScope.sessionId,
+              workspaceGeneration:
+                workspaceGenerationRef.current ?? authoritativeScope.workspaceGeneration,
+            });
+            const scopeToRebind = previousScope ?? provisionalScope;
+            pendingRebindScopeRef.current = scopeToRebind;
+            sessionPreparationRef.current = (async () => {
+              // Even an identical four-field scope still needs its provisional
+              // route record upgraded with the server authority before replay.
+              await rebindProvisionalQueue(scopeToRebind, authoritativeScope, {
+                connectionKey,
+                authorityId: workspaceScope.authorityId,
+              });
+              if (pendingRebindScopeRef.current === scopeToRebind) {
+                pendingRebindScopeRef.current = null;
               }
-              await replayOfflineQueue();
+              hydratedProvisionalScopeRef.current = null;
             })();
             return;
           }
         }
-        void replayOfflineQueue();
+      },
+      onSessionReady: () => {
+        const preparation = sessionPreparationRef.current;
+        void preparation
+          .then(() => {
+            if (sessionPreparationRef.current !== preparation || !connRef.current?.isReady) return;
+            sessionReadyRef.current = true;
+            setIsConnected(true);
+            void replayOfflineQueue();
+          })
+          .catch((error) => {
+            if (sessionPreparationRef.current !== preparation) return;
+            console.warn("[OfflineQueue] Failed to bind queued turns to the session:", error);
+            sessionReadyRef.current = false;
+            setIsConnected(false);
+            setStreamNotice("离线消息绑定失败，已停止发送；请重新连接后重试");
+            connRef.current?.disconnect();
+          });
       },
       onConnected: () => {
-        setIsConnected(true);
+        // Transport-open is not turn-ready. The session ack above is the readiness gate.
+        sessionReadyRef.current = false;
+        setIsConnected(false);
         setAuthError(null);
         setStreamNotice(null);
       },
       onDisconnected: () => {
+        sessionReadyRef.current = false;
         setIsConnected(false);
         remoteGitCredentialInstallRef.current = null;
+        const replay = replayTurnRef.current;
+        if (replay && !replay.settled) {
+          const supportsSafeReplay = connRef.current?.supportsTurnCorrelation === true;
+          if (!supportsSafeReplay) {
+            // A legacy server has neither durable turn IDs nor reconnect backlog.
+            // Surface the ambiguity and quarantine the FIFO record rather than
+            // silently retrying a possibly side-effecting turn.
+            commitMessages((current) =>
+              applyAgentEvent(current, {
+                type: "error",
+                code: "legacy-turn-uncertain",
+                message: "连接中断，旧服务端无法确认本轮是否已执行；已停止自动重试。",
+                turnId: replay.turnId,
+              })
+            );
+          }
+          replay.settled = true;
+          replay.resolve(supportsSafeReplay ? "disconnected" : "uncertain");
+        }
         // P14:断开不中断 turn——agent 仍在开发机跑,重连后经 seq 补发接续
         if (isStreamingRef.current) {
           setStreamNotice("连接已断开,agent 仍在开发机继续运行,恢复后自动补齐");
@@ -684,24 +896,220 @@ export function useAgent({
 
   // ── Offline queue replay(连接建立后) ─────────────────
   const replayOfflineQueue = useCallback(async () => {
-    await remoteGitCredentialInstallRef.current;
-    const replayScope = getCurrentWorkspaceScope();
-    if (!replayScope) return;
-    const queue = await getQueueForScope(replayScope);
-    for (const msg of queue) {
-      if (!conn.isOpen) break;
-      const currentScope = getCurrentWorkspaceScope();
-      if (!currentScope || !isSameWorkspaceScope(replayScope, currentScope)) break;
-      conn.sendRaw({ type: "message", content: msg.content, model: modelRef.current });
-      await dequeueMessage(msg.id);
-      await new Promise((r) => setTimeout(r, 500));
-    }
-  }, [conn]);
+    if (replayDrainRef.current) return replayDrainRef.current;
+    const generation = replayGenerationRef.current;
+    let ownsReplayLock = false;
+
+    const drain = (async () => {
+      await remoteGitCredentialInstallRef.current;
+      const replayScope = getCurrentWorkspaceScope();
+      const connectionKey = getWorkspaceConnectionKey(settingsRef.current);
+      const retainedReplica = getRetainedRemoteReplica();
+      const replayRoute =
+        connectionKey && retainedReplica?.authorityId
+          ? { connectionKey, authorityId: retainedReplica.authorityId }
+          : null;
+      if (
+        !replayScope ||
+        !replayRoute ||
+        !sessionReadyRef.current ||
+        !conn.isReady ||
+        generation !== replayGenerationRef.current
+      ) {
+        return;
+      }
+      const initialQueue = await getQueueForReplay(replayScope, replayRoute);
+      if (
+        isStreamingRef.current &&
+        activeTurnIdRef.current &&
+        !initialQueue.some((queued) => queued.id === activeTurnIdRef.current)
+      ) {
+        return;
+      }
+
+      while (
+        sessionReadyRef.current &&
+        conn.isReady &&
+        generation === replayGenerationRef.current
+      ) {
+        const currentScope = getCurrentWorkspaceScope();
+        const currentConnectionKey = getWorkspaceConnectionKey(settingsRef.current);
+        const currentReplica = getRetainedRemoteReplica();
+        if (
+          !currentScope ||
+          !isSameWorkspaceScope(replayScope, currentScope) ||
+          currentConnectionKey !== replayRoute.connectionKey ||
+          currentReplica?.authorityId !== replayRoute.authorityId
+        ) {
+          return;
+        }
+        const queued = (await getQueueForReplay(replayScope, replayRoute))[0];
+        if (!queued) return;
+
+        ownsReplayLock = true;
+        commitMessages((current) => prepareQueuedTurnMessages(current, queued));
+        activeTurnIdRef.current = queued.id;
+        activeTurnKindRef.current = "message";
+        renderTurnIdRef.current = queued.id;
+        isStreamingRef.current = true;
+        setIsStreaming(true);
+        setStreamingPhase("connecting");
+        setLastStopReason(null);
+
+        const result = await new Promise<"done" | "disconnected" | "send-failed" | "uncertain">(
+          (resolve) => {
+            replayTurnRef.current = {
+              queueId: queued.id,
+              turnId: queued.id,
+              settled: false,
+              resolve,
+            };
+            const sent = conn.sendRaw({
+              type: "message",
+              turnId: queued.id,
+              content: queued.content,
+              model: queued.model ?? modelRef.current,
+              customPrompt: queued.customPrompt,
+              rewindTo: queued.rewindTo,
+              images: queued.images,
+            });
+            if (!sent) {
+              replayTurnRef.current.settled = true;
+              resolve("send-failed");
+            }
+          }
+        );
+
+        if (generation !== replayGenerationRef.current) return;
+        replayTurnRef.current = null;
+        if (result !== "done") {
+          if (result === "uncertain") {
+            await markUncertain(queued.id, "legacy-disconnect");
+            await saveChatHistory(
+              replayScope.sessionId,
+              messagesRef.current as StoredMessage[],
+              replayScope.projectId
+            );
+          } else {
+            await markRetried(queued.id);
+          }
+          finalizeStreaming();
+          return;
+        }
+        // The durable chat snapshot is the handoff point: never remove the queue
+        // record until the completed response has been persisted successfully.
+        await saveChatHistory(
+          replayScope.sessionId,
+          messagesRef.current as StoredMessage[],
+          replayScope.projectId
+        );
+        if (generation !== replayGenerationRef.current) return;
+        await dequeueMessage(queued.id);
+        // done may have finalized React state; the drain owns the lock until it
+        // observes an empty FIFO so a live send can never jump between queued turns.
+        isStreamingRef.current = true;
+        setIsStreaming(true);
+      }
+    })().finally(() => {
+      if (generation === replayGenerationRef.current) {
+        replayTurnRef.current = null;
+        replayDrainRef.current = null;
+        // An active goal has no ordinary FIFO record. Merely checking an empty
+        // queue on reconnect must not release that goal's streaming lock.
+        if (ownsReplayLock) finalizeStreaming();
+      }
+    });
+
+    replayDrainRef.current = drain;
+    return drain;
+  }, [commitMessages, conn, finalizeStreaming]);
 
   // ── 连接控制 ──────────────────────────────────────────
-  const connect = useCallback(() => conn.connect(), [conn]);
+  const connect = useCallback(() => {
+    queueHydrationDesiredRef.current = true;
+    queueHydrationIntentRef.current += 1;
+    if (conn.isOpen || queueHydrationRef.current) return;
+
+    const startHydration = () => {
+      if (!queueHydrationDesiredRef.current || conn.isOpen || queueHydrationRef.current) return;
+      const hydrationIntent = queueHydrationIntentRef.current;
+      const generation = replayGenerationRef.current;
+      const targetProjectId = projectIdRef.current;
+      const targetConnectionKey = getWorkspaceConnectionKey(settingsRef.current);
+      const retainedReplica = getRetainedRemoteReplica();
+      let hydrationFailed = false;
+      let hydration!: Promise<void>;
+      hydration = (async () => {
+        if (
+          !sessionIdRef.current &&
+          targetProjectId &&
+          targetConnectionKey &&
+          usesRemoteWorkspace(settingsRef.current)
+        ) {
+          const resumeScope = await getResumeScopeForProject({
+            projectId: targetProjectId,
+            connectionKey: targetConnectionKey,
+            retainedReplica,
+          });
+          if (
+            resumeScope &&
+            !sessionIdRef.current &&
+            hydrationIntent === queueHydrationIntentRef.current &&
+            generation === replayGenerationRef.current &&
+            projectIdRef.current === targetProjectId &&
+            getWorkspaceConnectionKey(settingsRef.current) === targetConnectionKey
+          ) {
+            const archived = await loadChatHistoryStrict(resumeScope.sessionId);
+            if (
+              hydrationIntent !== queueHydrationIntentRef.current ||
+              generation !== replayGenerationRef.current ||
+              projectIdRef.current !== targetProjectId ||
+              getWorkspaceConnectionKey(settingsRef.current) !== targetConnectionKey
+            ) {
+              return;
+            }
+            commitMessages(() => archived as Message[]);
+            hydratedProvisionalScopeRef.current = resumeScope;
+            sessionIdRef.current = resumeScope.sessionId;
+            setSessionId(resumeScope.sessionId);
+          }
+        }
+      })()
+        .catch((error) => {
+          hydrationFailed = true;
+          console.warn("[OfflineQueue] Failed to restore queued session:", error);
+          if (
+            hydrationIntent === queueHydrationIntentRef.current &&
+            generation === replayGenerationRef.current
+          ) {
+            queueHydrationDesiredRef.current = false;
+            setStreamNotice("离线消息恢复失败，请重试连接");
+          }
+        })
+        .finally(() => {
+          if (queueHydrationRef.current === hydration) queueHydrationRef.current = null;
+          const stillCurrent =
+            hydrationIntent === queueHydrationIntentRef.current &&
+            generation === replayGenerationRef.current &&
+            projectIdRef.current === targetProjectId &&
+            getWorkspaceConnectionKey(settingsRef.current) === targetConnectionKey;
+          if (queueHydrationDesiredRef.current && stillCurrent && !hydrationFailed) {
+            conn.connect();
+          } else if (queueHydrationDesiredRef.current && !stillCurrent && !conn.isOpen) {
+            // A project/authority change arrived while the previous AsyncStorage
+            // read was in flight. Start the latest intent instead of swallowing it.
+            startHydration();
+          }
+        });
+      queueHydrationRef.current = hydration;
+    };
+
+    startHydration();
+  }, [commitMessages, conn]);
 
   const disconnect = useCallback(() => {
+    queueHydrationDesiredRef.current = false;
+    queueHydrationIntentRef.current += 1;
     abortRef.current?.abort();
     conn.disconnect();
   }, [conn]);
@@ -709,7 +1117,21 @@ export function useAgent({
   const stopStreaming = useCallback(() => {
     abortRef.current?.abort(); // geek:中断 AI 流
     abortRef.current = null;
-    if (settings.mode === "cloud") conn.sendRaw({ type: "abort" }); // cloud:通知服务器
+    if (settings.mode === "cloud") {
+      const replay = replayTurnRef.current;
+      const sent = conn.sendRaw({ type: "abort" }); // cloud:通知服务器
+      if (!sent && replay && !replay.settled) {
+        replay.settled = true;
+        replay.resolve("disconnected");
+      }
+      // For queued replay, keep correlation and the lock until the matching
+      // aborted done arrives. If transport failed, the drain keeps the record.
+      if (replay && sent) return;
+    }
+    isStreamingRef.current = false;
+    activeTurnIdRef.current = null;
+    activeTurnKindRef.current = null;
+    renderTurnIdRef.current = null;
     setIsStreaming(false);
     setStreamingPhase("idle");
     setCurrentToolName(undefined);
@@ -803,9 +1225,7 @@ export function useAgent({
   const deleteRemoteGitCredential = useCallback(
     async (credentialProfileId: string): Promise<GitCredentialResponse> => {
       if (!conn.isOpen) throw new Error("远端尚未连接，无法删除远端 Git Key");
-      return assertGitCredentialResponse(
-        await conn.deleteGitCredential(credentialProfileId)
-      );
+      return assertGitCredentialResponse(await conn.deleteGitCredential(credentialProfileId));
     },
     [conn]
   );
@@ -858,44 +1278,106 @@ export function useAgent({
     [conn]
   );
 
-  // ── 云端发送 ──────────────────────────────────────────
-  const sendCloudMessage = useCallback(
-    (content: string, images?: ImageAttachment[]) => {
-      setMessages((prev) => [...prev, mkUserMsg(content, images), mkAssistantMsg()]);
+  const submitCloudMessage = useCallback(
+    async (content: string, images?: ImageAttachment[], rewindTo?: number) => {
+      if (isStreamingRef.current) return false;
+      const generation = replayGenerationRef.current;
+      const scope = ensureSubmissionScope();
+      const turnId = newTurnId();
+      const remoteReplica = getRetainedRemoteReplica();
+      const connectionKey = getWorkspaceConnectionKey(settingsRef.current) ?? undefined;
+      const provisional = usesRemoteWorkspace(settingsRef.current) && !remoteReplica;
+
+      // Accept and lock before any storage/credential/network await. Every accepted
+      // turn gets one durable FIFO record with the same id used by rendering.
+      isStreamingRef.current = true;
+      activeTurnIdRef.current = turnId;
+      activeTurnKindRef.current = "message";
+      renderTurnIdRef.current = turnId;
+      const acceptedMessages = commitMessages((current) => [
+        ...current,
+        mkUserMsg(content, images, turnId, true),
+        { ...mkAssistantMsg(turnId), pending: true },
+      ]);
       setIsStreaming(true);
       setStreamingPhase("connecting");
       setLastStopReason(null);
       setStreamNotice(null);
       setCompactionNotice(null);
 
-      const payload: Record<string, unknown> = {
-        type: "message",
-        content,
-        model: modelRef.current,
-      };
-      if (images?.length) {
-        payload.images = images.map((img) => ({ base64: img.base64, mimeType: img.mimeType }));
+      let enqueued = false;
+      try {
+        await enqueueMessage(scope, content, {
+          id: turnId,
+          provisional,
+          connectionKey,
+          authorityId: remoteReplica?.authorityId,
+          images,
+          model: modelRef.current,
+          customPrompt: customPromptRef.current,
+          rewindTo,
+        });
+        enqueued = true;
+      } catch {
+        if (generation === replayGenerationRef.current) {
+          commitMessages((current) => current.filter((message) => message.turnId !== turnId));
+          finalizeStreaming();
+        }
+        return false;
       }
-      if (customPromptRef.current) payload.customPrompt = customPromptRef.current;
-      conn.sendRaw(payload);
+
+      try {
+        await saveChatHistory(
+          scope.sessionId,
+          acceptedMessages as StoredMessage[],
+          scope.projectId
+        );
+      } catch (error) {
+        // enqueueMessage is the durable acceptance boundary. Once it succeeds,
+        // returning false would keep the input draft and let a retry create a
+        // second turnId while the first FIFO record still executes later.
+        if (enqueued) {
+          console.warn("[ChatHistory] Accepted turn snapshot could not be saved:", error);
+        }
+      }
+
+      if (generation !== replayGenerationRef.current) return true;
+
+      if (!sessionReadyRef.current || !conn.isReady || provisional) {
+        finalizeStreaming();
+        return true;
+      }
+      void (async () => {
+        await remoteGitCredentialInstallRef.current;
+        if (generation !== replayGenerationRef.current) return;
+        if (!sessionReadyRef.current || !conn.isReady) {
+          finalizeStreaming();
+          return;
+        }
+        await replayOfflineQueue();
+      })().catch(() => {
+        if (generation === replayGenerationRef.current) finalizeStreaming();
+      });
+      return true;
     },
-    [conn]
+    [commitMessages, conn, finalizeStreaming, replayOfflineQueue]
   );
 
   // ── geek 模式:reducer 喂事件 ──────────────────────────
   const emitGeek = useCallback(
     (ev: AgentEventType) => {
-      setMessages((prev) => applyAgentEvent(prev, ev));
+      commitMessages((current) => applyAgentEvent(current, ev));
       const p = phaseFor(ev);
       if (p) setStreamingPhase(p);
       applyStreamNotice(ev);
     },
-    [applyStreamNotice]
+    [applyStreamNotice, commitMessages]
   );
 
   // ── Geek mode: App drives the agent loop(agent-core runAgentLoop) ────
   const sendGeekMessage = useCallback(
     async (content: string, images?: ImageAttachment[]) => {
+      if (isStreamingRef.current) return;
       // Ensure sessionId exists for saving (geek mode may not have server connection)
       if (!sessionIdRef.current) {
         const clientId = `local_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
@@ -907,8 +1389,15 @@ export function useAgent({
       const apiKeyField = getApiKeyField(modelConfig.provider);
       const apiKey = apiKeyField ? settings.apiKeys[apiKeyField] || "" : "";
 
-      const userMsg = mkUserMsg(content, images);
-      setMessages((prev) => [...prev, userMsg, mkAssistantMsg()]);
+      const turnId = newTurnId();
+      activeTurnIdRef.current = turnId;
+      activeTurnKindRef.current = "message";
+      renderTurnIdRef.current = turnId;
+      isStreamingRef.current = true;
+      const emitTurnEvent = (event: AgentEventType) =>
+        emitGeek({ ...event, turnId } as AgentEventType);
+      const userMsg = mkUserMsg(content, images, turnId);
+      commitMessages((current) => [...current, userMsg, mkAssistantMsg(turnId)]);
       setIsStreaming(true);
       setStreamingPhase("connecting");
       setLastStopReason(null);
@@ -941,7 +1430,7 @@ export function useAgent({
         });
         if (compaction) {
           coreHistoryRef.current = compactedHistory;
-          emitGeek({ type: "history-compacted", ...compaction });
+          emitTurnEvent({ type: "history-compacted", ...compaction });
         }
 
         const result = await runAgentLoop({
@@ -959,7 +1448,7 @@ export function useAgent({
           history: coreHistoryRef.current, // newSession/项目切换处重置为 [];loadSession 重建自存档(I1)
           userMessage: content,
           images: images?.map((i) => ({ base64: i.base64, mimeType: i.mimeType })),
-          onEvent: emitGeek,
+          onEvent: emitTurnEvent,
           signal: abortController.signal,
           maxSteps: 10, // 保持 geek 现值
         });
@@ -968,68 +1457,116 @@ export function useAgent({
       } catch (err: any) {
         // P12 后 loop 不再抛错(错误收敛为返回值);此 catch 仅防御构造期异常
         // (createRnModelClient/createDeviceBackend 等),不会再对 loop 错误二次发 error 事件。
-        if (err.name !== "AbortError") emitGeek({ type: "error", message: String(err.message) });
+        if (err.name !== "AbortError") {
+          emitTurnEvent({ type: "error", message: String(err.message) });
+        }
       } finally {
-        abortRef.current = null;
+        if (abortRef.current === abortController) abortRef.current = null;
         finalizeStreaming();
       }
     },
-    [settings, executeTool, emitGeek, finalizeStreaming]
+    [settings, executeTool, emitGeek, finalizeStreaming, commitMessages]
   );
 
   // ── Send message ──────────────────────────────────────
   const sendMessage = useCallback(
     async (content: string, images?: ImageAttachment[]) => {
       // P16 D-P16-3:/goal 前缀 → 下发目标(仅 cloud 路径;goal driver 生在 daemon)
-      if (settings.mode === "cloud" && content.startsWith("/goal ") && conn.isOpen) {
+      if (
+        settings.mode === "cloud" &&
+        content.startsWith("/goal ") &&
+        sessionReadyRef.current &&
+        conn.isReady
+      ) {
         const goalContent = content.slice(6).trim();
-        if (!goalContent) return;
-        setMessages((prev) => [...prev, mkUserMsg(content, images), mkAssistantMsg()]);
+        if (!goalContent || isStreamingRef.current) return false;
+        const generation = replayGenerationRef.current;
+        const targetScope = getCurrentWorkspaceScope();
+        const turnId = newTurnId();
+        activeTurnIdRef.current = turnId;
+        activeTurnKindRef.current = "goal";
+        renderTurnIdRef.current = turnId;
+        isStreamingRef.current = true;
+        commitMessages((current) => [
+          ...current,
+          mkUserMsg(content, images, turnId),
+          mkAssistantMsg(turnId),
+        ]);
         setIsStreaming(true);
         setStreamingPhase("connecting");
         setLastStopReason(null);
         setStreamNotice(null);
         setCompactionNotice(null);
         await remoteGitCredentialInstallRef.current;
-        conn.sendRaw({ type: "goal-create", content: goalContent });
-        return;
+        const currentScope = getCurrentWorkspaceScope();
+        if (
+          generation !== replayGenerationRef.current ||
+          !sessionReadyRef.current ||
+          !conn.isReady ||
+          (targetScope && (!currentScope || !isSameWorkspaceScope(targetScope, currentScope)))
+        ) {
+          if (generation === replayGenerationRef.current) {
+            commitMessages((current) => current.filter((message) => message.turnId !== turnId));
+            finalizeStreaming();
+          }
+          return false;
+        }
+        if (!conn.sendRaw({ type: "goal-create", turnId, content: goalContent })) {
+          commitMessages((current) =>
+            applyAgentEvent(current, {
+              type: "error",
+              message: "目标发送失败，请重试",
+              turnId,
+            })
+          );
+          finalizeStreaming();
+        }
+        return true;
       }
       if (settings.mode === "cloud") {
-        if (!conn.isOpen) {
-          // 未连接:入队待重放,并本地插入 pending 用户消息以可见
-          if (!sessionIdRef.current) {
-            const offlineSessionId = `offline_session_${randomUUID()}`;
-            sessionIdRef.current = offlineSessionId;
-            setSessionId(offlineSessionId);
-          }
-          const scope = getCurrentWorkspaceScope();
-          if (!scope) throw new Error("Current workspace scope is unavailable");
-          const provisional =
-            usesRemoteWorkspace(settingsRef.current) && !getRetainedRemoteReplica();
-          await enqueueMessage(scope, content, { provisional });
-          setMessages((prev) => [...prev, { ...mkUserMsg(content, images), pending: true }]);
-          return;
-        }
-        await remoteGitCredentialInstallRef.current;
-        sendCloudMessage(content, images);
+        return submitCloudMessage(content, images);
       } else {
-        sendGeekMessage(content, images);
+        if (isStreamingRef.current) return false;
+        await sendGeekMessage(content, images);
+        return true;
       }
     },
-    [settings.mode, conn, sendCloudMessage, sendGeekMessage]
+    [settings.mode, conn, submitCloudMessage, sendGeekMessage, commitMessages, finalizeStreaming]
   );
 
   // ── P16:goal 控制(不经模型 turn) ─────────────────────
   const goalControl = useCallback(
     (action: "pause" | "resume" | "cancel") => {
-      conn.sendRaw({ type: "goal-control", action });
       if (action === "resume") {
+        // Resume starts a new goal turn. Never let it replace the correlation
+        // identity of an ordinary turn that is still streaming.
+        if (isStreamingRef.current || !sessionReadyRef.current || !conn.isReady) {
+          setStreamNotice("当前消息尚未完成，暂时无法继续目标");
+          return;
+        }
+        const turnId = newTurnId();
+        activeTurnIdRef.current = turnId;
+        activeTurnKindRef.current = "goal";
+        renderTurnIdRef.current = turnId;
+        isStreamingRef.current = true;
         setIsStreaming(true);
         setStreamingPhase("connecting");
-        setMessages((prev) => [...prev, mkAssistantMsg()]);
+        commitMessages((current) => [...current, mkAssistantMsg(turnId)]);
+        if (!conn.sendRaw({ type: "goal-control", action, turnId })) {
+          commitMessages((current) =>
+            applyAgentEvent(current, {
+              type: "error",
+              message: "目标继续请求发送失败，请重试",
+              turnId,
+            })
+          );
+          finalizeStreaming();
+        }
+        return;
       }
+      conn.sendRaw({ type: "goal-control", action });
     },
-    [conn]
+    [conn, commitMessages, finalizeStreaming]
   );
 
   // ── Edit & Resend (conversation branching) ────────────
@@ -1040,8 +1577,7 @@ export function useAgent({
 
       // 截断到目标消息之前;立即更新 ref 供后续构建历史使用
       const truncated = messagesRef.current.slice(0, idx);
-      setMessages(truncated);
-      messagesRef.current = truncated;
+      commitMessages(() => truncated);
       // geek 模式:coreHistoryRef 与 UI messages 并行维护,同步截断到相同的
       // user 轮次数,否则重发时仍会把已被分支丢弃的旧轮次带给模型(见
       // truncateCoreHistory 注释)。
@@ -1049,103 +1585,155 @@ export function useAgent({
       coreHistoryRef.current = truncateCoreHistory(coreHistoryRef.current, keepUserTurns);
 
       if (settings.mode === "cloud") {
-        await new Promise((r) => setTimeout(r, 50));
-        if (!conn.isOpen) return;
-        await remoteGitCredentialInstallRef.current;
-        setMessages((prev) => [...prev, mkUserMsg(newContent), mkAssistantMsg()]);
-        setIsStreaming(true);
-        setStreamingPhase("connecting");
-
-        const payload: Record<string, unknown> = {
-          type: "message",
-          content: newContent,
-          model: modelRef.current,
-          rewindTo: idx,
-        };
-        if (customPromptRef.current) payload.customPrompt = customPromptRef.current;
-        conn.sendRaw(payload);
+        await submitCloudMessage(newContent, undefined, idx);
       } else {
         await new Promise((r) => setTimeout(r, 50));
         sendGeekMessage(newContent);
       }
     },
-    [settings.mode, conn, sendGeekMessage]
+    [settings.mode, sendGeekMessage, submitCloudMessage, commitMessages]
   );
 
   // ── Session management ────────────────────────────────
   /** Load a previous session's messages and reconnect */
   const loadSession = useCallback(
     async (targetSessionId: string) => {
+      const loadIntent = ++sessionLoadIntentRef.current;
+      const generation = replayGenerationRef.current;
+      const targetProjectId = projectIdRef.current;
+      const targetConnectionKey = getWorkspaceConnectionKey(settingsRef.current);
+      let loaded: StoredMessage[];
+      try {
+        loaded = await loadChatHistoryStrict(targetSessionId);
+      } catch (error) {
+        if (
+          loadIntent === sessionLoadIntentRef.current &&
+          generation === replayGenerationRef.current &&
+          projectIdRef.current === targetProjectId &&
+          getWorkspaceConnectionKey(settingsRef.current) === targetConnectionKey
+        ) {
+          console.warn("[ChatHistory] Failed to load session:", error);
+          setStreamNotice("会话历史读取失败，已保留当前会话，请重试");
+        }
+        return;
+      }
+      if (
+        loadIntent !== sessionLoadIntentRef.current ||
+        generation !== replayGenerationRef.current ||
+        projectIdRef.current !== targetProjectId ||
+        getWorkspaceConnectionKey(settingsRef.current) !== targetConnectionKey
+      ) {
+        return;
+      }
       abortRef.current?.abort();
+      cancelReplayDrain();
       conn.disconnect();
+      conn.resetSessionCursor();
       setIsConnected(false);
-      const loaded = await loadChatHistory(targetSessionId);
-      setMessages(loaded as Message[]);
+      commitMessages(() => loaded as Message[]);
       // I1 修复:从存档重建 CoreMessage 历史(而非重置为 []),使 loadSession 后
       // geek 续聊仍能看到之前对话的上下文。
       coreHistoryRef.current = storedToCoreMessages(loaded);
       setSessionId(targetSessionId);
       sessionIdRef.current = targetSessionId; // 立即更新,供 connect() 使用
       setIsStreaming(false);
+      isStreamingRef.current = false;
+      activeTurnIdRef.current = null;
+      activeTurnKindRef.current = null;
+      renderTurnIdRef.current = null;
       setLastStopReason(null);
       setStreamNotice(null);
       setCompactionNotice(null);
       setEditCutoff(0);
       setGoalState(null);
+      goalStateRef.current = null;
+      hydratedProvisionalScopeRef.current = null;
+      pendingRebindScopeRef.current = null;
       if (needsAutoConnect) setTimeout(() => connect(), 50); // loadSession 断开后延迟重连
     },
-    [conn, connect, needsAutoConnect]
+    [conn, connect, needsAutoConnect, commitMessages, cancelReplayDrain]
   );
   loadSessionRef.current = loadSession;
 
   /** Start a new empty session */
   const newSession = useCallback(() => {
+    sessionLoadIntentRef.current += 1;
     abortRef.current?.abort();
+    cancelReplayDrain();
     conn.disconnect();
-    setMessages([]);
+    conn.resetSessionCursor();
+    commitMessages(() => []);
     coreHistoryRef.current = [];
     setSessionId(null);
     sessionIdRef.current = null;
     setIsStreaming(false);
+    isStreamingRef.current = false;
+    activeTurnIdRef.current = null;
+    activeTurnKindRef.current = null;
+    renderTurnIdRef.current = null;
     setLastStopReason(null);
     setStreamNotice(null);
     setCompactionNotice(null);
     setEditCutoff(0);
     setGoalState(null);
-  }, [conn]);
+    goalStateRef.current = null;
+    hydratedProvisionalScopeRef.current = null;
+    pendingRebindScopeRef.current = null;
+  }, [conn, commitMessages, cancelReplayDrain]);
 
   // ── Reset session when project changes ───────────────
   useEffect(() => {
     if (!projectId) return;
+    sessionLoadIntentRef.current += 1;
     abortRef.current?.abort();
+    cancelReplayDrain();
     conn.disconnect();
-    setMessages([]);
+    conn.resetSessionCursor();
+    commitMessages(() => []);
     coreHistoryRef.current = [];
     setSessionId(null);
     sessionIdRef.current = null;
     setIsStreaming(false);
+    isStreamingRef.current = false;
+    activeTurnIdRef.current = null;
+    activeTurnKindRef.current = null;
+    renderTurnIdRef.current = null;
     setIsConnected(false);
     setLastStopReason(null);
     setStreamNotice(null);
     setCompactionNotice(null);
     setEditCutoff(0);
     setGoalState(null);
+    goalStateRef.current = null;
+    hydratedProvisionalScopeRef.current = null;
+    pendingRebindScopeRef.current = null;
     activeRemoteReplicaRef.current = null;
-  }, [projectId, workspaceHandle?.generation, workspaceRoot, conn]);
+  }, [
+    projectId,
+    workspaceHandle?.generation,
+    workspaceRoot,
+    conn,
+    commitMessages,
+    cancelReplayDrain,
+  ]);
 
   // ── Cleanup ───────────────────────────────────────────
   useEffect(() => {
     return () => {
       abortRef.current?.abort();
+      cancelReplayDrain();
       conn.disconnect();
     };
-  }, [conn]);
+  }, [conn, cancelReplayDrain]);
 
   return {
     messages,
-    setMessages,
+    setMessages: (next: Message[] | ((current: Message[]) => Message[])) => {
+      commitMessages((current) => (typeof next === "function" ? next(current) : next));
+    },
     isConnected,
     isStreaming,
+    activeTurnId: renderTurnIdRef.current,
     streamingPhase,
     currentToolName,
     sessionId,

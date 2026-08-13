@@ -18,6 +18,8 @@ export interface StoredImageAttachment {
 
 export interface StoredMessage {
   id: string;
+  /** Correlates the user/assistant pair with streamed events for one turn. */
+  turnId?: string;
   role: "user" | "assistant";
   content: string;
   thinking?: string;

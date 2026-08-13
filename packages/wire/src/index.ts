@@ -77,6 +77,7 @@ export {
   UsageEvent,
   DoneEvent,
   ErrorEvent,
+  TurnReplayResetEvent,
   AgentEvent,
   AGENT_EVENT_TYPE_NAMES,
   type AgentEventType,
@@ -148,6 +149,7 @@ export {
 export {
   AuthMsg,
   SessionMsg,
+  SessionReadyMsg,
   QuotaMsg,
   FileListMsg,
   FileContentMsg,

@@ -6,6 +6,7 @@ import { describe, it, expect, vi } from "vitest";
 import { runGoalDriver, type GoalDriverDeps, type TurnOutcome } from "./driver.js";
 import { createGoal } from "./types.js";
 import type { AgentSession } from "../agent.js";
+import type { AgentEventType } from "@pocket-code/wire";
 
 function mkSession(goalContent = "清零 lint 错误", maxTurns = 20): AgentSession {
   return {
@@ -24,18 +25,22 @@ function mkSession(goalContent = "清零 lint 错误", maxTurns = 20): AgentSess
 type TurnScript = {
   outcome: TurnOutcome | undefined;
   effect?: (session: AgentSession) => void;
+  events?: AgentEventType[];
 };
 
 function mkDeps(script: TurnScript[]) {
   let i = 0;
   const contents: string[] = [];
-  const runAgent = vi.fn(async (session: AgentSession, content: string) => {
-    contents.push(content);
-    const step = script[Math.min(i, script.length - 1)];
-    i++;
-    step.effect?.(session);
-    return step.outcome;
-  });
+  const runAgent = vi.fn(
+    async (session: AgentSession, content: string, onEvent: (event: AgentEventType) => void) => {
+      contents.push(content);
+      const step = script[Math.min(i, script.length - 1)];
+      i++;
+      for (const event of step.events ?? []) onEvent(event);
+      step.effect?.(session);
+      return step.outcome;
+    }
+  );
   const persistGoal = vi.fn();
   const publish = vi.fn();
   const deps: GoalDriverDeps = { runAgent: runAgent as any, persistGoal, publish };
@@ -57,11 +62,19 @@ describe("runGoalDriver", () => {
     const session = mkSession();
     const { deps, runAgent, persistGoal, publish } = mkDeps([
       { outcome: ok("end_turn"), effect: progress },
-      { outcome: ok("end_turn"), effect: (s) => { s.goal!.status = "complete"; s.goal!.updatedAt = Date.now() + 1; } },
+      {
+        outcome: ok("end_turn"),
+        effect: (s) => {
+          s.goal!.status = "complete";
+          s.goal!.updatedAt = Date.now() + 1;
+        },
+      },
     ]);
     await runGoalDriver(session, deps);
     expect(runAgent).toHaveBeenCalledTimes(2);
-    const completion = publish.mock.calls.map((c) => c[0]).find((e: any) => e.change === "completion");
+    const completion = publish.mock.calls
+      .map((c) => c[0])
+      .find((e: any) => e.change === "completion");
     expect(completion).toMatchObject({ type: "goal-updated", status: "complete" });
     expect(session.goal).toBeUndefined();
     expect(persistGoal).toHaveBeenLastCalledWith("s1", null);
@@ -73,7 +86,12 @@ describe("runGoalDriver", () => {
       { outcome: ok("max_steps") },
       { outcome: ok("max_steps") },
       { outcome: ok("max_steps") },
-      { outcome: ok("end_turn"), effect: (s) => { s.goal!.status = "complete"; } },
+      {
+        outcome: ok("end_turn"),
+        effect: (s) => {
+          s.goal!.status = "complete";
+        },
+      },
     ]);
     await runGoalDriver(session, deps);
     expect(runAgent).toHaveBeenCalledTimes(4);
@@ -85,7 +103,9 @@ describe("runGoalDriver", () => {
       const { deps, publish } = mkDeps([{ outcome: ok(reason) }]);
       await runGoalDriver(session, deps);
       expect(session.goal!.status).toBe("paused");
-      const lifecycles = publish.mock.calls.map((c) => c[0]).filter((e: any) => e.type === "goal-updated");
+      const lifecycles = publish.mock.calls
+        .map((c) => c[0])
+        .filter((e: any) => e.type === "goal-updated");
       expect(lifecycles.length).toBe(1);
       expect(lifecycles[0]).toMatchObject({ status: "paused", change: "lifecycle" });
     }
@@ -121,7 +141,12 @@ describe("runGoalDriver", () => {
     const session = mkSession();
     const { deps, contents } = mkDeps([
       { outcome: ok("max_steps") },
-      { outcome: ok("end_turn"), effect: (s) => { s.goal!.status = "complete"; } },
+      {
+        outcome: ok("end_turn"),
+        effect: (s) => {
+          s.goal!.status = "complete";
+        },
+      },
     ]);
     await runGoalDriver(session, deps);
     expect(contents[0].startsWith("[goal]")).toBe(true);
@@ -134,22 +159,38 @@ describe("runGoalDriver", () => {
     const session = mkSession();
     const { deps, publish } = mkDeps([
       { outcome: ok("end_turn"), effect: progress },
-      { outcome: ok("aborted"), effect: (s) => { s.goal = undefined; } },
+      {
+        outcome: ok("aborted"),
+        effect: (s) => {
+          s.goal = undefined;
+        },
+      },
     ]);
     await runGoalDriver(session, deps);
     expect(session.goal).toBeUndefined();
-    expect(publish.mock.calls.map((c) => c[0]).filter((e: any) => e.type === "goal-updated").length).toBe(0);
+    expect(
+      publish.mock.calls.map((c) => c[0]).filter((e: any) => e.type === "goal-updated").length
+    ).toBe(0);
   });
 
   it("⑧ tool marks blocked → lifecycle event with stopReason, driver stops", async () => {
     const session = mkSession();
     const { deps, runAgent, publish } = mkDeps([
-      { outcome: ok("end_turn"), effect: (s) => { s.goal!.status = "blocked"; s.goal!.stopReason = "需要 npm 私仓凭证"; } },
+      {
+        outcome: ok("end_turn"),
+        effect: (s) => {
+          s.goal!.status = "blocked";
+          s.goal!.stopReason = "需要 npm 私仓凭证";
+        },
+      },
     ]);
     await runGoalDriver(session, deps);
     expect(runAgent).toHaveBeenCalledTimes(1);
     expect(publish.mock.calls.at(-1)![0]).toMatchObject({
-      type: "goal-updated", status: "blocked", change: "lifecycle", stopReason: "需要 npm 私仓凭证",
+      type: "goal-updated",
+      status: "blocked",
+      change: "lifecycle",
+      stopReason: "需要 npm 私仓凭证",
     });
   });
 
@@ -158,10 +199,43 @@ describe("runGoalDriver", () => {
     const { deps, publish } = mkDeps([
       { outcome: ok("max_steps") },
       { outcome: ok("max_steps") },
-      { outcome: ok("end_turn"), effect: (s) => { s.goal!.status = "complete"; } },
+      {
+        outcome: ok("end_turn"),
+        effect: (s) => {
+          s.goal!.status = "complete";
+        },
+      },
     ]);
     await runGoalDriver(session, deps);
-    const completion = publish.mock.calls.map((c) => c[0]).find((e: any) => e.change === "completion");
+    const completion = publish.mock.calls
+      .map((c) => c[0])
+      .find((e: any) => e.change === "completion");
     expect(completion.stats).toEqual({ turns: 3, inputTokens: 30, outputTokens: 15 });
+  });
+
+  it("tags every producer and lifecycle event with the persisted goal transport turn", async () => {
+    const session = mkSession();
+    session.goal!.transportTurnId = "goal-transport-turn";
+    const { deps, publish } = mkDeps([
+      {
+        outcome: ok("end_turn"),
+        events: [
+          { type: "text-delta", text: "working" },
+          { type: "done", stopReason: "end_turn" },
+        ],
+        effect: (value) => {
+          value.goal!.status = "complete";
+        },
+      },
+    ]);
+
+    await runGoalDriver(session, deps);
+
+    expect(publish).toHaveBeenCalled();
+    expect(publish.mock.calls.map(([event]) => event.turnId)).toEqual([
+      "goal-transport-turn",
+      "goal-transport-turn",
+      "goal-transport-turn",
+    ]);
   });
 });

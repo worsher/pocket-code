@@ -28,6 +28,10 @@ export const InitMessage = z.object({
   workspaceProtocolVersion: z.literal(2).optional(),
   token: optStr(),
   sessionId: optStr(128),
+  /** Rebinds an in-flight Relay turn to a replacement App socket after reconnect. */
+  activeTurnId: optStr(128),
+  /** Lets a restarted Relay distinguish an intermediate goal done from a message terminal. */
+  activeTurnKind: z.enum(["message", "goal"]).optional(),
   projectId: optStr(128),
   /** Legacy catalog key used only by the authenticated migration entrypoint. */
   legacyProjectId: optStr(128),
@@ -65,6 +69,14 @@ export const InitMessage = z.object({
 
 export const MessageMessage = z.object({
   type: z.literal("message"),
+  /** Client-generated turn correlation id. Optional for rolling-upgrade compatibility. */
+  turnId: z
+    .string()
+    .min(1)
+    .max(128)
+    .optional()
+    .nullable()
+    .transform((v) => v ?? undefined),
   content: z.string().min(1).max(100000),
   model: optStr(64),
   customPrompt: optStr(10000),
@@ -141,6 +153,8 @@ export const AbortMessage = z.object({
 // ── P16:Goal 模式(spec §7)─────────────────────────────
 export const GoalCreateMessage = z.object({
   type: z.literal("goal-create"),
+  /** Stable Relay correlation id for a multi-turn goal stream. */
+  turnId: z.string().min(1).max(128).optional(),
   content: z.string().min(1).max(20000),
   acceptance: optStr(10000),
   replace: z
@@ -161,6 +175,8 @@ export const GoalCreateMessage = z.object({
 export const GoalControlMessage = z.object({
   type: z.literal("goal-control"),
   action: z.enum(["pause", "resume", "cancel"]),
+  /** Stable Relay correlation id for a resumed multi-turn goal stream. */
+  turnId: z.string().min(1).max(128).optional(),
 });
 
 export const SyncPullMessage = z.object({

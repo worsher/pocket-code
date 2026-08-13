@@ -31,6 +31,8 @@ import {
   initDb,
   listUserSessions,
   deleteSession,
+  claimTurnJournal,
+  completeTurnJournal,
   saveSessionGoal,
   getWorkspaceAuthorityId,
   getWorkspaceProject,
@@ -43,6 +45,7 @@ import {
   commitGitWorkspaceImport,
   type WorkspaceImportSourceRecord,
 } from "./db.js";
+import { createHash } from "node:crypto";
 import { createGoal, goalUpdatedEvent, clearedEvent, type GoalState } from "./goal/types.js";
 import { runGoalDriver } from "./goal/driver.js";
 import { checkQuota, incrementUsage, getUserQuota } from "./resourceLimits.js";
@@ -55,7 +58,7 @@ import {
 } from "@pocket-code/wire";
 import { handleSyncPull, handleSyncFile } from "./sync/syncHandler.js";
 import { bindLinkedDirectory, inspectLinkedDirectorySource } from "./linkedImport.js";
-import { getSessionStream, type SessionEventStream } from "./eventBuffer.js";
+import { deleteSessionStream, getSessionStream, type SessionEventStream } from "./eventBuffer.js";
 import { mkdir, rm } from "fs/promises";
 import { join } from "path";
 import {
@@ -72,17 +75,99 @@ import {
 // Shared session store — the same Map is used for all handlers
 const sessions = new Map<string, AgentSession>();
 
+// Every transport gets its own MessageHandler, but all handlers can bind the same
+// session after reconnect. Keep the turn lane module-global so two sockets cannot
+// mutate one AgentSession concurrently.
+const sessionTurnTails = new Map<string, Promise<void>>();
+const pendingSessionCreates = new Map<string, Promise<AgentSession>>();
+// A handler can retain the shared AgentSession after another connection deletes
+// it. Mark the shared object so every stale handler rejects its next operation.
+const invalidatedSessions = new WeakSet<AgentSession>();
+
+function hashMessageTurnRequest(message: {
+  content: string;
+  model?: string;
+  customPrompt?: string;
+  rewindTo?: number;
+  images?: Array<{ base64: string; mimeType: string }>;
+}): string {
+  // Tagged option tuples distinguish an omitted setting (keep session value)
+  // from an explicitly supplied empty/zero value. The schema has already
+  // stripped unknown keys and normalised null to undefined at this point.
+  const optional = <T>(value: T | undefined): [0] | [1, T] =>
+    value === undefined ? [0] : [1, value];
+  const canonical = [
+    "message-turn-v1",
+    message.content,
+    optional(message.model),
+    optional(message.customPrompt),
+    optional(message.rewindTo),
+    optional(message.images),
+  ];
+  return createHash("sha256").update(JSON.stringify(canonical)).digest("hex");
+}
+
+async function runInSessionTurnLane<T>(sessionId: string, task: () => Promise<T>): Promise<T> {
+  const previous = sessionTurnTails.get(sessionId) ?? Promise.resolve();
+  let release!: () => void;
+  const slot = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  const tail = previous.catch(() => undefined).then(() => slot);
+  sessionTurnTails.set(sessionId, tail);
+  await previous.catch(() => undefined);
+  try {
+    return await task();
+  } finally {
+    release();
+    if (sessionTurnTails.get(sessionId) === tail) sessionTurnTails.delete(sessionId);
+  }
+}
+
+function getOrCreateSharedSession(
+  sessionId: string,
+  userId: string,
+  projectId: string
+): Promise<AgentSession> {
+  const existing = sessions.get(sessionId);
+  if (existing) return Promise.resolve(existing);
+  const pending = pendingSessionCreates.get(sessionId);
+  if (pending) return pending;
+
+  let creating!: Promise<AgentSession>;
+  creating = createSession(sessionId, userId, projectId)
+    .then((created) => {
+      sessions.set(sessionId, created);
+      return created;
+    })
+    .finally(() => {
+      if (pendingSessionCreates.get(sessionId) === creating) {
+        pendingSessionCreates.delete(sessionId);
+      }
+    });
+  pendingSessionCreates.set(sessionId, creating);
+  return creating;
+}
+
 // TTL cleanup: remove sessions idle for more than 30 minutes
 const SESSION_TTL_MS = 30 * 60 * 1000;
+export function cleanupStaleSessions(now: number = Date.now()): number {
+  let removed = 0;
+  for (const [id, sess] of sessions) {
+    const hasActiveTurn = Boolean(sess.currentAbort) || sessionTurnTails.has(id);
+    if (!hasActiveTurn && now - (sess.lastActivity || 0) > SESSION_TTL_MS) {
+      invalidatedSessions.add(sess);
+      sessions.delete(id);
+      removed++;
+      console.log(`[Session] Cleaned up stale session: ${id}`);
+    }
+  }
+  return removed;
+}
+
 setInterval(
   () => {
-    const now = Date.now();
-    for (const [id, sess] of sessions) {
-      if (now - (sess.lastActivity || 0) > SESSION_TTL_MS) {
-        sessions.delete(id);
-        console.log(`[Session] Cleaned up stale session: ${id}`);
-      }
-    }
+    cleanupStaleSessions();
   },
   5 * 60 * 1000
 ).unref();
@@ -141,6 +226,7 @@ export function createMessageHandler(
   let session: AgentSession | null = null;
   let auth: AuthPayload | null = options?.preAuth || null;
   let activeSessionId: string | null = null;
+  let initInFlight: Promise<void> | null = null;
   // P14:本连接订阅的 session 事件流(publish 分配 seq + fan-out;abort 移到 session 级)
   let stream: SessionEventStream | null = null;
   let unsubscribe: (() => void) | null = null;
@@ -198,6 +284,14 @@ export function createMessageHandler(
         }
         const msg = parsed.data;
         console.log("[Handler] Received:", msg.type);
+        if (msg.type !== "init" && initInFlight) await initInFlight;
+        if (msg.type !== "init" && session && invalidatedSessions.has(session)) {
+          unsubscribe?.();
+          unsubscribe = null;
+          stream = null;
+          session = null;
+          activeSessionId = null;
+        }
 
         switch (msg.type) {
           // ── Anonymous registration ─────────────────────
@@ -224,193 +318,294 @@ export function createMessageHandler(
 
           // ── Session init (requires auth) ───────────────
           case "init": {
-            console.log(
-              "[Handler] Processing init, token present:",
-              !!msg.token,
-              "sessionId:",
-              msg.sessionId,
-              "preAuth:",
-              !!auth
-            );
-            // Only verify token if auth is not already pre-injected
-            if (msg.token && !auth) {
-              auth = verifyToken(msg.token);
-            }
-            if (!auth) {
-              console.log("[Handler] Init failed: invalid or missing token");
-              send({
-                type: "error",
-                error: "Invalid or missing token. Send register first.",
-              });
-              return;
-            }
-            console.log("[Handler] Auth verified, userId:", auth.userId);
-
-            const sessionId = msg.sessionId || crypto.randomUUID();
-            const projectId: string = msg.projectId || "";
-            if (
-              workspaceFlags.catalogV2 &&
-              workspaceFlags.resolverV2 &&
-              projectId &&
-              isUuid(projectId) &&
-              msg.legacyProjectId
-            ) {
-              try {
-                await migrateLegacyServerWorkspace({
-                  userId: auth.userId,
-                  legacyProjectId: msg.legacyProjectId,
-                  projectId,
-                  displayName: msg.projectName,
-                });
-                const cached = sessions.get(sessionId);
-                if (cached?.projectId === msg.legacyProjectId) sessions.delete(sessionId);
-              } catch (error: any) {
-                send({
-                  type: "error",
-                  error: error?.message ?? "Failed to migrate legacy workspace.",
-                });
-                session = null;
-                return;
-              }
-            }
-            if (sessions.has(sessionId)) {
-              session = sessions.get(sessionId)!;
-              if (session.userId !== auth.userId) {
-                send({
-                  type: "error",
-                  error: "Session does not belong to this user.",
-                });
-                session = null;
-                return;
-              }
-              if (projectId && session.projectId && session.projectId !== projectId) {
-                send({
-                  type: "error",
-                  error: "Session does not belong to this project.",
-                });
-                session = null;
-                return;
-              }
-            } else {
-              try {
-                session = await createSession(sessionId, auth.userId, projectId);
-              } catch (error: any) {
-                send({ type: "error", error: error?.message ?? "Failed to restore session." });
-                session = null;
-                return;
-              }
-              sessions.set(sessionId, session);
-            }
-            activeSessionId = sessionId;
-            session.lastActivity = Date.now();
-            if (session.workspaceHandle && msg.projectName) {
-              updateWorkspaceProjectDisplayName(auth.userId, session.projectId, msg.projectName);
-            }
-
-            // Docker isolation
-            if (isDockerEnabled() && !session.containerId) {
-              try {
-                session.containerId = await getContainer(auth.userId, session.workspace);
-                console.log(`[Handler] Docker container: ${session.containerId.slice(0, 12)}`);
-              } catch (err: any) {
-                console.error("[Handler] Failed to create Docker container:", err.message);
-              }
-            }
-            if (msg.model) {
-              session.modelKey = msg.model;
-            }
-            if (msg.customPrompt !== undefined) {
-              session.customPrompt = msg.customPrompt || undefined;
-            }
-            session.gitCredentialProfileId = msg.gitCredentialProfileId || undefined;
-            // Remove plaintext files produced by pre-v2 versions on every
-            // session restore.  One-release legacy payload migration is
-            // allowed only on a transport already trusted for plaintext.
+            const previousInit = initInFlight;
+            let releaseInit!: () => void;
+            const currentInit = new Promise<void>((resolve) => {
+              releaseInit = resolve;
+            });
+            initInFlight = currentInit;
             try {
-              if (msg.gitCredentials?.length && allowPlaintextGitCredentials) {
-                await migrateLegacyGitCredentials({
-                  workspace: session.workspace,
-                  userId: auth.userId,
-                  credentials: msg.gitCredentials,
-                  vault: credentialVault,
+              await previousInit;
+              console.log(
+                "[Handler] Processing init, token present:",
+                !!msg.token,
+                "sessionId:",
+                msg.sessionId,
+                "preAuth:",
+                !!auth
+              );
+              // Only verify token if auth is not already pre-injected
+              if (msg.token && !auth) {
+                auth = verifyToken(msg.token);
+              }
+              if (!auth) {
+                console.log("[Handler] Init failed: invalid or missing token");
+                send({
+                  type: "error",
+                  error: "Invalid or missing token. Send register first.",
                 });
-              } else {
-                await cleanupLegacyWorkspaceCredentials(session.workspace);
-                if (msg.gitCredentials?.length) {
-                  console.warn(
-                    "[Handler] Ignored legacy Git credentials on a transport that requires encryption"
-                  );
+                return;
+              }
+              console.log("[Handler] Auth verified, userId:", auth.userId);
+
+              const sessionId = msg.sessionId || crypto.randomUUID();
+              const projectId: string = msg.projectId || "";
+              if (
+                workspaceFlags.catalogV2 &&
+                workspaceFlags.resolverV2 &&
+                projectId &&
+                isUuid(projectId) &&
+                msg.legacyProjectId
+              ) {
+                try {
+                  await migrateLegacyServerWorkspace({
+                    userId: auth.userId,
+                    legacyProjectId: msg.legacyProjectId,
+                    projectId,
+                    displayName: msg.projectName,
+                  });
+                  const cached = sessions.get(sessionId);
+                  if (cached?.projectId === msg.legacyProjectId) sessions.delete(sessionId);
+                } catch (error: any) {
+                  send({
+                    type: "error",
+                    error: error?.message ?? "Failed to migrate legacy workspace.",
+                  });
+                  session = null;
+                  return;
                 }
               }
-            } catch {
-              console.error("[Handler] Failed to migrate legacy Git credential state");
-            }
-            // ── P14:订阅事件流 + 发 ack(带游标)+ 补发协商 ──
-            // 先订阅后补发(D-P14-5):避免"ack 后、订阅前"的事件真空;
-            // 交错产生的重复由客户端 (epoch, seq) 去重兜底(C14-3)。
-            stream = getSessionStream(session.sessionId);
-            unsubscribe?.();
-            unsubscribe = stream.subscribe(send);
-            const workspaceScope = scopeForSession(session);
-            const workspaceCatalog =
-              workspaceFlags.protocolV2 && msg.workspaceProtocolVersion === 2
-                ? listWorkspaceProjects(auth.userId).map((project) => ({
-                    projectId: project.projectId,
-                    displayName: project.displayName,
-                    replicaId: project.replicaId,
-                    workspaceGeneration: project.generation,
-                    authorityId: getAuthorityId(),
-                    replicaKind,
-                    updatedAt: project.updatedAt,
-                    ...(project.importSource
-                      ? {
-                          importSource: {
-                            ...project.importSource,
-                            identity: {
-                              ...project.importSource.identity,
-                              weakKeys: [...project.importSource.identity.weakKeys],
-                            },
-                          },
-                        }
-                      : {}),
-                  }))
-                : undefined;
-            send({
-              type: "session",
-              ...(workspaceFlags.protocolV2 && msg.workspaceProtocolVersion === 2
-                ? {
-                    workspaceProtocolVersion: 2 as const,
-                    workspaceCatalog,
-                    ...(workspaceScope ? { workspaceScope } : {}),
-                  }
-                : {}),
-              sessionId: session.sessionId,
-              projectId: session.projectId,
-              workspace: session.workspace,
-              eventEpoch: stream.epoch,
-              currentSeq: stream.seq,
-            } satisfies ServerOutboundType);
-            if (msg.lastSeq !== undefined) {
-              if (msg.eventEpoch !== stream.epoch) {
-                send({
-                  type: "resync-required",
-                  reason: "epoch-changed",
-                  eventEpoch: stream.epoch,
-                  currentSeq: stream.seq,
-                } satisfies ServerOutboundType);
+              if (sessions.has(sessionId)) {
+                session = sessions.get(sessionId)!;
+                if (session.userId !== auth.userId) {
+                  send({
+                    type: "error",
+                    error: "Session does not belong to this user.",
+                  });
+                  session = null;
+                  return;
+                }
+                if (projectId && session.projectId && session.projectId !== projectId) {
+                  send({
+                    type: "error",
+                    error: "Session does not belong to this project.",
+                  });
+                  session = null;
+                  return;
+                }
               } else {
-                const backlog = stream.readSince(msg.lastSeq);
-                if (backlog === null) {
+                try {
+                  session = await getOrCreateSharedSession(sessionId, auth.userId, projectId);
+                } catch (error: any) {
+                  send({ type: "error", error: error?.message ?? "Failed to restore session." });
+                  session = null;
+                  return;
+                }
+                if (session.userId !== auth.userId) {
+                  send({ type: "error", error: "Session does not belong to this user." });
+                  session = null;
+                  return;
+                }
+                if (projectId && session.projectId && session.projectId !== projectId) {
+                  send({ type: "error", error: "Session does not belong to this project." });
+                  session = null;
+                  return;
+                }
+              }
+              activeSessionId = sessionId;
+              session.lastActivity = Date.now();
+              if (session.workspaceHandle && msg.projectName) {
+                updateWorkspaceProjectDisplayName(auth.userId, session.projectId, msg.projectName);
+              }
+
+              // Docker isolation
+              if (isDockerEnabled() && !session.containerId) {
+                try {
+                  session.containerId = await getContainer(auth.userId, session.workspace);
+                  console.log(`[Handler] Docker container: ${session.containerId.slice(0, 12)}`);
+                } catch (err: any) {
+                  console.error("[Handler] Failed to create Docker container:", err.message);
+                }
+              }
+              if (msg.model) {
+                session.modelKey = msg.model;
+              }
+              if (msg.customPrompt !== undefined) {
+                session.customPrompt = msg.customPrompt || undefined;
+              }
+              session.gitCredentialProfileId = msg.gitCredentialProfileId || undefined;
+              // Remove plaintext files produced by pre-v2 versions on every
+              // session restore.  One-release legacy payload migration is
+              // allowed only on a transport already trusted for plaintext.
+              try {
+                if (msg.gitCredentials?.length && allowPlaintextGitCredentials) {
+                  await migrateLegacyGitCredentials({
+                    workspace: session.workspace,
+                    userId: auth.userId,
+                    credentials: msg.gitCredentials,
+                    vault: credentialVault,
+                  });
+                } else {
+                  await cleanupLegacyWorkspaceCredentials(session.workspace);
+                  if (msg.gitCredentials?.length) {
+                    console.warn(
+                      "[Handler] Ignored legacy Git credentials on a transport that requires encryption"
+                    );
+                  }
+                }
+              } catch {
+                console.error("[Handler] Failed to migrate legacy Git credential state");
+              }
+              // Another authenticated connection may delete this session while
+              // init is awaiting restoration or credential cleanup. Never bind
+              // a stale object after its cache/database record has been removed.
+              if (invalidatedSessions.has(session) || sessions.get(sessionId) !== session) {
+                send({ type: "error", error: "Session was deleted during initialization." });
+                session = null;
+                return;
+              }
+              // ── P14:订阅事件流 + 发 ack(带游标)+ 补发协商 ──
+              // 先订阅后补发(D-P14-5):避免"ack 后、订阅前"的事件真空;
+              // 交错产生的重复由客户端 (epoch, seq) 去重兜底(C14-3)。
+              stream = getSessionStream(session.sessionId);
+              unsubscribe?.();
+              unsubscribe = stream.subscribe(send);
+              const workspaceScope = scopeForSession(session);
+              const workspaceCatalog =
+                workspaceFlags.protocolV2 && msg.workspaceProtocolVersion === 2
+                  ? listWorkspaceProjects(auth.userId).map((project) => ({
+                      projectId: project.projectId,
+                      displayName: project.displayName,
+                      replicaId: project.replicaId,
+                      workspaceGeneration: project.generation,
+                      authorityId: getAuthorityId(),
+                      replicaKind,
+                      updatedAt: project.updatedAt,
+                      ...(project.importSource
+                        ? {
+                            importSource: {
+                              ...project.importSource,
+                              identity: {
+                                ...project.importSource.identity,
+                                weakKeys: [...project.importSource.identity.weakKeys],
+                              },
+                            },
+                          }
+                        : {}),
+                    }))
+                  : undefined;
+              send({
+                type: "session",
+                ...(workspaceFlags.protocolV2 && msg.workspaceProtocolVersion === 2
+                  ? {
+                      workspaceProtocolVersion: 2 as const,
+                      workspaceCatalog,
+                      ...(workspaceScope ? { workspaceScope } : {}),
+                    }
+                  : {}),
+                sessionId: session.sessionId,
+                projectId: session.projectId,
+                workspace: session.workspace,
+                eventEpoch: stream.epoch,
+                currentSeq: stream.seq,
+                backlogPending: true,
+                turnCorrelationVersion: 1,
+              } satisfies ServerOutboundType);
+              let activeGoalSettledInBacklog = false;
+              if (msg.lastSeq !== undefined) {
+                if (msg.eventEpoch !== stream.epoch) {
                   send({
                     type: "resync-required",
-                    reason: "buffer-overflow",
+                    reason: "epoch-changed",
                     eventEpoch: stream.epoch,
                     currentSeq: stream.seq,
                   } satisfies ServerOutboundType);
                 } else {
-                  for (const ev of backlog) send(ev); // C14-5:ack 后按 seq 升序补齐
+                  const backlog = stream.readSince(msg.lastSeq);
+                  if (backlog === null) {
+                    send({
+                      type: "resync-required",
+                      reason: "buffer-overflow",
+                      eventEpoch: stream.epoch,
+                      currentSeq: stream.seq,
+                    } satisfies ServerOutboundType);
+                  } else {
+                    for (const ev of backlog) {
+                      if (
+                        msg.activeTurnKind === "goal" &&
+                        msg.activeTurnId &&
+                        ev.type === "goal-updated" &&
+                        ev.turnId === msg.activeTurnId &&
+                        (ev.change === "completion" || ev.change === "cleared")
+                      ) {
+                        activeGoalSettledInBacklog = true;
+                      }
+                      send(ev); // C14-5:ack 后按 seq 升序补齐
+                    }
+                  }
                 }
               }
+              // Reconcile an App-side goal turn before declaring the session ready.
+              // A Relay may have lost its in-memory tracker, or the original goal
+              // frame may never have reached this authority even though WebSocket
+              // send() succeeded locally. A correlated lifecycle event keeps a
+              // real goal attached; the terminal error releases a phantom turn.
+              if (
+                workspaceFlags.protocolV2 &&
+                msg.workspaceProtocolVersion === 2 &&
+                msg.activeTurnKind === "goal" &&
+                msg.activeTurnId &&
+                !activeGoalSettledInBacklog
+              ) {
+                if (session.goal?.transportTurnId === msg.activeTurnId) {
+                  stream.publish(goalUpdatedEvent(session.goal, "lifecycle"));
+                } else {
+                  stream.publish({
+                    type: "error",
+                    code: "goal-recovery-unavailable",
+                    message: "The active goal turn was not found on this authority.",
+                    turnId: msg.activeTurnId,
+                  });
+                  // A mismatched client turn can be a resume frame that never
+                  // reached this authority. Terminate that phantom turn without
+                  // clearing a real parked goal that still exists server-side.
+                  if (!session.goal) {
+                    stream.publish({
+                      type: "goal-updated",
+                      status: "paused",
+                      change: "cleared",
+                      stats: { turns: 0, inputTokens: 0, outputTokens: 0 },
+                      turnId: msg.activeTurnId,
+                    });
+                  }
+                  stream.publish({
+                    type: "done",
+                    stopReason: "error",
+                    turnId: msg.activeTurnId,
+                  });
+                  if (session.goal) {
+                    stream.publish(goalUpdatedEvent(session.goal, "lifecycle"));
+                  }
+                }
+              } else if (
+                workspaceFlags.protocolV2 &&
+                msg.workspaceProtocolVersion === 2 &&
+                session.goal &&
+                session.goal.status !== "active"
+              ) {
+                // A restarted process downgrades an active goal to paused. Re-emit
+                // persisted parked state for clients that did not retain an active id.
+                stream.publish(goalUpdatedEvent(session.goal, "lifecycle"));
+              }
+              send({
+                type: "session-ready",
+                sessionId: session.sessionId,
+                eventEpoch: stream.epoch,
+                currentSeq: stream.seq,
+              } satisfies ServerOutboundType);
+            } finally {
+              releaseInit();
+              if (initInFlight === currentInit) initInFlight = null;
             }
             break;
           }
@@ -420,51 +615,156 @@ export function createMessageHandler(
               send({ type: "error", error: "No session. Send init first." });
               return;
             }
-            if (!hasCurrentWriterGeneration(session)) {
-              send({
-                type: "error",
-                error: "Workspace writer generation is stale; reconnect before writing.",
-              });
-              return;
-            }
-            session.lastActivity = Date.now();
-            if (auth) {
-              const quotaCheck = checkQuota(auth.userId, "api_call");
-              if (!quotaCheck.allowed) {
-                send({ type: "error", error: quotaCheck.reason || "Quota exceeded." });
-                send({ type: "done" });
-                return;
-              }
-              incrementUsage(auth.userId, "api_call");
-            }
-            if (msg.model) {
-              session.modelKey = msg.model;
-            }
-            if (msg.customPrompt !== undefined) {
-              session.customPrompt = msg.customPrompt || undefined;
-            }
-
-            // Conversation branching
-            if (typeof msg.rewindTo === "number" && msg.rewindTo >= 0) {
-              session.messages = session.messages.slice(0, msg.rewindTo);
-            }
-
-            // P14:事件经 stream.publish(分配 seq + 广播给全部订阅者,含本连接)——
-            // 不得再直接 send,否则本连接收到双份。abort 挂 session(D-P14-3)。
-            const abort = new AbortController();
             const sess = session;
+            const turnAuth = auth;
             const sessStream = stream ?? getSessionStream(sess.sessionId);
-            sess.currentAbort = abort;
-            await runAgent(
-              sess,
-              msg.content,
-              (event) => {
-                sessStream.publish(scopeFileEvent(sess, event));
-              },
-              abort.signal,
-              msg.images
-            );
-            sess.currentAbort = undefined;
+            const turnId = msg.turnId ?? `turn_${crypto.randomUUID()}`;
+            // Legacy clients have no stable key to retry, so they keep the
+            // correlated in-memory path without creating unreplayable journal
+            // rows under a server-generated ID.
+            const requestHash = msg.turnId ? hashMessageTurnRequest(msg) : undefined;
+            await runInSessionTurnLane(sess.sessionId, async () => {
+              const decorateTurnEvent = (event: AgentEventType): AgentEventType => ({
+                ...scopeFileEvent(sess, event),
+                turnId,
+              });
+              const publishTurn = (event: AgentEventType) => {
+                sessStream.publish(decorateTurnEvent(event));
+              };
+
+              let claimToken: string | undefined;
+              if (requestHash) {
+                let claim;
+                try {
+                  claim = claimTurnJournal<AgentEventType>({
+                    sessionId: sess.sessionId,
+                    turnId,
+                    requestHash,
+                  });
+                } catch (error: any) {
+                  publishTurn({
+                    type: "error",
+                    code: "turn-journal-unavailable",
+                    message: error?.message ?? "Turn journal is unavailable.",
+                  });
+                  publishTurn({ type: "done", stopReason: "error" });
+                  return;
+                }
+
+                if (claim.kind === "conflict") {
+                  publishTurn({
+                    type: "error",
+                    code: "turn-id-conflict",
+                    message: "This turnId was already used for a different message request.",
+                  });
+                  publishTurn({ type: "done", stopReason: "error" });
+                  return;
+                }
+                if (claim.kind === "running") {
+                  publishTurn({
+                    type: "error",
+                    code: "turn-in-progress",
+                    message:
+                      "This turn is already marked as running. It was not re-executed to avoid duplicate side effects.",
+                  });
+                  publishTurn({ type: "done", stopReason: "error" });
+                  return;
+                }
+                if (claim.kind === "completed") {
+                  // Re-publish the logical events so this stream assigns a new
+                  // monotonic seq; never replay the original transport cursor.
+                  sessStream.publish({ type: "turn-replay-reset", turnId });
+                  for (const event of claim.events) sessStream.publish(event);
+                  return;
+                }
+                claimToken = claim.claimToken;
+              }
+
+              const journalEvents: AgentEventType[] = [];
+              let terminalDone: AgentEventType | undefined;
+              let abort: AbortController | undefined;
+              const recordAndPublishTurn = (event: AgentEventType) => {
+                const decorated = decorateTurnEvent(event);
+                journalEvents.push(decorated);
+                if (event.type === "done") {
+                  terminalDone ??= decorated;
+                  // For a durable turn, done is the App's dequeue acknowledgement.
+                  // Do not expose it until the completed journal record is on disk.
+                  if (!claimToken) sessStream.publish(decorated);
+                  return;
+                }
+                sessStream.publish(decorated);
+              };
+
+              try {
+                if (!hasCurrentWriterGeneration(sess)) {
+                  recordAndPublishTurn({
+                    type: "error",
+                    message: "Workspace writer generation is stale; reconnect before writing.",
+                  });
+                  return;
+                }
+                sess.lastActivity = Date.now();
+                if (turnAuth) {
+                  const quotaCheck = checkQuota(turnAuth.userId, "api_call");
+                  if (!quotaCheck.allowed) {
+                    recordAndPublishTurn({
+                      type: "error",
+                      message: quotaCheck.reason || "Quota exceeded.",
+                    });
+                    return;
+                  }
+                  incrementUsage(turnAuth.userId, "api_call");
+                }
+                if (msg.model) sess.modelKey = msg.model;
+                if (msg.customPrompt !== undefined) {
+                  sess.customPrompt = msg.customPrompt || undefined;
+                }
+                if (typeof msg.rewindTo === "number" && msg.rewindTo >= 0) {
+                  sess.messages = sess.messages.slice(0, msg.rewindTo);
+                }
+
+                abort = new AbortController();
+                sess.currentAbort = abort;
+                sess.currentAbortOwner = "message";
+                await runAgent(sess, msg.content, recordAndPublishTurn, abort.signal, msg.images);
+              } catch (error: any) {
+                recordAndPublishTurn({
+                  type: "error",
+                  message: error?.message ?? "Agent turn failed",
+                });
+              } finally {
+                if (!terminalDone) {
+                  recordAndPublishTurn({ type: "done", stopReason: "error" });
+                }
+                if (abort && sess.currentAbort === abort) {
+                  sess.currentAbort = undefined;
+                  sess.currentAbortOwner = undefined;
+                }
+
+                if (!claimToken || !requestHash) {
+                  return;
+                }
+                try {
+                  const completed = completeTurnJournal({
+                    sessionId: sess.sessionId,
+                    turnId,
+                    requestHash,
+                    claimToken,
+                    events: journalEvents,
+                  });
+                  if (!completed) throw new Error("Turn journal claim was lost before completion");
+                  if (terminalDone) sessStream.publish(terminalDone);
+                } catch (error: any) {
+                  publishTurn({
+                    type: "error",
+                    code: "turn-journal-commit-failed",
+                    message: error?.message ?? "Failed to commit the completed turn journal.",
+                  });
+                  publishTurn({ type: "done", stopReason: "error" });
+                }
+              }
+            });
             break;
           }
 
@@ -500,7 +800,8 @@ export function createMessageHandler(
             }
             try {
               const profile = normalizeGitCredentialProfile(msg.profile);
-              const supplied = Number(msg.secret !== undefined) + Number(msg.sealedSecret !== undefined);
+              const supplied =
+                Number(msg.secret !== undefined) + Number(msg.sealedSecret !== undefined);
               if (supplied !== 1) {
                 throw new GitCredentialVaultError(
                   "invalid_profile",
@@ -518,7 +819,8 @@ export function createMessageHandler(
                     success: false,
                     error: {
                       code: "encryption_required",
-                      message: "Plaintext Git credentials require WSS or explicit local development mode",
+                      message:
+                        "Plaintext Git credentials require WSS or explicit local development mode",
                     },
                   } satisfies ServerOutboundType);
                   break;
@@ -534,7 +836,8 @@ export function createMessageHandler(
                     success: false,
                     error: {
                       code: "encryption_required",
-                      message: "Encrypted Git credential must be opened by the trusted daemon transport",
+                      message:
+                        "Encrypted Git credential must be opened by the trusted daemon transport",
                     },
                   } satisfies ServerOutboundType);
                   break;
@@ -1282,10 +1585,45 @@ export function createMessageHandler(
               send({ type: "error", error: "Not authenticated." });
               return;
             }
-            const deleted = deleteSession(msg.sessionId, auth.userId);
+            const targetSessionId = msg.sessionId;
+            const cached = sessions.get(targetSessionId);
+            if (cached && cached.userId !== auth.userId) {
+              send({
+                type: "session-deleted",
+                sessionId: targetSessionId,
+                success: false,
+              } satisfies ServerOutboundType);
+              break;
+            }
+            if (
+              pendingSessionCreates.has(targetSessionId) ||
+              sessionTurnTails.has(targetSessionId) ||
+              Boolean(cached?.currentAbort)
+            ) {
+              send({
+                type: "error",
+                error: "Session is active and cannot be deleted until its current turn finishes.",
+              });
+              break;
+            }
+            const deleted = deleteSession(targetSessionId, auth.userId);
+            if (deleted) {
+              if (cached) invalidatedSessions.add(cached);
+              sessions.delete(targetSessionId);
+              sessionTurnTails.delete(targetSessionId);
+              deleteSessionStream(targetSessionId);
+              if (session?.sessionId === targetSessionId) {
+                invalidatedSessions.add(session);
+                unsubscribe?.();
+                unsubscribe = null;
+                stream = null;
+                session = null;
+                activeSessionId = null;
+              }
+            }
             send({
               type: "session-deleted",
-              sessionId: msg.sessionId,
+              sessionId: targetSessionId,
               success: deleted,
             } satisfies ServerOutboundType);
             break;
@@ -1366,22 +1704,38 @@ export function createMessageHandler(
               send({ type: "error", error: "No session. Send init first." });
               return;
             }
-            if (session.goal && !msg.replace) {
-              send({ type: "error", error: "已有进行中的目标,重复创建需 replace" });
-              return;
-            }
-            session.lastActivity = Date.now();
-            session.goal = createGoal(msg.content, msg.acceptance, msg.maxTurns);
-            saveSessionGoal(session.sessionId, JSON.stringify(session.goal));
-            const goalStream = stream ?? getSessionStream(session.sessionId);
-            goalStream.publish(goalUpdatedEvent(session.goal, "lifecycle"));
-            await runGoalDriver(session, {
-              runAgent,
-              persistGoal: (sid: string, g: GoalState | null) =>
-                saveSessionGoal(sid, g ? JSON.stringify(g) : null),
-              publish: (ev) => {
-                goalStream.publish(ev);
-              },
+            const sess = session;
+            await runInSessionTurnLane(sess.sessionId, async () => {
+              if (sess.goal && !msg.replace) {
+                send({ type: "error", error: "已有进行中的目标,重复创建需 replace" });
+                return;
+              }
+              sess.lastActivity = Date.now();
+              const previousGoal = sess.goal;
+              sess.goal = createGoal(msg.content, msg.acceptance, msg.maxTurns, msg.turnId);
+              try {
+                saveSessionGoal(sess.sessionId, JSON.stringify(sess.goal), {
+                  userId: sess.userId,
+                  projectId: sess.projectId,
+                  messages: sess.messages,
+                  modelKey: sess.modelKey,
+                });
+              } catch (error) {
+                sess.goal = previousGoal;
+                throw error;
+              }
+              const goalStream = stream ?? getSessionStream(sess.sessionId);
+              // Goal mode emits multiple agent turns for one command. The goal
+              // driver keeps every event on its persisted transport turn so strict
+              // clients cannot apply delayed goal frames to a later normal message.
+              const publishGoal = (event: AgentEventType) => goalStream.publish(event);
+              publishGoal(goalUpdatedEvent(sess.goal, "lifecycle"));
+              await runGoalDriver(sess, {
+                runAgent,
+                persistGoal: (sid: string, g: GoalState | null) =>
+                  saveSessionGoal(sid, g ? JSON.stringify(g) : null),
+                publish: publishGoal,
+              });
             });
             break;
           }
@@ -1391,44 +1745,86 @@ export function createMessageHandler(
               send({ type: "error", error: "No session. Send init first." });
               return;
             }
-            const g = session.goal;
-            const ctlStream = stream ?? getSessionStream(session.sessionId);
+            const sess = session;
+            const ctlStream = stream ?? getSessionStream(sess.sessionId);
             switch (msg.action) {
-              case "pause":
+              case "pause": {
+                const g = sess.goal;
                 // 先置态后 abort:driver 在 turn 返回后读到 paused 停车并发通告(单一事件源)
                 if (g && g.status === "active") {
                   g.status = "paused";
                   g.stopReason = "用户暂停";
                   g.updatedAt = Date.now();
-                  saveSessionGoal(session.sessionId, JSON.stringify(g));
-                  session.currentAbort?.abort();
+                  saveSessionGoal(sess.sessionId, JSON.stringify(g));
+                  if (sess.currentAbortOwner === "goal") sess.currentAbort?.abort();
                 }
                 break;
-              case "resume":
-                if (g && (g.status === "paused" || g.status === "blocked")) {
+              }
+              case "resume": {
+                await runInSessionTurnLane(sess.sessionId, async () => {
+                  // Pause/cancel bypass the lane. Re-read after acquiring it so a
+                  // queued resume cannot resurrect a goal cancelled while it waited.
+                  const g = sess.goal;
+                  if (!g || (g.status !== "paused" && g.status !== "blocked")) {
+                    if (msg.turnId) {
+                      ctlStream.publish({
+                        type: "error",
+                        code: "goal-resume-unavailable",
+                        message: "The goal is no longer paused or blocked and cannot be resumed.",
+                        turnId: msg.turnId,
+                      });
+                      ctlStream.publish({
+                        type: "done",
+                        stopReason: "error",
+                        turnId: msg.turnId,
+                      });
+                    } else {
+                      send({ type: "error", error: "目标当前不可继续" });
+                    }
+                    return;
+                  }
+                  sess.lastActivity = Date.now();
+                  const previousGoalState = {
+                    transportTurnId: g.transportTurnId,
+                    status: g.status,
+                    stopReason: g.stopReason,
+                    updatedAt: g.updatedAt,
+                  };
+                  g.transportTurnId = msg.turnId;
                   g.status = "active";
                   g.stopReason = undefined; // C16-5:resume 清 stopReason,新的尝试
                   g.updatedAt = Date.now();
-                  saveSessionGoal(session.sessionId, JSON.stringify(g));
+                  try {
+                    saveSessionGoal(sess.sessionId, JSON.stringify(g));
+                  } catch (error) {
+                    g.transportTurnId = previousGoalState.transportTurnId;
+                    g.status = previousGoalState.status;
+                    g.stopReason = previousGoalState.stopReason;
+                    g.updatedAt = previousGoalState.updatedAt;
+                    throw error;
+                  }
                   ctlStream.publish(goalUpdatedEvent(g, "lifecycle"));
-                  await runGoalDriver(session, {
+                  await runGoalDriver(sess, {
                     runAgent,
                     persistGoal: (sid: string, gg: GoalState | null) =>
                       saveSessionGoal(sid, gg ? JSON.stringify(gg) : null),
-                    publish: (ev) => {
-                      ctlStream.publish(ev);
-                    },
+                    publish: (ev) => ctlStream.publish(ev),
                   });
-                }
+                });
                 break;
-              case "cancel":
+              }
+              case "cancel": {
+                const g = sess.goal;
                 if (g) {
-                  session.currentAbort?.abort();
-                  ctlStream.publish(clearedEvent(g.stats));
-                  session.goal = undefined;
-                  saveSessionGoal(session.sessionId, null);
+                  if (g.status === "active" && sess.currentAbortOwner === "goal") {
+                    sess.currentAbort?.abort();
+                  }
+                  ctlStream.publish(clearedEvent(g.stats, g.transportTurnId));
+                  sess.goal = undefined;
+                  saveSessionGoal(sess.sessionId, null);
                 }
                 break;
+              }
             }
             break;
           }
@@ -1437,7 +1833,6 @@ export function createMessageHandler(
             // session 级 abort:断线前启动的 turn 也能被重连后的新连接停止(D-P14-3)
             if (session?.currentAbort) {
               session.currentAbort.abort();
-              session.currentAbort = undefined;
             }
             break;
           }

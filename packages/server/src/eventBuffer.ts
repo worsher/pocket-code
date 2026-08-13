@@ -82,6 +82,13 @@ class SessionEventStreamImpl implements SessionEventStream {
     if (!first || (first.ev.seq as number) > fromSeq + 1) return null;
     return this.entries.filter((e) => (e.ev.seq as number) > fromSeq).map((e) => e.ev);
   }
+
+  /** Permanently detach a deleted session from every old transport reference. */
+  dispose(): void {
+    this.entries = [];
+    this.totalBytes = 0;
+    this.subscribers.clear();
+  }
 }
 
 const streams = new Map<string, SessionEventStreamImpl>();
@@ -94,6 +101,15 @@ export function getSessionStream(sessionId: string): SessionEventStream {
     streams.set(sessionId, stream);
   }
   return stream;
+}
+
+/** Remove buffered events and subscribers when the owning session is deleted. */
+export function deleteSessionStream(sessionId: string): boolean {
+  const stream = streams.get(sessionId);
+  if (!stream) return false;
+  stream.dispose();
+  streams.delete(sessionId);
+  return true;
 }
 
 /** 测试辅助:清空注册表(隔离用)。 */
